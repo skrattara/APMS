@@ -2,7 +2,10 @@ import { useCallback, useEffect, useState, type ReactNode } from 'react';
 import { Modal, Platform, Pressable, Share, StyleSheet, Text, View } from 'react-native';
 
 import { useAuth } from '@/auth/AuthProvider';
-import { Badge, Button, Card, DataTable, Field, MetricCard, PageState, SelectField, Toast, useToast } from '@/components/ui';
+import { supabase } from '@/services/supabase';
+import { Badge, Button, Card, DataTable, Field, MetricCard, PageState, SelectField, useToast } from '@/components/ui';
+import { useAnalyticsFilters } from '@/components/charts/AnalyticsFilters';
+import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
 import {
   academicReportCsv, loadAcademicWorkspace, loadDepartmentSubjects, loadSubjectRequests,
   manageSubject, reviewSubjectRequest, type AcademicSubject, type AcademicSubjectRequest, type AcademicWorkspace,
@@ -36,6 +39,19 @@ function useWorkspace(userId: string) {
   const [data, setData] = useState<AcademicWorkspace | null>(null); const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [version, setVersion] = useState(0);
   const refresh = useCallback(() => setVersion((value) => value + 1), []);
   useEffect(() => { let active = true; setLoading(true); setError(''); loadAcademicWorkspace(userId).then((value) => active && setData(value)).catch((cause) => active && setError(cause instanceof Error ? cause.message : 'Unable to load academic records.')).finally(() => active && setLoading(false)); return () => { active = false; }; }, [userId, version]);
+  useEffect(() => {
+    const client = supabase;
+    if (!userId || !client) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleRefresh = () => { if (timer) clearTimeout(timer); timer = setTimeout(refresh, 300); };
+    const channel = client.channel(`academic-workspace-${userId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
+    for (const table of ['class_records', 'enrollments', 'assessment_results', 'attendance_records', 'performance_evaluations']) {
+      channel.on('postgres_changes', { event: '*', schema: 'public', table }, scheduleRefresh);
+    }
+    channel.subscribe();
+    const poll = setInterval(refresh, 60_000);
+    return () => { clearInterval(poll); if (timer) clearTimeout(timer); void client.removeChannel(channel); };
+  }, [refresh, userId]);
   return { data, loading, error, refresh };
 }
 
@@ -45,7 +61,7 @@ export function AcademicAdminPortalContent({ screen }: { screen: string }) {
   if (state.loading) return <PageState kind="loading" title="Loading Academic Admin workspace" message="Retrieving department-scoped monitoring records." />;
   if (state.error || !state.data) return <PageState kind="error" title="Academic data unavailable" message={state.error || 'No department scope is assigned.'} action={<Button label="Retry" onPress={state.refresh} />} />;
   const props = { data: state.data, refresh: state.refresh, userId: user.id, toast };
-  return <View style={styles.screen}>{toast.message ? <Toast message={toast.message} onClose={toast.clear} /> : null}
+  return <View style={styles.screen}>
     {screen === 'overview' ? <Overview {...props} /> : null}
     {screen === 'units' ? <Units {...props} /> : null}
     {screen === 'subjects' ? <Subjects {...props} /> : null}
@@ -64,7 +80,16 @@ function allStudents(data: AcademicWorkspace) { return data.classes.flatMap((ite
 
 function Overview({ data }: Props) {
   const rows = allStudents(data); const unique = new Set(rows.map(({ student }) => student.studentId)); const alertRows = rows.filter((row) => row.risk !== 'low'); const scores = rows.flatMap((row) => row.score == null ? [] : [row.score]);
-  return <><Heading title="Academic Administration Dashboard" subtitle={`Live, department-scoped monitoring for ${data.department?.name ?? 'your assigned academic unit'}. Official grades remain in SWU SIS.`} /><View style={styles.metrics}><MetricCard label="Active classes" value={String(data.classes.length)} /><MetricCard label="Students monitored" value={String(unique.size)} tone="info" /><MetricCard label="At-risk class records" value={String(alertRows.length)} tone={alertRows.length ? 'danger' : 'success'} /><MetricCard label="Average current standing" value={scores.length ? `${(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1)}%` : '—'} tone="success" /></View><Card><Text style={styles.cardTitle}>Priority monitoring</Text>{alertRows.length ? <DataTable columns={['Student', 'Class', 'Current', 'Attendance', 'Risk']} rows={alertRows.slice(0, 15).map((row) => [row.student.name, `${row.item.code} · ${row.item.section}`, row.score == null ? 'Missing' : `${row.score.toFixed(1)}%`, row.rate == null ? 'No data' : `${row.rate.toFixed(0)}%`, `${row.risk[0].toUpperCase()}${row.risk.slice(1)} Risk`])} /> : <PageState kind="empty" title="No active alerts" message="Alerts appear when department records indicate performance or attendance concern." />}</Card></>;
+  const chartRecords = rows.flatMap((row) => row.score == null ? [] : [{ id: row.student.enrollmentId, label: row.student.name, score: row.score, risk: row.risk, classification: summarizeEnrollmentStanding(row.item.workspace, row.student.enrollmentId).remarks, category: `${row.item.code} · ${row.item.section}`, timestamp: row.item.workspace.assessments.at(-1)?.assessmentDate }]);
+  const filters = useAnalyticsFilters(chartRecords);
+  const visibleIds = new Set(filters.filtered.map((record) => record.id));
+  const scoreByClass = data.classes.flatMap((item) => {
+    const values = filters.filtered.filter((record) => record.category === `${item.code} · ${item.section}`).map((record) => record.score);
+    return values.length ? [{ label: `${item.code} ${item.section}`, value: values.reduce((sum, value) => sum + value, 0) / values.length }] : [];
+  });
+  const riskCounts = ['low', 'medium', 'high'].map((level) => ({ label: `${level[0].toUpperCase()}${level.slice(1)}`, value: filters.filtered.filter((row) => row.risk === level).length }));
+  const filteredAlerts = alertRows.filter((row) => visibleIds.has(row.student.enrollmentId));
+  return <><Heading title="Academic Administration Dashboard" subtitle={`Live, department-scoped monitoring for ${data.department?.name ?? 'your assigned academic unit'}. Official grades remain in SWU SIS.`} /><View style={styles.metrics}><MetricCard label="Active classes" value={String(data.classes.length)} /><MetricCard label="Students monitored" value={String(unique.size)} tone="info" /><MetricCard label="At-risk class records" value={String(alertRows.length)} tone={alertRows.length ? 'danger' : 'success'} /><MetricCard label="Average current standing" value={scores.length ? `${(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1)}%` : '—'} tone="success" /></View>{filters.controls}<View style={styles.analyticsCharts}><VisualizationPanel title="Average score by class" description="Current provisional standing by department class for matching student records." data={scoreByClass} type="bar" suffix="%" /><VisualizationPanel title="Risk distribution" description="Current advisory risk for matching class records." data={riskCounts} type="pie" /></View><Card><Text style={styles.cardTitle}>Priority monitoring</Text>{filteredAlerts.length ? <DataTable columns={['Student', 'Class', 'Current', 'Attendance', 'Risk']} rows={filteredAlerts.slice(0, 15).map((row) => [row.student.name, `${row.item.code} · ${row.item.section}`, row.score == null ? 'Missing' : `${row.score.toFixed(1)}%`, row.rate == null ? 'No data' : `${row.rate.toFixed(0)}%`, `${row.risk[0].toUpperCase()}${row.risk.slice(1)} Risk`])} /> : <PageState kind="empty" title="No active alerts" message="Alerts appear when department records indicate performance or attendance concern." />}</Card></>;
 }
 function Units({ data }: Props) { return <><Heading title="Academic Units" subtitle="Authorized department and program scope for this Academic Admin account." /><Card><DataTable columns={['Department', 'Code', 'Access']} rows={data.department ? [[data.department.name, data.department.code, 'Authorized']] : []} /></Card><Card><Text style={styles.cardTitle}>Programs</Text>{data.programs.length ? <DataTable columns={['Program', 'Code', 'Status']} rows={data.programs.map((program) => [program.name, program.code, 'Active'])} /> : <PageState kind="empty" title="No active programs" message="No program records are available in this department." />}</Card></>; }
 function Classes({ data }: Props) { return <><Heading title="Classes Overview" subtitle="Read-only operational oversight of classes in your authorized department." /><Card>{data.classes.length ? <DataTable columns={['Subject', 'Section', 'Term', 'Students', 'Average', 'At risk']} rows={data.classes.map((item) => { const rows = item.workspace.students; const values = rows.flatMap((student) => { const value = standing(item.workspace, student.enrollmentId); return value == null ? [] : [value]; }); return [`${item.code} · ${item.title}`, item.section, item.term, String(rows.length), values.length ? `${(values.reduce((a, b) => a + b, 0) / values.length).toFixed(1)}%` : '—', String(rows.filter((student) => risk(item.workspace, student.enrollmentId) !== 'low').length)]; })} /> : <PageState kind="empty" title="No active classes" message="Faculty-created monitoring classes in this department will appear here." />}</Card></>; }
@@ -75,7 +100,30 @@ function Criteria({ data, userId, refresh, toast }: Props) {
   const submit = async () => { if (!classId) return; setSaving(true); try { await saveCriteria(classId, userId, name, 80, swunextCriteriaNodes); toast.show('A SWUNEXT criteria version was saved for this class.'); refresh(); } catch (cause) { toast.show(cause instanceof Error ? cause.message : 'Criteria could not be saved.'); } finally { setSaving(false); } };
   return <><Heading title="Evaluation Criteria" subtitle="Create transparent, versioned SWUNEXT monitoring criteria for an authorized class." /><Card style={styles.form}><SelectField label="Class" value={classId} options={data.classes.map((item) => ({ label: `${item.code} · ${item.section}`, value: item.id }))} onChange={setClassId} /><Field label="Criteria name" value={name} onChangeText={setName} /><DataTable columns={['Component', 'Weight']} rows={swunextCriteriaNodes.map((node) => [node.label, `${node.weight}%`])} /><Text style={styles.help}>Total: 100%. Passing requires at least 80% final grade and at least 80% mastery. P1/P2 are running views; SWU SIS remains authoritative for official grades.</Text><Button label="Save SWUNEXT criteria version" loading={saving} onPress={() => void submit()} /></Card></>;
 }
-function Analytics({ data, toast }: Props) { const rows = allStudents(data); const summaries = rows.map((row) => summarizeEnrollmentStanding(row.item.workspace, row.student.enrollmentId)); const exportCsv = async () => { const csv = academicReportCsv(data); if (Platform.OS === 'web') { const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'apms-academic-monitoring-report.csv'; anchor.click(); URL.revokeObjectURL(url); } else await Share.share({ message: csv }); toast.show('Department monitoring report exported.'); }; const low = rows.filter((row) => row.risk === 'low').length; const medium = rows.filter((row) => row.risk === 'medium').length; const high = rows.filter((row) => row.risk === 'high').length; const passing = summaries.filter((summary) => summary.remarks === 'passing').length; const failing = summaries.filter((summary) => summary.remarks === 'failing').length; return <><Heading title="Analytics & Reports" subtitle="Department-level analytics and provisional SWUNEXT passing-rule comparisons from authorized APMS data." action={<Button label="Export CSV" onPress={() => void exportCsv()} />} /><View style={styles.metrics}><MetricCard label="Passing rule met" value={String(passing)} tone="success" /><MetricCard label="Below rule" value={String(failing)} tone="warning" /><MetricCard label="Medium risk" value={String(medium)} tone="warning" /><MetricCard label="High risk" value={String(high)} tone="danger" /></View><Card><Text style={styles.cardTitle}>Class and subject comparison</Text>{data.classes.length ? <DataTable columns={['Subject / class', 'Recorded standings', 'Passing rule met', 'Below rule', 'Risk alerts']} rows={data.classes.map((item) => { const classRows = allStudents({ ...data, classes: [item] }); const classSummaries = classRows.map((row) => summarizeEnrollmentStanding(row.item.workspace, row.student.enrollmentId)); const classRecorded = classSummaries.filter((summary) => summary.finalGrade != null || summary.p3 != null || summary.mastery != null); return [`${item.code} · ${item.section}`, String(classRecorded.length), String(classSummaries.filter((summary) => summary.remarks === 'passing').length), String(classSummaries.filter((summary) => summary.remarks === 'failing').length), String(classRows.filter((row) => row.risk !== 'low').length)]; })} /> : <PageState kind="empty" title="No comparison data" message="Class comparisons appear after monitoring classes are created." />}<Text style={styles.help}>Passing requires both 80% final grade and 80% mastery. P1/P2 remain running cumulative views only. These are provisional APMS indicators, not official SIS pass/fail grades. Low-risk records: {low}.</Text></Card></>; }
+function Analytics({ data, toast }: Props) {
+  const rows = allStudents(data);
+  const records = rows.flatMap((row) => {
+    const summary = summarizeEnrollmentStanding(row.item.workspace, row.student.enrollmentId);
+    const score = row.score;
+    return score == null ? [] : [{ id: row.student.enrollmentId, label: row.student.name, score, risk: row.risk, classification: summary.remarks, category: `${row.item.code} · ${row.item.section}`, timestamp: row.item.workspace.assessments.at(-1)?.assessmentDate }];
+  });
+  const filters = useAnalyticsFilters(records);
+  const visible = filters.filtered;
+  const exportCsv = async () => { const csv = academicReportCsv(data); if (Platform.OS === 'web') { const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'apms-academic-monitoring-report.csv'; anchor.click(); URL.revokeObjectURL(url); } else await Share.share({ message: csv }); toast.show('Department monitoring report exported.'); };
+  const low = visible.filter((row) => row.risk === 'low').length;
+  const medium = visible.filter((row) => row.risk === 'medium').length;
+  const high = visible.filter((row) => row.risk === 'high').length;
+  const passing = visible.filter((row) => row.classification === 'passing').length;
+  const failing = visible.filter((row) => row.classification === 'failing').length;
+  const scoreByClass = data.classes.map((item) => {
+    const classLabel = `${item.code} · ${item.section}`;
+    const scores = visible.filter((row) => row.category === classLabel).map((row) => row.score);
+    return scores.length ? { label: `${item.code} ${item.section}`, value: scores.reduce((sum, score) => sum + score, 0) / scores.length } : null;
+  }).filter((item): item is { label: string; value: number } => item !== null);
+  const passFail = [{ label: 'Meets rule', value: passing }, { label: 'Below or incomplete', value: visible.length - passing }];
+  const scoreDistribution = visible.map((item) => ({ label: item.label, value: item.score, kind: 'continuous' as const }));
+  return <><Heading title="Analytics & Reports" subtitle="Department-level analytics and provisional SWUNEXT passing-rule comparisons from authorized APMS data." action={<Button label="Export CSV" onPress={() => void exportCsv()} />} />{filters.controls}<View style={styles.metrics}><MetricCard label="Passing rule met" value={String(passing)} tone="success" /><MetricCard label="Below rule" value={String(failing)} tone="warning" /><MetricCard label="Medium risk" value={String(medium)} tone="warning" /><MetricCard label="High risk" value={String(high)} tone="danger" /></View><View style={styles.analyticsCharts}><VisualizationPanel title="Average score by class" description="Mean current SWUNEXT standing by class for records matching these filters." data={scoreByClass} type="bar" suffix="%" /><VisualizationPanel title="Student score histogram" description="Filtered continuous scores grouped into score bands." data={scoreDistribution} type="histogram" suffix="%" /><VisualizationPanel title="Risk distribution" description={`Low ${low} · Medium ${medium} · High ${high}`} data={[{ label: 'Low', value: low }, { label: 'Medium', value: medium }, { label: 'High', value: high }]} type="pie" /><VisualizationPanel title="Passing rule status" description="Binary pass and not yet passing classification." data={passFail} type="pie" /></View><Card><Text style={styles.cardTitle}>Class and subject comparison</Text>{data.classes.length ? <DataTable columns={['Subject / class', 'Recorded standings', 'Passing rule met', 'Below rule', 'Risk alerts']} rows={data.classes.map((item) => { const classRows = allStudents({ ...data, classes: [item] }); const classSummaries = classRows.map((row) => summarizeEnrollmentStanding(row.item.workspace, row.student.enrollmentId)); const classRecorded = classSummaries.filter((summary) => summary.finalGrade != null || summary.p3 != null || summary.mastery != null); return [`${item.code} · ${item.section}`, String(classRecorded.length), String(classSummaries.filter((summary) => summary.remarks === 'passing').length), String(classSummaries.filter((summary) => summary.remarks === 'failing').length), String(classRows.filter((row) => row.risk !== 'low').length)]; })} /> : <PageState kind="empty" title="No comparison data" message="Class comparisons appear after monitoring classes are created." />}<Text style={styles.help}>Passing requires both 80% final grade and 80% mastery. P1/P2 remain running views. These are provisional APMS indicators, not official SIS pass/fail grades. Filters apply to KPI and chart summaries; the CSV includes all authorized department rows.</Text></Card></>;
+}
 function Subjects({ data, toast, refresh }: Props) {
   const [subjects, setSubjects] = useState<AcademicSubject[]>([]);
   const [requests, setRequests] = useState<AcademicSubjectRequest[]>([]);
@@ -367,5 +415,6 @@ const styles = StyleSheet.create({
   dialogContent: { gap: 12 },
   dialogHeader: { fontSize: 16, fontWeight: '600', color: colors.text },
   rationaleCard: { backgroundColor: '#F8FAFC', padding: 12 },
+  analyticsCharts: { flexDirection: 'row', flexWrap: 'wrap', gap: 14 },
   close: { fontSize: 28, color: colors.textMuted },
 });

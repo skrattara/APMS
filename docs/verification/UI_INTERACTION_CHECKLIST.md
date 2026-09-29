@@ -30,22 +30,22 @@ Status is conservative: **Complete** requires a real backend/Auth operation, ser
 | Grader | overview | Dashboard | Metrics/attention | Assigned work and risk summary | scoped aggregates | assigned submissions | Partial | none | Generic staff metrics/hard-coded chart |
 | Grader | grades | Workflow | Collect/edit/submit | Persist results and transition once | assessments/results/submissions | assigned grader | Not implemented | none | Form and lifecycle missing |
 | Grader | grades | Workflow | Review status | Display faculty review | submissions/reviews read | assigned grader | Partial | none | Generic table only |
-| Faculty | overview | Dashboard | Cards/charts | Assigned-class aggregates | scoped counts/evaluations | assigned classes | Partial | none | Cards real; charts not |
+| Faculty | overview | Dashboard | Cards/charts | Assigned-class aggregates | scoped counts/evaluations + Realtime | assigned classes | Partial | none | Live filtered score trend and risk chart with PNG export; automated interaction coverage missing |
 | Faculty | students | Students | Search/detail/add/import | Manage assigned roster | students/enrollments/import | assigned classes | Not implemented | modal-only demo E2E | Read only |
 | Faculty | records | Class records | CRUD/version/export | Manage assigned records | class records/versions | assigned classes | Not implemented | none | Read only |
 | Faculty | feedback | Feedback | Compose/send/history | Persist, deliver, notify, audit | feedback/delivery/notifications | assigned classes | Not implemented | none | Read only |
-| Faculty | analytics | Analytics | Filters/charts/export | Query scoped aggregates/report | evaluation/result queries | assigned analytics | Not implemented | none | Hard-coded demo |
+| Faculty | analytics | Analytics | Filters/charts/export | Query scoped aggregates/report | evaluation/result queries + Realtime | assigned analytics | Partial | none | Live filtered score, risk, pass-rule, and assessment charts; PNG/CSV export; automated interaction coverage missing |
 | Faculty | assistant | Assistant | Send | Answer from authorized APMS data | approved AI service | scoped data | Blocked | none | No approved model/provider |
-| Dean | overview | Dashboard | Cards/charts | Department aggregates | scoped counts/evaluations | department | Partial | none | Cards real; charts not |
+| Dean | overview | Dashboard | Cards/charts | Department aggregates | scoped counts/evaluations + Realtime | department | Partial | none | Live filtered dashboard charts and PNG export; automated interaction coverage missing |
 | Dean | students | Students | CRUD/import/unenroll | Manage department roster | students/enrollments/import | department manage | Not implemented | none | Read only |
 | Dean | faculty | Faculty | Invite/assign/edit | Manage faculty assignments | Auth worker/profiles/assignments | department manage | Not implemented | none | Read only |
 | Dean | records | Class records | CRUD/version/export | Manage department records | records/versions | department manage | Not implemented | none | Read only |
 | Dean | criteria | Criteria | CRUD/version/publish | Validate 100% and activate version | criteria sets/nodes | department manage | Not implemented | none | Read only |
 | Dean | evaluation | Evaluation | Run | Create protected approved-model run | prediction run/worker | department run | Blocked | none | No approved model/provider |
-| Dean | analytics | Analytics | Query/export | Department aggregate report | evaluations/results | department analytics | Not implemented | none | Hard-coded demo |
+| Dean | analytics | Analytics | Filters/charts/export | Department aggregate report | evaluations/results + Realtime | department analytics | Partial | none | Filtered class, risk, and pass-rule charts with PNG export; CSV remains authorized department report; automated interaction coverage missing |
 | Dean | events | Events | CRUD/audience notify | Persist event and notifications | events/notifications/audit | department events | Not implemented | none | Read only |
 | Dean | assistant | Assistant | Send | Authorized data answer | approved AI service | department scope | Blocked | none | No approved model/provider |
-| Operator | overview | Dashboard | User metrics/activity | Real technical summary | profiles/audit queries | dashboard/logs | Partial | none | Metrics real; activity not |
+| Operator | overview | Dashboard | User metrics/activity | Real technical summary | profiles/audit queries + Realtime | dashboard/logs | Partial | none | Role/status filtered account charts, audit trend, and PNG export; automated interaction coverage missing |
 | Operator | roles | Roles | CRUD/assignment | Persist permission changes safely | roles/role permissions/user roles | roles.manage | Not implemented | none | Read only |
 | Operator | logs | Logs | Filter/detail/export | Server filter and auditable export | audit/access/system logs | logs.read/export | Not implemented | none | Basic audit read only |
 | Operator | system | Settings | General/Auth/Integration save/test | Persist every displayed setting | system settings/integrations | system.configure | Partial | none | Session timeout only |

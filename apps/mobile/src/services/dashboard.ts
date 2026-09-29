@@ -1,5 +1,5 @@
 import type { Role } from "@apms/domain";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 
 import { useAuth } from "@/auth/AuthProvider";
 import { supabase } from "./supabase";
@@ -86,6 +86,8 @@ async function loadSystemAdmin(): Promise<DashboardMetrics> {
 
 export function useDashboardMetrics(role: Role) {
   const { demoMode, user } = useAuth();
+  const [version, setVersion] = useState(0);
+  const refresh = useCallback(() => setVersion((value) => value + 1), []);
   const [metrics, setMetrics] = useState<DashboardMetrics>(
     demoStaff,
   );
@@ -123,6 +125,25 @@ export function useDashboardMetrics(role: Role) {
     return () => {
       active = false;
     };
-  }, [demoMode, role, user]);
+  }, [demoMode, role, user, version]);
+
+  useEffect(() => {
+    const client = supabase;
+    if (demoMode || !client || !user) return;
+    const tables = role === "system_admin"
+      ? ["profiles"]
+      : ["students", "class_records", "performance_evaluations", "assessment_results"];
+    const channel = client.channel(`dashboard-${user.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
+    for (const table of tables) {
+      channel.on("postgres_changes", { event: "*", schema: "public", table }, refresh);
+    }
+    channel.subscribe();
+    const poll = setInterval(refresh, 60_000);
+    return () => {
+      clearInterval(poll);
+      void client.removeChannel(channel);
+    };
+  }, [demoMode, refresh, role, user]);
+
   return { metrics, error };
 }

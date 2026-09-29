@@ -4,7 +4,10 @@ import * as DocumentPicker from 'expo-document-picker';
 import * as XLSX from 'xlsx';
 
 import { useAuth } from '@/auth/AuthProvider';
-import { Badge, Button, Card, ConfirmDialog, DataTable, Field, MetricCard, PageState, SearchFilter, SelectField, Toast, useToast } from '@/components/ui';
+import { supabase } from '@/services/supabase';
+import { Badge, Button, Card, ConfirmDialog, DataTable, Field, MetricCard, PageState, SearchFilter, SelectField, useToast } from '@/components/ui';
+import { useAnalyticsFilters } from '@/components/charts/AnalyticsFilters';
+import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
 import {
   addStudentToClass, createAssessment, createAttendanceSession, createFacultyClass, exportClassCsv,
   importRosterCsv, importRosterExcel, loadClassWorkspace, loadFacultyClasses, loadFacultyReferenceData, loadMySubjectRequests, removeStudentsFromClass,
@@ -22,7 +25,33 @@ const emptyStudentForm: StudentFormState = { institutionalId: '', email: '', fir
 type AssessmentFormState = { title: string; component: SwunextAssessmentComponent; maximumScore: string; moduleNumber: string; date: string; gradingPeriod: string; source: 'manual' | 'csv' };
 const emptyAssessmentForm: AssessmentFormState = { title: '', component: 'wrap_up_quiz', maximumScore: '100', moduleNumber: '1', date: new Date().toISOString().slice(0, 10), gradingPeriod: 'P1', source: 'manual' };
 
+function buildAssessmentTrend(workspace: ClassWorkspace, visibleIds: Set<string | undefined>) {
+  const points = workspace.assessments.flatMap((assessment) => {
+    const values = workspace.students.filter((student) => visibleIds.has(student.enrollmentId)).flatMap((student) => {
+      const score = workspace.scores[`${student.enrollmentId}:${assessment.id}`];
+      return score == null ? [] : [score / assessment.maximumScore * 100];
+    });
+    return values.length ? [{
+      label: assessment.assessmentDate.slice(5),
+      value: values.reduce((sum, value) => sum + value, 0) / values.length,
+      kind: 'timeseries' as const,
+      timestamp: assessment.assessmentDate,
+      assessmentTitle: assessment.title,
+    }] : [];
+  });
+  const labelCounts = new Map<string, number>();
+  for (const point of points) labelCounts.set(point.label, (labelCounts.get(point.label) ?? 0) + 1);
+  return points.map(({ assessmentTitle, ...point }) => ({
+    ...point,
+    label: (labelCounts.get(point.label) ?? 0) > 1
+      ? `${point.label} · ${assessmentTitle.length > 14 ? `${assessmentTitle.slice(0, 12)}…` : assessmentTitle}`
+      : point.label,
+    category: assessmentTitle,
+  }));
+}
+
 function useFacultyWorkspace() {
+  const { user } = useAuth();
   const [classes, setClasses] = useState<FacultyClass[]>([]);
   const [references, setReferences] = useState<FacultyReferenceData>({ subjects: [], terms: [], programs: [] });
   const [selectedClassId, setSelectedClassId] = useState('');
@@ -46,6 +75,22 @@ function useFacultyWorkspace() {
       .finally(() => active && setLoading(false));
     return () => { active = false; };
   }, [version, selectedClassId]);
+  useEffect(() => {
+    const client = supabase;
+    if (!user || !client) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleRefresh = () => {
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(refresh, 300);
+    };
+    const channel = client.channel(`faculty-workspace-${user.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
+    for (const table of ['enrollments', 'assessment_results', 'attendance_records', 'attendance_sessions', 'performance_evaluations', 'performance_predictions']) {
+      channel.on('postgres_changes', { event: '*', schema: 'public', table }, scheduleRefresh);
+    }
+    channel.subscribe();
+    const poll = setInterval(refresh, 60_000);
+    return () => { clearInterval(poll); if (timer) clearTimeout(timer); void client.removeChannel(channel); };
+  }, [refresh, user]);
   return { classes, references, selectedClassId, setSelectedClassId, workspace, loading, error, refresh };
 }
 
@@ -57,7 +102,6 @@ export function FacultyLivePortalContent({ screen }: { screen: string }) {
   const props = { ...state, toast };
   return (
     <View style={styles.screen}>
-      {toast.message ? <Toast message={toast.message} onClose={toast.clear} /> : null}
       {screen === 'overview' ? <Overview {...props} /> : null}
       {screen === 'classes' ? <Classes {...props} /> : null}
       {screen === 'students' ? <Students {...props} /> : null}
@@ -117,18 +161,28 @@ function riskFor(workspace: ClassWorkspace, enrollmentId: string) {
 }
 
 function Overview(props: StateProps) {
-  const atRisk = props.workspace.students.filter((student) => riskFor(props.workspace, student.enrollmentId) !== 'low');
-  const standings = props.workspace.students.flatMap((student) => { const value = currentStanding(props.workspace, student.enrollmentId); return value == null ? [] : [value]; });
+  const overviewRecords = props.workspace.students.flatMap((student) => {
+    const value = currentStanding(props.workspace, student.enrollmentId);
+    return value == null ? [] : [{ id: student.enrollmentId, label: student.name, score: value, risk: riskFor(props.workspace, student.enrollmentId), classification: summarizeEnrollmentStanding(props.workspace, student.enrollmentId).remarks, category: student.section || 'Class', timestamp: props.workspace.assessments.at(-1)?.assessmentDate }];
+  });
+  const filters = useAnalyticsFilters(overviewRecords);
+  const visibleIds = new Set(filters.filtered.map((item) => item.id));
+  const atRisk = props.workspace.students.filter((student) => visibleIds.has(student.enrollmentId) && riskFor(props.workspace, student.enrollmentId) !== 'low');
+  const standings = filters.filtered.map((item) => item.score);
   const average = standings.length ? standings.reduce((sum, value) => sum + value, 0) / standings.length : 0;
+  const riskCounts = ['low', 'medium', 'high'].map((risk) => ({ label: `${risk[0].toUpperCase()}${risk.slice(1)}`, value: filters.filtered.filter((student) => student.risk === risk).length }));
+  const trend = buildAssessmentTrend(props.workspace, visibleIds);
   return <>
     <Heading title="Faculty Dashboard" subtitle="Live records from your Supabase-assigned classes. Values are provisional monitoring data, not official SIS grades." />
     <View style={styles.metrics}>
       <MetricCard label="Active classes" value={String(props.classes.length)} />
-      <MetricCard label="Students monitored" value={String(props.workspace.students.length)} tone="info" />
+      <MetricCard label="Students monitored" value={String(filters.filtered.length)} tone="info" />
       <MetricCard label="Requiring attention" value={String(atRisk.length)} tone={atRisk.length ? 'danger' : 'success'} />
       <MetricCard label="Provisional average" value={standings.length ? `${average.toFixed(1)}%` : '—'} tone="success" />
     </View>
     <ClassSelect {...props} />
+    {filters.controls}
+    <View style={styles.analyticsCharts}><VisualizationPanel title="Class score trend" description="Average assessment percentage in the selected class." data={trend} type="line" suffix="%" /><VisualizationPanel title="Risk distribution" description="Current advisory risk across the class roster." data={riskCounts} type="pie" /></View>
     <Card><Text style={styles.cardTitle}>Students Requiring Attention</Text>{atRisk.length ? <DataTable columns={['Student', 'P3 Effort', 'Mastery', 'Final', 'Attendance', 'Risk', 'Reason']} rows={atRisk.map((student) => {
       const summary = summarizeEnrollmentStanding(props.workspace, student.enrollmentId); const attendance = attendanceRate(props.workspace, student.enrollmentId); const risk = riskFor(props.workspace, student.enrollmentId);
       return [student.name, summary.p3 == null ? 'Missing' : `${summary.p3.toFixed(1)}%`, summary.mastery == null ? 'Missing' : `${summary.mastery.toFixed(1)}%`, summary.finalGrade == null ? 'Incomplete' : `${summary.finalGrade.toFixed(1)}%`, attendance == null ? 'No sessions' : `${attendance.toFixed(0)}%`, `${risk[0].toUpperCase()}${risk.slice(1)} Risk`, summary.remarks === 'failing' ? 'Below SWUNEXT passing rule' : attendance != null && attendance < 80 ? 'Attendance pattern' : 'Missing assessments'];
@@ -1228,11 +1282,24 @@ function StudentDetail({ student, workspace, onClose }: { student: RosterStudent
 }
 
 function Analytics(props: StateProps) {
-  const low = props.workspace.students.filter((student) => riskFor(props.workspace, student.enrollmentId) === 'low').length; const medium = props.workspace.students.filter((student) => riskFor(props.workspace, student.enrollmentId) === 'medium').length; const high = props.workspace.students.length - low - medium;
-  const summaries = props.workspace.students.map((student) => summarizeEnrollmentStanding(props.workspace, student.enrollmentId));
-  const passing = summaries.filter((summary) => summary.remarks === 'passing').length;
+  const analyticsRecords = props.workspace.students.flatMap((student) => {
+    const summary = summarizeEnrollmentStanding(props.workspace, student.enrollmentId);
+    const score = summary.finalGrade ?? summary.p3 ?? summary.effortfulLearning ?? summary.mastery;
+    return score == null ? [] : [{ id: student.enrollmentId, label: student.name, score, risk: riskFor(props.workspace, student.enrollmentId), classification: summary.remarks, category: student.section ?? 'Class', timestamp: props.workspace.assessments.at(-1)?.assessmentDate }];
+  });
+  const filters = useAnalyticsFilters(analyticsRecords);
+  const visible = filters.filtered;
+  const summaries = visible.map((item) => item.classification);
+  const passing = summaries.filter((value) => value === 'passing').length;
+  const low = visible.filter((item) => item.risk === 'low').length;
+  const medium = visible.filter((item) => item.risk === 'medium').length;
+  const high = visible.filter((item) => item.risk === 'high').length;
   const exportCsv = async () => { const csv = exportClassCsv(props.workspace); if (Platform.OS === 'web') { const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'apms-class-report.csv'; anchor.click(); URL.revokeObjectURL(url); } else await Share.share({ message: csv }); props.toast.show('Class report exported as CSV.'); };
-  return <><Heading title="Analytics and Reports" subtitle="Live class monitoring summary from SWUNEXT scores, attendance, and advisory risk data." action={<Button label="Export CSV" onPress={() => void exportCsv()} />} /><ClassSelect {...props} /><View style={styles.metrics}><MetricCard label="Passing rule met" value={String(passing)} tone="success" /><MetricCard label="Below rule" value={String(summaries.filter((summary) => summary.remarks === 'failing').length)} tone="warning" /><MetricCard label="High risk" value={String(high)} tone="danger" /><MetricCard label="Assessments" value={String(props.workspace.assessments.length)} tone="info" /></View><Card><Text style={styles.help}>P1 and P2 are running cumulative views only. Final grade uses P3 effortful learning at 55% and FE mastery at 45%. Exports contain APMS monitoring data only and are not SIS submission files. Low risk: {low}; medium risk: {medium}.</Text></Card></>;
+  const scores = visible.map((item) => ({ label: item.label, value: item.score, kind: 'continuous' as const }));
+  const visibleIds = new Set(visible.map((item) => item.id));
+  const assessmentTrend = buildAssessmentTrend(props.workspace, visibleIds);
+  const passFail = [{ label: 'Meets rule', value: passing }, { label: 'Below or incomplete', value: visible.length - passing }];
+  return <><Heading title="Analytics and Reports" subtitle="Live class monitoring summary from SWUNEXT scores, attendance, and advisory risk data." action={<Button label="Export CSV" onPress={() => void exportCsv()} />} /><ClassSelect {...props} />{filters.controls}<View style={styles.metrics}><MetricCard label="Passing rule met" value={String(passing)} tone="success" /><MetricCard label="Below rule" value={String(visible.filter((item) => item.classification === 'failing').length)} tone="warning" /><MetricCard label="High risk" value={String(high)} tone="danger" /><MetricCard label="Assessments" value={String(props.workspace.assessments.length)} tone="info" /></View><View style={styles.analyticsCharts}><VisualizationPanel title="Student score histogram" description="Filtered continuous SWUNEXT scores grouped into score bands." data={scores} type="histogram" suffix="%" /><VisualizationPanel title="Risk distribution" description={`Low ${low} · Medium ${medium} · High ${high}`} data={[{ label: 'Low', value: low }, { label: 'Medium', value: medium }, { label: 'High', value: high }]} type="pie" /><VisualizationPanel title="Passing rule status" description="Binary pass and not yet passing classification." data={passFail} type="pie" /></View><VisualizationPanel title="Assessment trend" description="Mean assessment score over time for students matching these filters." data={assessmentTrend} type="line" suffix="%" /><Card><Text style={styles.help}>P1 and P2 are running cumulative views only. Final grade uses P3 effortful learning at 55% and FE mastery at 45%. Exports contain APMS monitoring data only and are not SIS submission files.</Text></Card></>;
 }
 
 function Dialog({ visible, title, onClose, children, footer }: { visible: boolean; title: string; onClose: () => void; children: ReactNode; footer?: ReactNode }) {
@@ -1259,5 +1326,6 @@ const styles = StyleSheet.create({
   summaryCell: { flex: 1, gap: 4 }, badgeRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 }, scoreField: { width: 120 }, saveBar: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 12, paddingTop: 12 }, saveState: { fontSize: 13, fontWeight: '700', color: colors.text }, statusField: { width: 170 }, overlay: { flex: 1, backgroundColor: '#00000066', alignItems: 'center', justifyContent: 'center', padding: 24 },
   rosterCheckbox: { width: 22, height: 22, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderRadius: 5, borderColor: colors.border }, rosterCheckboxSelected: { backgroundColor: colors.brand, borderColor: colors.brand }, rosterCheckboxMark: { color: colors.surface, fontWeight: '700' }, pagination: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 10, paddingTop: 14 }, paginationText: { color: colors.textMuted, fontSize: 12 }, attendanceToolbar: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8, paddingBottom: 4 }, attendanceRow: { flexDirection: 'row', alignItems: 'center', gap: 10, minHeight: 58, paddingVertical: 6, borderBottomWidth: 1, borderColor: colors.border }, attendanceStatusField: { width: 145 }, inlineStudentSearch: { gap: 6 }, inlineStudentOptions: { maxHeight: 220, borderWidth: 1, borderColor: colors.border, borderRadius: 10 }, inlineStudentOption: { paddingHorizontal: 12, paddingVertical: 9, borderBottomWidth: 1, borderColor: colors.border }, inlineStudentOptionSelected: { backgroundColor: '#F7ECE9' }, inlineStudentOptionText: { color: colors.text, fontSize: 14 }, inlineStudentOptionTextSelected: { color: colors.brand, fontWeight: '700' }, inlineStudentEmpty: { color: colors.textMuted, fontSize: 13, padding: 12, textAlign: 'center' },
   feedbackBox: { minHeight: 150, paddingTop: 10, textAlignVertical: 'top' }, aiPrompt: { color: colors.text, backgroundColor: colors.canvas, borderWidth: 1, borderColor: colors.border, borderRadius: 10, padding: 12, fontSize: 12, lineHeight: 18 },
+  analyticsCharts: { flexDirection: 'row', flexWrap: 'wrap', gap: 14 },
   dialog: { width: '100%', maxWidth: 920, maxHeight: '90%', padding: 22 }, dialogTitle: { fontSize: 19, fontWeight: '700', color: colors.text }, dialogScroll: { flexShrink: 1, marginTop: 16 }, dialogBody: { gap: 14, paddingBottom: 4 }, dialogContent: { gap: 12 }, dialogFooter: { borderTopWidth: 1, borderColor: colors.border, paddingTop: 14, marginTop: 14 }, close: { fontSize: 28, color: colors.textMuted },
 });

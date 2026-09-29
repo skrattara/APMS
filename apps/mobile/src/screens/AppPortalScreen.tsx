@@ -10,8 +10,6 @@ import {
   Button,
   Card,
   ConfirmDialog,
-  DataBarChart,
-  DataLineChart,
   DataTable,
   Field,
   MetricCard,
@@ -19,9 +17,7 @@ import {
   SearchFilter,
   SelectField,
   Tabs,
-  Toast,
   useToast,
-  type ChartDatum,
 } from "@/components/ui";
 import { ROLE_LABELS } from "@/config/navigation";
 import {
@@ -62,6 +58,9 @@ import { FacultyLivePortalContent } from "@/screens/FacultyLivePortalContent";
 import { AcademicAdminPortalContent } from "@/screens/AcademicAdminPortalContent";
 import { SystemAdminPortalContent } from "@/screens/SystemAdminPortalContent";
 import { colors, radius, space } from "@/theme/tokens";
+import { useAnalyticsFilters } from "@/components/charts/AnalyticsFilters";
+import { VisualizationPanel } from "@/components/charts/VisualizationPanel";
+import type { EvaluationRecord } from "@/services/analytics";
 
 type ScreenKind =
   "dashboard" | "table" | "analytics" | "settings" | "assistant" | "security";
@@ -308,9 +307,6 @@ export function AppPortalScreen({
       actions={action}
     hidePageHeader={(liveRolePortal || role === "faculty") && screen !== "settings"}
     >
-      {toast.message ? (
-        <Toast message={toast.message} onClose={toast.clear} />
-      ) : null}
       {role === "faculty" && screen !== "settings" ? (
         demoMode ? <FacultyPortalContent screen={screen} /> : <FacultyLivePortalContent screen={screen} />
       ) : role === "academic_admin" && !demoMode ? (
@@ -567,26 +563,8 @@ function Dashboard({ role }: { role: Role }) {
       {demoMode ? (
         <>
           <View style={styles.columns}>
-            <Card style={styles.chartCard}>
-              <Text style={styles.sectionTitle}>{data.trendTitle}</Text>
-              <Text style={styles.muted}>{data.trendSubtitle}</Text>
-              <DataLineChart
-                data={data.trend}
-                suffix={role === "system_admin" ? "" : "%"}
-              />
-            </Card>
-            <Card style={styles.chartCard}>
-              <Text style={styles.sectionTitle}>
-                {role === "system_admin" ? "User Distribution" : "Risk Distribution"}
-              </Text>
-              <Text style={styles.muted}>
-                Select a bar to inspect its value.
-              </Text>
-              <DataBarChart
-                data={data.risk.map(({ label, value }) => ({ label, value }))}
-                suffix={role === "academic_admin" ? "%" : ""}
-              />
-            </Card>
+            <VisualizationPanel title={data.trendTitle} description={data.trendSubtitle} data={data.trend.map((point) => ({ ...point, kind: "timeseries" as const }))} type="line" suffix={role === "system_admin" ? "" : "%"} />
+            <VisualizationPanel title={role === "system_admin" ? "User Distribution" : "Risk Distribution"} description="Breakdown of the current monitoring data." data={data.risk} type="pie" suffix={role === "academic_admin" ? "%" : ""} />
           </View>
           <Card>
             <Text style={styles.sectionTitle}>{data.tableTitle}</Text>
@@ -716,6 +694,18 @@ function Analytics({ screen }: { screen: string }) {
   const { demoMode } = useAuth();
   const live = useLiveAnalytics();
   const [tab, setTab] = useState("Overview");
+  const series = ANALYTICS_SERIES[tab];
+  const demoRecords: EvaluationRecord[] = series.map((item, index) => ({
+    label: item.label,
+    score: item.value,
+    risk: index % 3 === 0 ? "high" : index % 2 === 0 ? "medium" : "low",
+    classification: "Fictional validation data",
+    category: tab,
+    timestamp: new Date(Date.now() - index * 7 * 86_400_000).toISOString(),
+  }));
+  const demoFilters = useAnalyticsFilters(demoRecords);
+  const filteredSeries = demoFilters.filtered.map((record) => ({ label: record.label, value: record.score }));
+  const filteredHistogram = demoFilters.filtered.map((record) => ({ label: record.label, value: record.score, kind: "continuous" as const }));
   if (!demoMode) {
     if (live.loading)
       return (
@@ -745,16 +735,15 @@ function Analytics({ screen }: { screen: string }) {
     return (
       <LiveAnalyticsContent
         screen={screen}
-        scoreSeries={live.scoreSeries}
-        riskSeries={live.riskSeries}
         metrics={live.metrics}
+        records={live.records}
+        truncated={live.truncated}
       />
     );
   }
-  const series = ANALYTICS_SERIES[tab];
   const average =
-    series.reduce((sum, item) => sum + item.value, 0) /
-    Math.max(series.length, 1);
+    filteredSeries.reduce((sum, item) => sum + item.value, 0) /
+    Math.max(filteredSeries.length, 1);
   return (
     <>
       <Card>
@@ -779,64 +768,71 @@ function Analytics({ screen }: { screen: string }) {
           />
         </View>
       </Card>
-      <Card>
-        <Text style={styles.sectionTitle}>{tab} validation analysis</Text>
-        <Text style={styles.muted}>
-          The chart recalculates from the selected fictional dataset; it is not
-          an AI output.
-        </Text>
-        <DataLineChart data={series} suffix="%" height={230} />
-      </Card>
+      {demoFilters.controls}
+      <View style={styles.columns}>
+        <VisualizationPanel title={`${tab} validation analysis`} description="Fictional validation series; this chart is not an AI output." data={filteredSeries} type={tab === "Risk Factors" ? "pie" : "line"} suffix="%" height={230} />
+        {tab !== "Risk Factors" ? <VisualizationPanel title="Score histogram" description="Filtered fictional scores grouped into percentage bands." data={filteredHistogram} type="histogram" suffix="%" height={230} /> : null}
+      </View>
     </>
   );
 }
 
 function LiveAnalyticsContent({
   screen,
-  scoreSeries,
-  riskSeries,
   metrics,
+  records,
+  truncated,
 }: {
   screen: string;
-  scoreSeries: ChartDatum[];
-  riskSeries: ChartDatum[];
   metrics: LiveAnalytics["metrics"];
+  records: EvaluationRecord[];
+  truncated: boolean;
 }) {
   const title =
     screen === "evaluation"
       ? "Rule-based performance evaluation"
       : "Persisted performance analytics";
+  const filters = useAnalyticsFilters(records);
+  const scoreByDay = new Map<string, { total: number; count: number }>();
+  for (const record of filters.filtered) {
+    if (!record.timestamp) continue;
+    const day = record.timestamp.slice(0, 10);
+    const current = scoreByDay.get(day) ?? { total: 0, count: 0 };
+    current.total += record.score;
+    current.count += 1;
+    scoreByDay.set(day, current);
+  }
+  const filteredScoreSeries = [...scoreByDay.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([day, value]) => ({ label: new Date(`${day}T00:00:00`).toLocaleDateString(undefined, { month: "short", day: "numeric" }), value: value.total / value.count, kind: "timeseries" as const, timestamp: day }));
+  const riskCounts = new Map<string, number>([["Low", 0], ["Medium", 0], ["High", 0], ["Unclassified", 0]]);
+  for (const record of filters.filtered) {
+    const risk = record.risk === "low" ? "Low" : record.risk === "medium" ? "Medium" : record.risk === "high" ? "High" : "Unclassified";
+    riskCounts.set(risk, (riskCounts.get(risk) ?? 0) + 1);
+  }
+  const filteredRiskSeries = [...riskCounts.entries()].map(([label, value]) => ({ label, value }));
+  const filteredScoreDistribution = filters.filtered.map((record) => ({ label: record.label, value: record.score, kind: "continuous" as const }));
+  const average = filters.filtered.length ? filters.filtered.reduce((sum, item) => sum + item.score, 0) / filters.filtered.length : null;
+  const highRisk = filters.filtered.filter((item) => item.risk === "high").length;
   return (
     <>
+      {filters.controls}
+      {truncated ? <Card><Text style={styles.muted}>Charts and filtered metrics use the latest 5,000 evaluation records. The total evaluation count remains complete.</Text></Card> : null}
       <Card>
         <View style={styles.metrics}>
-          <MetricCard label="Evaluated Records" value={metrics.students} />
+          <MetricCard label="Total evaluations" value={metrics.students} />
+          <MetricCard label="Matching Records" value={filters.filtered.length.toLocaleString()} />
           <MetricCard
             label="AI Engine"
             value={metrics.model}
             tone="success"
           />
-          <MetricCard label="Average Score" value={metrics.average} />
-          <MetricCard label="High Risk" value={metrics.highRisk} tone="danger" />
+          <MetricCard label="Average Score" value={average == null ? "—" : `${average.toFixed(1)}%`} />
+          <MetricCard label="High Risk" value={String(highRisk)} tone="danger" />
         </View>
       </Card>
       <View style={styles.columns}>
-        <Card style={styles.chartCard}>
-          <Text style={styles.sectionTitle}>{title}</Text>
-          <Text style={styles.muted}>
-            Deterministic rule-based AI from approved Supabase assessment
-            records.
-          </Text>
-          <DataLineChart data={scoreSeries} suffix="%" height={230} />
-        </Card>
-        <Card style={styles.chartCard}>
-          <Text style={styles.sectionTitle}>Risk Distribution</Text>
-          <Text style={styles.muted}>
-            Low, medium, and high risk are assigned by persisted threshold
-            rules.
-          </Text>
-          <DataBarChart data={riskSeries} height={230} dimUnselected={false} />
-        </Card>
+        <VisualizationPanel title={title} description="Daily average evaluation score from records matching the selected filters." data={filteredScoreSeries} type="line" suffix="%" height={230} />
+        <VisualizationPanel title="Score histogram" description="Filtered continuous evaluation scores grouped into percentage bands." data={filteredScoreDistribution} type="histogram" suffix="%" height={230} />
+        <VisualizationPanel title="Risk Distribution" description="Persisted low, medium, high, and unclassified risk levels." data={filteredRiskSeries} type="pie" height={230} />
       </View>
     </>
   );

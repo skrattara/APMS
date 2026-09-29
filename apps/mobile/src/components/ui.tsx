@@ -1,4 +1,4 @@
-import { createElement, useEffect, useState, type ChangeEvent, type PropsWithChildren, type ReactNode } from "react";
+import { createContext, createElement, useCallback, useContext, useEffect, useRef, useState, type ChangeEvent, type PropsWithChildren, type ReactNode } from "react";
 import {
   ActivityIndicator,
   Modal,
@@ -13,7 +13,6 @@ import {
   type TextInputProps,
   type ViewStyle,
 } from "react-native";
-import Svg, { Circle, Line, Polyline } from "react-native-svg";
 
 import { colors, radius, shadow, space } from "@/theme/tokens";
 import { AppIcon } from "@/components/Icon";
@@ -253,167 +252,6 @@ export function SelectField({
 }
 
 export type ChartDatum = { label: string; value: number };
-
-export function DataBarChart({
-  data,
-  suffix = "",
-  color = colors.brand,
-  height = 180,
-  dimUnselected = true,
-}: {
-  data: ChartDatum[];
-  suffix?: string;
-  color?: string;
-  height?: number;
-  dimUnselected?: boolean;
-}) {
-  const [selected, setSelected] = useState(0);
-  const max = Math.max(...data.map((item) => item.value), 1);
-  if (!data.length)
-    return (
-      <PageState
-        kind="empty"
-        title="No chart data"
-        message="No values are available for this selection."
-      />
-    );
-  return (
-    <View>
-      <View style={[styles.dataChart, { height }]}>
-        {data.map((item, index) => (
-          <Pressable
-            key={item.label}
-            accessibilityRole="button"
-            accessibilityLabel={`${item.label}: ${item.value}${suffix}`}
-            onPress={() => setSelected(index)}
-            style={styles.dataBarColumn}
-          >
-            <Text style={styles.dataValue}>
-              {item.value}
-              {suffix}
-            </Text>
-            <View
-              style={[
-                styles.dataBar,
-                {
-                  height: Math.max(8, (item.value / max) * (height - 50)),
-                  backgroundColor:
-                    !dimUnselected || index === selected ? color : `${color}99`,
-                },
-              ]}
-            />
-            <Text
-              numberOfLines={1}
-              style={[
-                styles.dataLabel,
-                index === selected && styles.dataLabelActive,
-              ]}
-            >
-              {item.label}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
-      <Text accessibilityLiveRegion="polite" style={styles.chartSelection}>
-        {data[selected]?.label}: {data[selected]?.value}
-        {suffix}
-      </Text>
-    </View>
-  );
-}
-
-export function DataLineChart({
-  data,
-  suffix = "",
-  color = colors.brand,
-  height = 190,
-}: {
-  data: ChartDatum[];
-  suffix?: string;
-  color?: string;
-  height?: number;
-}) {
-  const [selected, setSelected] = useState(Math.max(data.length - 1, 0));
-  if (!data.length)
-    return (
-      <PageState
-        kind="empty"
-        title="No chart data"
-        message="No values are available for this selection."
-      />
-    );
-  const values = data.map((item) => item.value);
-  const min = Math.min(...values);
-  const max = Math.max(...values);
-  const range = Math.max(max - min, 1);
-  const x = (index: number) =>
-    data.length === 1 ? 300 : 24 + (index * 552) / (data.length - 1);
-  const y = (value: number) => 164 - ((value - min) / range) * 128;
-  const points = data
-    .map((item, index) => `${x(index)},${y(item.value)}`)
-    .join(" ");
-  return (
-    <View>
-      <View style={{ height }}>
-        <Svg
-          width="100%"
-          height="100%"
-          viewBox="0 0 600 190"
-          preserveAspectRatio="none"
-        >
-          {[36, 68, 100, 132, 164].map((lineY) => (
-            <Line
-              key={lineY}
-              x1="24"
-              x2="576"
-              y1={lineY}
-              y2={lineY}
-              stroke={colors.border}
-              strokeWidth="1"
-            />
-          ))}
-          <Polyline
-            points={points}
-            fill="none"
-            stroke={color}
-            strokeWidth="4"
-            strokeLinejoin="round"
-            strokeLinecap="round"
-          />
-          {data.map((item, index) => (
-            <Circle
-              key={item.label}
-              cx={x(index)}
-              cy={y(item.value)}
-              r={index === selected ? 8 : 6}
-              fill={index === selected ? color : "#FFF"}
-              stroke={color}
-              strokeWidth="3"
-            />
-          ))}
-        </Svg>
-      </View>
-      <View style={styles.lineLabels}>
-        {data.map((item, index) => (
-          <Pressable key={item.label} onPress={() => setSelected(index)}>
-            <Text
-              style={[
-                styles.dataLabel,
-                index === selected && styles.dataLabelActive,
-              ]}
-            >
-              {item.label}
-            </Text>
-          </Pressable>
-        ))}
-      </View>
-      <Text accessibilityLiveRegion="polite" style={styles.chartSelection}>
-        {data[selected]?.label}: {data[selected]?.value}
-        {suffix}
-      </Text>
-    </View>
-  );
-}
 
 export function Card({
   children,
@@ -740,14 +578,43 @@ export function SearchFilter({
   );
 }
 
-export function useToast() {
+type ToastState = { message: string; show: (message: string) => void; clear: () => void };
+const ToastContext = createContext<ToastState | null>(null);
+
+export function ToastProvider({ children }: PropsWithChildren) {
   const [message, setMessage] = useState("");
-  useEffect(() => {
-    if (!message) return;
-    const timeout = setTimeout(() => setMessage(""), 3000);
-    return () => clearTimeout(timeout);
-  }, [message]);
-  return { message, show: setMessage, clear: () => setMessage("") };
+  const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const clear = useCallback(() => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    timeoutRef.current = null;
+    setMessage("");
+  }, []);
+  const show = useCallback((nextMessage: string) => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+    setMessage(nextMessage);
+    timeoutRef.current = setTimeout(() => {
+      timeoutRef.current = null;
+      setMessage("");
+    }, 10000);
+  }, []);
+  useEffect(() => () => {
+    if (timeoutRef.current) clearTimeout(timeoutRef.current);
+  }, []);
+
+  return (
+    <ToastContext.Provider value={{ message, show, clear }}>
+      {children}
+      <View pointerEvents="box-none" style={styles.toastHost}>
+        {message ? <Toast message={message} onClose={clear} /> : null}
+      </View>
+    </ToastContext.Provider>
+  );
+}
+
+export function useToast() {
+  const toast = useContext(ToastContext);
+  if (!toast) throw new Error("useToast must be used inside ToastProvider.");
+  return toast;
 }
 
 const styles = StyleSheet.create({
@@ -844,42 +711,6 @@ const styles = StyleSheet.create({
   selectOptionActive: { backgroundColor: "#F7ECE9" },
   selectOptionText: { color: colors.text, fontSize: 14 },
   selectOptionTextActive: { color: colors.brand, fontWeight: "700" },
-  dataChart: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    gap: 8,
-    paddingTop: 12,
-    borderBottomWidth: 1,
-    borderColor: colors.border,
-  },
-  dataBarColumn: {
-    flex: 1,
-    minWidth: 34,
-    alignItems: "center",
-    justifyContent: "flex-end",
-  },
-  dataBar: {
-    width: "72%",
-    minWidth: 18,
-    maxWidth: 50,
-    borderTopLeftRadius: 6,
-    borderTopRightRadius: 6,
-  },
-  dataValue: { color: colors.textMuted, fontSize: 10, marginBottom: 4 },
-  dataLabel: { color: colors.textMuted, fontSize: 10, marginTop: 6 },
-  dataLabelActive: { color: colors.brand, fontWeight: "700" },
-  chartSelection: {
-    color: colors.text,
-    fontSize: 12,
-    fontWeight: "700",
-    textAlign: "center",
-    marginTop: 12,
-  },
-  lineLabels: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    paddingHorizontal: 10,
-  },
   card: {
     backgroundColor: colors.surface,
     borderRadius: radius.large,
@@ -989,6 +820,7 @@ const styles = StyleSheet.create({
     borderRadius: radius.medium,
     ...shadow,
   },
+  toastHost: { ...StyleSheet.absoluteFill, zIndex: 1000, elevation: 1000 },
   toastText: { color: "#FFF", fontSize: 13 },
   tabs: {
     flexDirection: "row",

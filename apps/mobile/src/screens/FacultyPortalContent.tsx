@@ -1,6 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
 import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
-import Svg, { Circle, Line, Polyline } from "react-native-svg";
 import { calculateAttendanceRate, type AttendanceStatus } from "@apms/domain";
 
 import { useAuth } from "@/auth/AuthProvider";
@@ -9,20 +8,18 @@ import {
   Badge,
   Button,
   Card,
-  DataBarChart,
   DataTable,
   Field,
   SearchFilter,
   SelectField,
-  Toast,
   useToast,
 } from "@/components/ui";
+import { VisualizationPanel } from "@/components/charts/VisualizationPanel";
 import {
   FACULTY_EVENTS,
   FACULTY_FEEDBACK_TEMPLATES,
   FACULTY_RECORDS,
   FACULTY_STUDENTS,
-  FACULTY_TRENDS,
   type FacultyRecord,
   type FacultyStudent,
 } from "@/data/mockFaculty";
@@ -54,7 +51,6 @@ function FacultyAttendance() {
   const rate = calculateAttendanceRate(rows.map((row) => row.status));
   return (
     <View style={styles.screen}>
-      {toast.message ? <Toast message={toast.message} onClose={toast.clear} /> : null}
       <View style={styles.titleRow}>
         <View><Text style={styles.pageTitle}>Attendance Roll Call</Text><Text style={styles.pageSubtitle}>Database Systems · BSIT-3A · monitoring session</Text></View>
         <Badge tone="success">{rate}% attendance rate</Badge>
@@ -279,9 +275,6 @@ function FacultyStudents() {
   );
   return (
     <View style={styles.screen}>
-      {toast.message ? (
-        <Toast message={toast.message} onClose={toast.clear} />
-      ) : null}
       <Card>
         <View style={styles.managementHeader}>
           <SectionHeading
@@ -465,9 +458,6 @@ function FacultyRecords() {
   const total = records.reduce((sum, item) => sum + item.students, 0);
   return (
     <View style={styles.screen}>
-      {toast.message ? (
-        <Toast message={toast.message} onClose={toast.clear} />
-      ) : null}
       <View>
         <Text accessibilityRole="header" style={styles.pageTitle}>
           Class Records
@@ -756,9 +746,6 @@ function FacultyFeedback() {
   const toast = useToast();
   return (
     <View style={styles.screen}>
-      {toast.message ? (
-        <Toast message={toast.message} onClose={toast.clear} />
-      ) : null}
       <SectionHeading
         icon="feedback"
         title="Performance Feedback"
@@ -940,23 +927,8 @@ function FacultyAnalytics() {
         ))}
       </View>
       <View style={styles.twoColumns}>
-        <Card style={styles.half}>
-          <Text style={styles.cardTitle}>Performance Trends</Text>
-          <TrendChart />
-        </Card>
-        <Card style={styles.half}>
-          <Text style={styles.cardTitle}>Grade Distribution</Text>
-          <DataBarChart
-            data={[
-              { label: "A", value: 1 },
-              { label: "B", value: 3 },
-              { label: "C", value: 2 },
-              { label: "D", value: 1 },
-              { label: "F", value: 1 },
-            ]}
-            height={185}
-          />
-        </Card>
+        <VisualizationPanel title="Performance Trends" description="Filtered class average by reporting date." data={[...records].sort((a, b) => new Date(a.date).getTime() - new Date(b.date).getTime()).map((item) => ({ label: item.date.split(",")[0], value: item.average, kind: "timeseries" as const, timestamp: new Date(item.date).toISOString() }))} type="line" suffix="%" height={185} />
+        <VisualizationPanel title="Grade Distribution" description="Filtered classes grouped by their average score." data={[{ label: "A · 90+", value: records.filter((item) => item.average >= 90).length }, { label: "B · 80–89", value: records.filter((item) => item.average >= 80 && item.average < 90).length }, { label: "C · 70–79", value: records.filter((item) => item.average >= 70 && item.average < 80).length }, { label: "D · 60–69", value: records.filter((item) => item.average >= 60 && item.average < 70).length }, { label: "F · <60", value: records.filter((item) => item.average < 60).length }]} type="pie" height={185} />
       </View>
       <View style={styles.twoColumns}>
         <Card style={styles.half}>
@@ -995,40 +967,6 @@ function FacultyAnalytics() {
   );
 }
 
-function TrendChart() {
-  const values = FACULTY_TRENDS.average;
-  const x = (i: number) => 25 + i * 75;
-  const y = (v: number) => 150 - (v - 60) * 4;
-  const points = values.map((v, i) => `${x(i)},${y(v)}`).join(" ");
-  return (
-    <View>
-      <Svg width="100%" height="175" viewBox="0 0 500 175">
-        {[30, 70, 110, 150].map((v) => (
-          <Line key={v} x1="25" x2="475" y1={v} y2={v} stroke="#E5E7EB" />
-        ))}
-        <Polyline
-          points={points}
-          fill="none"
-          stroke={colors.brand}
-          strokeWidth="3"
-        />
-        {values.map((v, i) => (
-          <Circle
-            key={i}
-            cx={x(i)}
-            cy={y(v)}
-            r="3"
-            fill="#FFF"
-            stroke={colors.brand}
-            strokeWidth="2"
-          />
-        ))}
-      </Svg>
-      <Text style={styles.chartLegend}>— Average　 — Passing　 — Failing</Text>
-    </View>
-  );
-}
-
 function FacultyEvents() {
   const [events, setEvents] = usePersistentDemoState(
     "apms.demo.faculty.events.v1",
@@ -1038,9 +976,6 @@ function FacultyEvents() {
   const toast = useToast();
   return (
     <View style={styles.screen}>
-      {toast.message ? (
-        <Toast message={toast.message} onClose={toast.clear} />
-      ) : null}
       <View style={styles.managementHeader}>
         <SectionHeading
           icon="events"
@@ -1230,9 +1165,6 @@ function FacultySettings() {
   };
   return (
     <View style={styles.screen}>
-      {toast.message ? (
-        <Toast message={toast.message} onClose={toast.clear} />
-      ) : null}
       <SectionHeading
         icon="settings"
         title="Settings"
