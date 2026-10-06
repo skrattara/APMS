@@ -1,0 +1,319 @@
+{
+  "id": "grading-system-it-component-based",
+  "name": "Component Based IT Grading System",
+  "description": "Independent-period grading system. Each period grade consists of 60% Class Standing and 40% Period Examination. Class Standing consists of 30% Quizzes, 15% Assignments, and 55% Hands-On assessments. The final grade consists of one-sixth each from P1, P2, and P3 and one-half from the Final Project.",
+
+  "periods": [
+    {
+      "id": "p1",
+      "name": "Period 1",
+      "sequence": 1
+    },
+    {
+      "id": "p2",
+      "name": "Period 2",
+      "sequence": 2
+    },
+    {
+      "id": "p3",
+      "name": "Period 3",
+      "sequence": 3
+    }
+  ],
+
+  "groupTypes": [],
+
+  "groups": [],
+
+  "assessmentTypes": [
+    {
+      "id": "quiz",
+      "name": "Quiz",
+      "shortCode": "Quiz"
+    },
+    {
+      "id": "asg",
+      "name": "Assignment",
+      "shortCode": "Asg"
+    },
+    {
+      "id": "ho",
+      "name": "Hands-On",
+      "shortCode": "HO"
+    },
+    {
+      "id": "pe",
+      "name": "Period Examination",
+      "shortCode": "PE"
+    },
+    {
+      "id": "fp",
+      "name": "Final Project",
+      "shortCode": "FP"
+    }
+  ],
+
+  "components": [
+    {
+      "id": "quizzes",
+      "name": "Quizzes",
+      "shortCode": "Quiz",
+      "sequence": 1,
+      "assessmentDefinition": {
+        "typeId": "quiz",
+        "count": {
+          "min": 1,
+          "scope": {
+            "type": "per_period"
+          }
+        },
+        "scoring": {
+          "mode": "linear"
+        },
+        "aggregation": {
+          "mode": "points"
+        }
+      },
+      "calculation": {
+        "mode": "assessments"
+      }
+    },
+
+    {
+      "id": "assignments",
+      "name": "Assignments",
+      "shortCode": "Asg",
+      "sequence": 2,
+      "assessmentDefinition": {
+        "typeId": "assignment",
+        "count": {
+          "min": 1,
+          "scope": {
+            "type": "per_period"
+          }
+        },
+        "scoring": {
+          "mode": "linear"
+        },
+        "aggregation": {
+          "mode": "points"
+        }
+      },
+      "calculation": {
+        "mode": "assessments"
+      }
+    },
+
+    {
+      "id": "hands-on",
+      "name": "Hands-On",
+      "shortCode": "HO",
+      "sequence": 3,
+      "assessmentDefinition": {
+        "typeId": "hands-on",
+        "count": {
+          "min": 1,
+          "scope": {
+            "type": "per_period"
+          }
+        },
+        "scoring": {
+          "mode": "linear"
+        },
+        "aggregation": {
+          "mode": "points"
+        }
+      },
+      "calculation": {
+        "mode": "assessments"
+      }
+    },
+
+    {
+      "id": "class-standing",
+      "name": "Class Standing",
+      "shortCode": "CS",
+      "sequence": 4,
+      "calculation": {
+        "mode": "weighted",
+        "weightMode": "relative",
+        "components": [
+          {
+            "source": "component",
+            "componentId": "quizzes",
+            "weight": 0.30
+          },
+          {
+            "source": "component",
+            "componentId": "assignments",
+            "weight": 0.15
+          },
+          {
+            "source": "component",
+            "componentId": "hands-on",
+            "weight": 0.55
+          }
+        ]
+      }
+    },
+
+    {
+      "id": "period-examination",
+      "name": "Period Examination",
+      "shortCode": "PE",
+      "sequence": 5,
+      "assessmentDefinition": {
+        "typeId": "period-examination",
+        "count": {
+          "min": 1,
+          "max": 1,
+          "scope": {
+            "type": "per_period"
+          }
+        },
+        "scoring": {
+          "mode": "linear"
+        },
+        "aggregation": {
+          "mode": "points"
+        }
+      },
+      "calculation": {
+        "mode": "assessments"
+      }
+    },
+
+    {
+      "id": "period-grade",
+      "name": "Period Grade",
+      "shortCode": "PG",
+      "sequence": 6,
+      "calculation": {
+        "mode": "weighted",
+        "weightMode": "relative",
+        "components": [
+          {
+            "source": "component",
+            "componentId": "class-standing",
+            "weight": 0.60
+          },
+          {
+            "source": "component",
+            "componentId": "period-examination",
+            "weight": 0.40
+          }
+        ]
+      }
+    },
+
+    {
+      "id": "final-project",
+      "name": "Final Project",
+      "shortCode": "FP",
+      "sequence": 7,
+      "assessmentDefinition": {
+        "typeId": "final-project",
+        "count": {
+          "min": 1,
+          "max": 1,
+          "scope": {
+            "type": "overall"
+          }
+        },
+        "scoring": {
+          "mode": "linear"
+        },
+        "aggregation": {
+          "mode": "points"
+        }
+      },
+      "calculation": {
+        "mode": "assessments"
+      }
+    },
+
+    {
+      "id": "final-grade",
+      "name": "Final Grade",
+      "shortCode": "FG",
+      "sequence": 8,
+      "calculation": {
+        "mode": "weighted",
+        "weightMode": "relative",
+        "components": [
+          {
+            "source": "period_component",
+            "componentId": "period-grade",
+            "periodId": "p1",
+            "weight": {
+              "numerator": 1,
+              "denominator": 6
+            }
+          },
+          {
+            "source": "period_component",
+            "componentId": "period-grade",
+            "periodId": "p2",
+            "weight": {
+              "numerator": 1,
+              "denominator": 6
+            }
+          },
+          {
+            "source": "period_component",
+            "componentId": "period-grade",
+            "periodId": "p3",
+            "weight": {
+              "numerator": 1,
+              "denominator": 6
+            }
+          },
+          {
+            "source": "component",
+            "componentId": "final-project",
+            "weight": {
+              "numerator": 1,
+              "denominator": 2
+            }
+          }
+        ]
+      }
+    }
+  ],
+
+  "calculationRootComponentId": "final-grade",
+
+  "periodCalculation": {
+    "mode": "independent"
+  },
+
+  "finalResult": {
+    "source": "component",
+    "componentId": "final-grade"
+  },
+
+  "finalGradeConversion": {
+    "passingPercentage": 60,
+
+    "passingScale": {
+      "mode": "equal_interval",
+      "maximumPercentage": 100,
+      "bestPoint": 1.00,
+      "passingPoint": 3.00,
+      "pointInterval": 0.25
+    },
+
+    "failingScale": {
+      "mode": "equal_interval",
+      "minimumPercentage": 0,
+      "firstFailingPoint": 3.25,
+      "worstPoint": 5.00,
+      "pointInterval": 0.25
+    },
+
+    "rounding": {
+      "mode": "nearest",
+      "precision": 2
+    }
+  }
+}

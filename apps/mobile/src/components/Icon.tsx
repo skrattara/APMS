@@ -8,7 +8,9 @@ export type AppIconName =
   | 'notifications' | 'info' | 'logout' | 'menu' | 'search' | 'email'
   | 'password' | 'visibility' | 'visibilityOff' | 'checkbox' | 'brand'
   | 'trend' | 'chart' | 'person' | 'error' | 'denied' | 'empty' | 'success'
-  | 'metric' | 'chevronDown';
+  | 'metric' | 'chevronDown'
+  | 'copy' | 'paste' | 'clear' | 'sortAscending' | 'sortDescending' | 'filter'
+  | 'hide' | 'show' | 'expand' | 'collapse' | 'edit' | 'delete';
 
 const ICONS: Record<AppIconName, SymbolViewProps['name']> = {
   home: { ios: 'house.fill', android: 'home', web: 'home' },
@@ -49,6 +51,18 @@ const ICONS: Record<AppIconName, SymbolViewProps['name']> = {
   success: { ios: 'checkmark.circle.fill', android: 'check_circle', web: 'check_circle' },
   metric: { ios: 'chart.bar.xaxis', android: 'monitoring', web: 'monitoring' },
   chevronDown: { ios: 'chevron.down', android: 'keyboard_arrow_down', web: 'keyboard_arrow_down' },
+  copy: { ios: 'doc.on.doc', android: 'content_copy', web: 'content_copy' },
+  paste: { ios: 'doc.on.clipboard', android: 'content_paste', web: 'content_paste' },
+  clear: { ios: 'xmark.circle', android: 'backspace', web: 'backspace' },
+  sortAscending: { ios: 'arrow.up', android: 'arrow_upward', web: 'arrow_upward' },
+  sortDescending: { ios: 'arrow.down', android: 'arrow_downward', web: 'arrow_downward' },
+  filter: { ios: 'line.3.horizontal.decrease', android: 'filter_alt', web: 'filter_alt' },
+  hide: { ios: 'eye.slash', android: 'visibility_off', web: 'visibility_off' },
+  show: { ios: 'eye', android: 'visibility', web: 'visibility' },
+  expand: { ios: 'arrow.down.right.and.arrow.up.left', android: 'unfold_more', web: 'unfold_more' },
+  collapse: { ios: 'arrow.up.left.and.arrow.down.right', android: 'unfold_less', web: 'unfold_less' },
+  edit: { ios: 'pencil', android: 'edit', web: 'edit' },
+  delete: { ios: 'trash', android: 'delete', web: 'delete' },
 };
 
 export function AppIcon({ name, size = 18, color, style }: { name: AppIconName; size?: number; color: string; style?: StyleProp<ViewStyle> }) {

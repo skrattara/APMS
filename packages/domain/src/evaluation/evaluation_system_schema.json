@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://apms.example/schemas/student-performance-evaluation.schema.json",
+  "title": "APMS Student Performance Evaluation System",
+  "description": "A versioned, configurable risk-classification definition for advisory academic monitoring. Combines stored academic indicators with optional AI prediction signals; it cannot determine official grades or replace educator review.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "factors", "levels"],
+  "allOf": [
+    {
+      "if": { "properties": { "schemaVersion": { "const": 2 } }, "required": ["schemaVersion"] },
+      "then": {
+        "required": ["definitionVersion", "classification", "ai", "decisionPolicy", "explanation"],
+        "properties": {
+          "ai": { "required": ["enabled", "advisoryOnly", "institutionallyValidated", "inputFeatures", "outputFields", "unavailablePolicy"] },
+          "decisionPolicy": { "required": ["advisoryOnly", "maySetOfficialGrade", "mayApplyAutomaticPenalty", "requiresEducatorReview", "officialRecordSystem"] }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "schemaVersion": { "type": "integer", "minimum": 1, "maximum": 2, "default": 2 },
+    "definitionVersion": { "type": "integer", "minimum": 1, "default": 1, "description": "Version number of this definition. Historical copies must be retained separately to provide version history." },
+    "id": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" },
+    "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+    "description": { "type": "string", "maxLength": 2000 },
+    "effectiveFrom": { "type": "string", "format": "date-time" },
+    "effectiveUntil": { "type": "string", "format": "date-time" },
+    "factors": {
+      "type": "array", "minItems": 1,
+      "description": "Available, named inputs to evaluation rules. A factor can be a stored academic indicator or a documented model output.",
+      "items": { "$ref": "#/$defs/factor" }
+    },
+    "levels": {
+      "type": "array", "minItems": 1,
+      "description": "Ordered risk classifications. A level's rules use any/all matching; the highest-priority matching level wins.",
+      "items": { "$ref": "#/$defs/level" }
+    },
+    "classification": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "unmatchedSeverity": { "enum": ["low", "medium", "high"], "default": "low" },
+        "missingValuePolicy": { "enum": ["ignore_rule", "treat_as_zero", "return_unavailable"], "default": "ignore_rule" },
+        "minimumEvidenceCount": { "type": "integer", "minimum": 0, "default": 1 },
+        "strategy": { "enum": ["priority", "weighted"], "default": "priority", "description": "Priority selects the highest-priority matching level. Weighted sums matching factor weights per level and uses priority to break ties." },
+        "colorScheme": { "enum": ["green_to_red", "white_to_red", "custom"], "default": "green_to_red" },
+        "requireRecentPrediction": { "type": "boolean", "default": false },
+        "maximumPredictionAgeHours": { "type": "number", "exclusiveMinimum": 0 }
+      }
+    },
+    "ai": {
+      "type": "object", "additionalProperties": false,
+      "description": "Describes the advisory AI inputs and output contract available to the rule engine. It does not make an AI result an official decision.",
+      "properties": {
+        "enabled": { "type": "boolean", "default": true },
+        "advisoryOnly": { "const": true },
+        "institutionallyValidated": { "const": false },
+        "provider": { "type": "string", "minLength": 1 },
+        "modelName": { "type": "string" },
+        "modelVersion": { "type": "string" },
+        "supportedScenarios": {
+          "type": "array", "uniqueItems": true,
+          "items": { "enum": ["minimum", "maximum", "minimum_pass", "stable", "custom"] }
+        },
+        "inputFeatures": {
+          "type": "array", "uniqueItems": true,
+          "items": { "enum": ["current_standing", "recent_scores", "attendance_rate", "missing_assessment_count"] }
+        },
+        "outputFields": {
+          "type": "array", "uniqueItems": true,
+          "items": { "enum": ["predicted_standing", "risk_probability", "risk_level", "trend", "factors", "model_version", "data_basis", "generated_at"] }
+        },
+        "riskProbabilityMeaning": { "enum": ["heuristic", "calibrated"] },
+        "minimumConfidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "unavailablePolicy": { "enum": ["continue_with_available_rules", "return_unavailable"] },
+        "explanationPolicy": { "enum": ["show_model_factors_as_advisory", "hide_model_factors"] }
+      }
+    },
+    "decisionPolicy": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "advisoryOnly": { "const": true },
+        "maySetOfficialGrade": { "const": false },
+        "mayApplyAutomaticPenalty": { "const": false },
+        "requiresEducatorReview": { "type": "boolean", "default": true },
+        "officialRecordSystem": { "type": "string", "default": "SWU SIS" }
+      }
+    },
+    "explanation": {
+      "type": "object", "additionalProperties": false,
+      "properties": {
+        "includeMatchedRules": { "type": "boolean", "default": true },
+        "includeInputValues": { "type": "boolean", "default": true },
+        "includeMissingInputs": { "type": "boolean", "default": true },
+        "includeAiFactors": { "type": "boolean", "default": true }
+      }
+    }
+  },
+  "$defs": {
+    "factor": {
+      "type": "object", "additionalProperties": false,
+      "allOf": [
+        { "if": { "properties": { "source": { "const": "grading_group" } }, "required": ["source"] }, "then": { "required": ["gradingGroupId"] } }
+      ],
+      "required": ["id", "name", "source"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 120 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "source": {
+          "enum": ["current_standing", "mastery", "attendance", "attendance_rate", "recent_scores", "recent_score_average", "recent_trend", "missing_assessment_count", "predicted_standing", "risk_probability", "ai_risk_level", "trend", "model_confidence", "prediction_available", "prediction_age_hours", "ai_factor_count", "data_basis", "grading_component", "grading_group"]
+        },
+        "valueType": { "enum": ["number", "number_array", "boolean", "category"], "default": "number" },
+        "unit": { "enum": ["percentage", "probability", "count", "category", "boolean"] },
+        "origin": { "enum": ["academic_record", "derived", "ai_prediction"], "default": "academic_record" },
+        "required": { "type": "boolean", "default": false },
+        "missingValuePolicy": { "enum": ["ignore_rule", "treat_as_zero", "unavailable"], "default": "ignore_rule" },
+        "minimum": { "type": "number" },
+        "maximum": { "type": "number" },
+        "categories": { "type": "array", "uniqueItems": true, "items": { "type": "string" } },
+        "windowSize": { "type": "integer", "minimum": 1, "maximum": 50 },
+        "weight": { "type": "number", "minimum": 0, "maximum": 100, "default": 1, "description": "Relative contribution when classification.strategy is weighted." },
+        "gradingComponentId": { "type": "string", "description": "Component ID used when source is grading_component." },
+        "gradingGroupId": { "type": "string", "description": "Group ID used when source is grading_group." },
+        "gradingAggregation": { "enum": ["average", "highest", "lowest"], "default": "average", "description": "Statistic used to summarize the matching assessment results for a grading component or group." },
+        "aiGenerated": { "type": "boolean", "default": false }
+      }
+    },
+    "rule": {
+      "type": "object", "additionalProperties": false,
+      "required": ["factorId", "operator", "threshold"],
+      "properties": {
+        "factorId": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" },
+        "operator": { "enum": ["below", "at_most", "above", "at_least", "equals", "not_equals", "contains", "not_contains", "in", "not_in", "is_true", "is_false", "is_available", "is_unavailable"] },
+                "threshold": { "type": ["number", "string", "boolean", "array"], "items": { "type": ["number", "string", "boolean"] }, "minItems": 1 },
+        "description": { "type": "string", "maxLength": 500 }
+      }
+    },
+    "level": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "severity", "priority", "match", "rules"],
+      "properties": {
+        "id": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 80 },
+        "description": { "type": "string", "maxLength": 1000 },
+        "severity": { "enum": ["low", "medium", "high"] },
+        "priority": { "type": "integer", "minimum": 0 },
+        "match": { "enum": ["any", "all"] },
+        "rules": { "type": "array", "items": { "$ref": "#/$defs/rule" } },
+        "color": { "type": "string", "pattern": "^#[0-9A-Fa-f]{6}$" },
+        "recommendedAction": { "type": "string", "maxLength": 1000 },
+        "requiresHumanReview": { "type": "boolean", "default": true }
+      }
+    }
+  }
+}

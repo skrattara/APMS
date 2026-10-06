@@ -2,10 +2,16 @@ import {
   isSwunextComponent,
   parseCsv,
   summarizeSwunextGrade,
+  calculateGradingSystem,
+  calculateTrend,
+  IT_GLOBAL_GRADING_SYSTEM,
+  validateGradingSystem,
+  type GradingDefinition,
   validateCsvRows,
   type SwunextAssessmentComponent,
   type SwunextGradeBreakdown,
 } from '@apms/domain';
+import { DEFAULT_EVALUATION_SYSTEM, removeStandaloneMasteryFactor, validateEvaluationSystem, type EvaluationDefinition } from '@apms/domain';
 import * as XLSX from 'xlsx';
 
 import { supabase } from './supabase';
@@ -20,6 +26,14 @@ export type FacultyClass = {
   studentCount: number;
 };
 
+export type FacultyEvaluationCriteriaSummary = {
+  classId: string;
+  name: string;
+  version: number | null;
+  source: 'private' | 'department';
+  definition?: EvaluationDefinition;
+};
+
 export type FacultyReferenceData = {
   subjects: { id: string; code: string; title: string }[];
   terms: { id: string; label: string; status: 'active' | 'planned' }[];
@@ -27,6 +41,7 @@ export type FacultyReferenceData = {
 };
 
 export type RosterStudent = {
+  classNumber: number;
   enrollmentId: string;
   studentId: string;
   programId: string;
@@ -48,6 +63,10 @@ export type FacultyAssessment = {
   assessmentDate: string;
   gradingPeriod: string;
   source: string;
+  gradingTypeId?: string | null;
+  gradingGroupId?: string | null;
+  gradingPeriodId?: string | null;
+  instanceWeight?: number | null;
 };
 
 export type FacultyCriteria = {
@@ -56,6 +75,8 @@ export type FacultyCriteria = {
   version: number;
   passingThreshold: number;
   nodes: { id: string; label: string; weight: number }[];
+  gradingSystemId?: string;
+  gradingSystemDefinition?: GradingDefinition;
 };
 
 export type FacultyAttendanceSession = { id: string; date: string; label: string };
@@ -64,6 +85,9 @@ export type EvaluationRow = {
   currentStanding: number | null;
   riskLevel: 'low' | 'medium' | 'high' | 'unknown';
   predictedStanding: number | null;
+  riskProbability?: number | null;
+  predictionGeneratedAt?: string | null;
+  dataBasis?: string | null;
   trend: 'improving' | 'stable' | 'declining' | 'unknown';
   factors: string[];
 };
@@ -80,7 +104,13 @@ export type ClassWorkspace = {
   students: RosterStudent[];
   assessments: FacultyAssessment[];
   scores: Record<string, number>;
+  categoricalScores: Record<string, string>;
   criteria: FacultyCriteria | null;
+  defaultGradingSystem?: GradingDefinition;
+  evaluationSystem?: EvaluationDefinition;
+  hasPrivateEvaluationSystem?: boolean;
+  hasPersonalClassEvaluationSystem?: boolean;
+  hasClassEvaluationSystem?: boolean;
   attendanceSessions: FacultyAttendanceSession[];
   attendance: Record<string, 'present' | 'absent' | 'late' | 'excused'>;
   evaluations: Record<string, EvaluationRow>;
@@ -117,6 +147,36 @@ export async function loadFacultyClasses(): Promise<FacultyClass[]> {
     term: `${row.academic_terms?.academic_year ?? ''} ${row.academic_terms?.semester ?? ''}`.trim(),
     studentCount: Number(row.enrollments?.[0]?.count ?? 0),
   }));
+}
+
+export async function loadFacultyEvaluationCriteriaLibrary(classIds: string[], userId: string) {
+  if (!classIds.length || !userId) return { departmentSystems: [] as { id: string; name: string; version: number; definition: EvaluationDefinition; updatedAt: string | null; updatedBy: string | null }[], byClass: [] as FacultyEvaluationCriteriaSummary[] };
+  const client = connected();
+  const [systemsResult, assignmentsResult, privateResult] = await Promise.all([
+    client.from('evaluation_criteria_systems').select('id,name,version,definition,updated_at,updated_by_name').order('updated_at', { ascending: false }),
+    client.from('class_evaluation_criteria').select('class_record_id,evaluation_system_id').in('class_record_id', classIds),
+    client.from('faculty_class_evaluation_systems').select('class_record_id,definition').eq('faculty_user_id', userId).in('class_record_id', classIds),
+  ]);
+  const error = systemsResult.error ?? assignmentsResult.error ?? privateResult.error;
+  if (error) throw error;
+  const departmentSystems = (systemsResult.data ?? []).flatMap((row: any) => {
+    const definition = row.definition as EvaluationDefinition;
+    return definition && validateEvaluationSystem(definition).valid ? [{
+      id: row.id, name: row.name, version: Number(row.version), definition: removeStandaloneMasteryFactor(definition),
+      updatedAt: row.updated_at ?? null, updatedBy: row.updated_by_name ?? null,
+    }] : [];
+  });
+  const definitionsById = new Map(departmentSystems.map((system) => [system.id, system]));
+  const byClass = new Map<string, FacultyEvaluationCriteriaSummary>();
+  for (const row of assignmentsResult.data ?? []) {
+    const system = definitionsById.get(row.evaluation_system_id);
+    if (system) byClass.set(row.class_record_id, { classId: row.class_record_id, name: system.name, version: system.version, source: 'department' });
+  }
+  for (const row of privateResult.data ?? []) {
+    const definition = row.definition as EvaluationDefinition;
+    if (definition && validateEvaluationSystem(definition).valid) byClass.set(row.class_record_id, { classId: row.class_record_id, name: definition.name, version: definition.definitionVersion ?? null, source: 'private', definition: removeStandaloneMasteryFactor(definition) });
+  }
+  return { departmentSystems, byClass: [...byClass.values()] };
 }
 
 export async function loadFacultyReferenceData(): Promise<FacultyReferenceData> {
@@ -369,17 +429,40 @@ export async function importRosterExcel(classId: string, programId: string, file
   return importRosterPreview(classId, programId, fileName, previewRosterExcel(fileData), 'xlsx');
 }
 
-export async function loadClassWorkspace(classId: string): Promise<ClassWorkspace> {
+export async function loadClassWorkspace(classId: string, departmentEvaluationSystem?: EvaluationDefinition, facultyUserId?: string, personalClassEvaluationSystem?: EvaluationDefinition): Promise<ClassWorkspace> {
   const client = connected();
-  const [enrollments, assessments, criteriaSets, sessions] = await Promise.all([
+  const [enrollments, assessments, criteriaSets, sessions, defaultSystemSetting] = await Promise.all([
     client.from('enrollments').select('id,student_id,students(program_id,institutional_id,email,first_name,last_name,year_level,section,programs(id,code))').eq('class_record_id', classId).eq('status', 'active').order('created_at'),
-    client.from('assessments').select('id,title,type,component_key,module_number,maximum_score,assessment_date,grading_period,source').eq('class_record_id', classId).neq('status', 'archived').order('assessment_date'),
-    client.from('criteria_sets').select('id,name,version,passing_threshold,criteria_nodes(id,label,weight)').eq('class_record_id', classId).eq('status', 'active').order('version', { ascending: false }).limit(1),
+    client.from('assessments').select('id,title,type,component_key,module_number,maximum_score,assessment_date,grading_period,source,grading_type_id,grading_group_id,grading_period_id,grading_instance_weight').eq('class_record_id', classId).neq('status', 'archived').order('assessment_date'),
+    client.from('criteria_sets').select('id,name,version,passing_threshold,grading_system_id,grading_system_definition,criteria_nodes(id,label,weight)').eq('class_record_id', classId).eq('status', 'active').order('version', { ascending: false }).limit(1),
     client.from('attendance_sessions').select('id,session_date,label').eq('class_record_id', classId).order('session_date', { ascending: false }),
+    client.from('system_settings').select('value').eq('key', 'grading.default_system_definition').maybeSingle(),
   ]);
   const firstError = enrollments.error ?? assessments.error ?? criteriaSets.error ?? sessions.error;
   if (firstError) throw firstError;
-  const students: RosterStudent[] = (enrollments.data ?? []).map((row: any) => ({
+  let evaluationRow: { definition?: unknown } | null = null;
+  let hasPrivateEvaluationSystem = false;
+  let hasClassEvaluationSystem = false;
+  if (!departmentEvaluationSystem) {
+    const { data: classMeta, error: classMetaError } = await client.from('class_records').select('department_id').eq('id', classId).single();
+    if (classMetaError) throw classMetaError;
+    if (facultyUserId) {
+      const facultyResult = await client.from('faculty_class_evaluation_systems').select('definition').eq('class_record_id', classId).eq('faculty_user_id', facultyUserId).maybeSingle();
+      if (facultyResult.error) throw facultyResult.error;
+      if (facultyResult.data) { evaluationRow = facultyResult.data; hasPrivateEvaluationSystem = true; }
+    }
+    if (!evaluationRow) {
+      const assignment = await client.from('class_evaluation_criteria').select('evaluation_criteria_systems(definition)').eq('class_record_id', classId).maybeSingle();
+      if (assignment.error) throw assignment.error;
+      const related: any = (assignment.data as any)?.evaluation_criteria_systems;
+      if (related?.definition) { evaluationRow = { definition: related.definition }; hasClassEvaluationSystem = true; }
+    }
+    const result = evaluationRow ? null : await client.from('evaluation_systems').select('definition').eq('department_id', classMeta.department_id).maybeSingle();
+    if (result?.error) throw result.error;
+    if (!evaluationRow && result) evaluationRow = result.data;
+  }
+  const students: RosterStudent[] = (enrollments.data ?? []).map((row: any, index: number) => ({
+    classNumber: index + 1,
     enrollmentId: row.id, studentId: row.student_id, institutionalId: row.students?.institutional_id,
     programId: row.students?.program_id,
     name: `${row.students?.first_name ?? ''} ${row.students?.last_name ?? ''}`.trim(), email: row.students?.email ?? '',
@@ -394,21 +477,27 @@ export async function loadClassWorkspace(classId: string): Promise<ClassWorkspac
     maximumScore: Number(row.maximum_score),
     assessmentDate: row.assessment_date,
     gradingPeriod: row.grading_period, source: row.source,
+    gradingTypeId: row.grading_type_id, gradingGroupId: row.grading_group_id, gradingPeriodId: row.grading_period_id, instanceWeight: row.grading_instance_weight == null ? null : Number(row.grading_instance_weight),
   }));
   const enrollmentIds = students.map((row) => row.enrollmentId);
   const assessmentIds = assessmentRows.map((row) => row.id);
   const sessionIds = (sessions.data ?? []).map((row) => row.id);
   const [results, attendance, evaluations, predictions, feedback] = await Promise.all([
-    assessmentIds.length ? client.from('assessment_results').select('assessment_id,enrollment_id,score').in('assessment_id', assessmentIds).in('enrollment_id', enrollmentIds) : Promise.resolve({ data: [], error: null }),
+    assessmentIds.length ? client.from('assessment_results').select('assessment_id,enrollment_id,score,categorical_value').in('assessment_id', assessmentIds).in('enrollment_id', enrollmentIds) : Promise.resolve({ data: [], error: null }),
     sessionIds.length ? client.from('attendance_records').select('attendance_session_id,enrollment_id,status').in('attendance_session_id', sessionIds).in('enrollment_id', enrollmentIds) : Promise.resolve({ data: [], error: null }),
     enrollmentIds.length ? client.from('performance_evaluations').select('enrollment_id,score,risk_level,explanation').in('enrollment_id', enrollmentIds) : Promise.resolve({ data: [], error: null }),
-    enrollmentIds.length ? client.from('performance_predictions').select('enrollment_id,predicted_score,risk_level,trend,explanation,created_at').in('enrollment_id', enrollmentIds).order('created_at', { ascending: false }) : Promise.resolve({ data: [], error: null }),
+    enrollmentIds.length ? client.from('performance_predictions').select('enrollment_id,predicted_score,risk_level,trend,confidence,explanation,created_at').in('enrollment_id', enrollmentIds).order('created_at', { ascending: false }) : Promise.resolve({ data: [], error: null }),
     enrollmentIds.length ? client.from('feedback_records').select('id,enrollment_id,body,category,status,created_at').in('enrollment_id', enrollmentIds).order('created_at', { ascending: false }) : Promise.resolve({ data: [], error: null }),
   ]);
   const secondaryError = results.error ?? attendance.error ?? evaluations.error ?? predictions.error ?? feedback.error;
   if (secondaryError) throw secondaryError;
   const scoreMap: Record<string, number> = {};
-  for (const row of results.data ?? []) scoreMap[`${row.enrollment_id}:${row.assessment_id}`] = Number(row.score);
+  const categoricalScoreMap: Record<string, string> = {};
+  for (const row of results.data ?? []) {
+    const key = `${row.enrollment_id}:${row.assessment_id}`;
+    if (row.categorical_value != null) categoricalScoreMap[key] = row.categorical_value;
+    else if (row.score != null) scoreMap[key] = Number(row.score);
+  }
   const attendanceMap: ClassWorkspace['attendance'] = {};
   for (const row of attendance.data ?? []) attendanceMap[`${row.attendance_session_id}:${row.enrollment_id}`] = row.status as ClassWorkspace['attendance'][string];
   const evaluationMap: Record<string, EvaluationRow> = {};
@@ -419,7 +508,7 @@ export async function loadClassWorkspace(classId: string): Promise<ClassWorkspac
   for (const row of predictions.data ?? []) {
     const current = evaluationMap[row.enrollment_id] ?? { enrollmentId: row.enrollment_id, currentStanding: null, riskLevel: 'unknown', predictedStanding: null, trend: 'unknown', factors: [] };
     if (current.predictedStanding == null) {
-      current.predictedStanding = Number(row.predicted_score); current.riskLevel = row.risk_level; current.trend = row.trend;
+      current.predictedStanding = Number(row.predicted_score); current.riskLevel = row.risk_level; current.trend = row.trend; current.riskProbability = row.confidence == null ? null : Number(row.confidence); current.predictionGeneratedAt = row.created_at; current.dataBasis = (row.explanation as any)?.data_basis ?? null;
       current.factors = Array.isArray((row.explanation as any)?.factors) ? (row.explanation as any).factors : current.factors;
       evaluationMap[row.enrollment_id] = current;
     }
@@ -438,10 +527,19 @@ export async function loadClassWorkspace(classId: string): Promise<ClassWorkspac
     feedbackMap[row.enrollment_id] = items;
   }
   const criteriaRow: any = criteriaSets.data?.[0];
+  const configuredDefault = defaultSystemSetting.data?.value as GradingDefinition | undefined;
+  const defaultGradingSystem = configuredDefault && validateGradingSystem(configuredDefault).valid ? configuredDefault : IT_GLOBAL_GRADING_SYSTEM;
+  const savedEvaluationSystem = personalClassEvaluationSystem ?? departmentEvaluationSystem ?? evaluationRow?.definition as EvaluationDefinition | undefined;
+  const evaluationSystem = savedEvaluationSystem && validateEvaluationSystem(savedEvaluationSystem).valid ? removeStandaloneMasteryFactor(savedEvaluationSystem) : DEFAULT_EVALUATION_SYSTEM;
   return {
-    students, assessments: assessmentRows, scores: scoreMap, attendance: attendanceMap, evaluations: evaluationMap,
+    students, assessments: assessmentRows, scores: scoreMap, categoricalScores: categoricalScoreMap, attendance: attendanceMap, evaluations: evaluationMap,
     attendanceSessions: (sessions.data ?? []).map((row) => ({ id: row.id, date: row.session_date, label: row.label })),
-    criteria: criteriaRow ? { id: criteriaRow.id, name: criteriaRow.name, version: criteriaRow.version, passingThreshold: Number(criteriaRow.passing_threshold), nodes: (criteriaRow.criteria_nodes ?? []).map((node: any) => ({ id: node.id, label: node.label, weight: Number(node.weight) })) } : null,
+    defaultGradingSystem,
+    evaluationSystem,
+    hasPrivateEvaluationSystem,
+    hasPersonalClassEvaluationSystem: !!personalClassEvaluationSystem,
+    hasClassEvaluationSystem,
+    criteria: criteriaRow ? { id: criteriaRow.id, name: criteriaRow.name, version: criteriaRow.version, passingThreshold: Number(criteriaRow.passing_threshold), gradingSystemId: criteriaRow.grading_system_id, gradingSystemDefinition: criteriaRow.grading_system_definition ?? undefined, nodes: (criteriaRow.criteria_nodes ?? []).map((node: any) => ({ id: node.id, label: node.label, weight: Number(node.weight) })) } : null,
     feedback: feedbackMap,
   };
 }
@@ -455,10 +553,14 @@ export type AssessmentInput = {
   date: string;
   gradingPeriod: string;
   source: 'manual' | 'csv';
+  gradingTypeId?: string | null;
+  gradingGroupId?: string | null;
+  gradingPeriodId?: string | null;
+  instanceWeight?: number | null;
 };
 
 export async function createAssessment(classId: string, userId: string, input: AssessmentInput) {
-  const { error } = await connected().from('assessments').insert({ class_record_id: classId, title: input.title.trim(), type: input.type.trim(), component_key: input.component, module_number: input.moduleNumber, maximum_score: input.maximumScore, due_at: `${input.date}T17:00:00+08:00`, status: 'published', created_by: userId, source: input.source, assessment_date: input.date, grading_period: input.gradingPeriod.trim() });
+  const { error } = await connected().from('assessments').insert({ class_record_id: classId, title: input.title.trim(), type: input.type.trim(), component_key: input.component, module_number: input.moduleNumber, maximum_score: input.maximumScore, due_at: `${input.date}T17:00:00+08:00`, status: 'published', created_by: userId, source: input.source, assessment_date: input.date, grading_period: input.gradingPeriod.trim(), grading_type_id: input.gradingTypeId ?? null, grading_group_id: input.gradingGroupId ?? null, grading_period_id: input.gradingPeriodId ?? null, grading_instance_weight: input.instanceWeight ?? null });
   if (error) throw error;
 }
 
@@ -473,13 +575,25 @@ export async function updateAssessment(assessmentId: string, input: AssessmentIn
     source: input.source,
     assessment_date: input.date,
     grading_period: input.gradingPeriod.trim(),
+    grading_type_id: input.gradingTypeId ?? null,
+    grading_group_id: input.gradingGroupId ?? null,
+    grading_period_id: input.gradingPeriodId ?? null,
+    grading_instance_weight: input.instanceWeight ?? null,
     updated_at: new Date().toISOString(),
   }).eq('id', assessmentId);
   if (error) throw error;
 }
 
-export async function saveScores(userId: string, assessmentId: string, scores: { enrollmentId: string; score: number }[]) {
-  const { error } = await connected().from('assessment_results').upsert(scores.map((row) => ({ assessment_id: assessmentId, enrollment_id: row.enrollmentId, score: row.score, source: 'manual', approval_status: 'approved', recorded_by: userId })), { onConflict: 'assessment_id,enrollment_id' });
+export async function saveScores(userId: string, assessmentId: string, scores: { enrollmentId: string; score?: number; categoricalValue?: string }[]) {
+  const client = connected();
+  const toDelete = scores.filter((row) => row.score == null && row.categoricalValue == null).map((row) => row.enrollmentId);
+  if (toDelete.length) {
+    const { error } = await client.from('assessment_results').delete().eq('assessment_id', assessmentId).in('enrollment_id', toDelete);
+    if (error) throw error;
+  }
+  const toSave = scores.filter((row) => row.score != null || row.categoricalValue != null);
+  if (!toSave.length) return;
+  const { error } = await client.from('assessment_results').upsert(toSave.map((row) => ({ assessment_id: assessmentId, enrollment_id: row.enrollmentId, score: row.categoricalValue == null ? row.score : null, categorical_value: row.categoricalValue ?? null, source: 'manual', approval_status: 'approved', recorded_by: userId })), { onConflict: 'assessment_id,enrollment_id' });
   if (error) throw error;
 }
 
@@ -507,6 +621,94 @@ export async function saveCriteria(classId: string, userId: string, name: string
   if (error) throw error;
 }
 
+export async function applyFacultyEvaluationSystemToClasses(classIds: string[], userId: string, definition: EvaluationDefinition) {
+  const validation = validateEvaluationSystem(definition);
+  if (!validation.valid) throw new Error(validation.errors.join('\n'));
+  if (!userId) throw new Error('An authenticated Faculty user is required.');
+  const client = connected();
+  const outcomes = await Promise.allSettled(classIds.map(async (classId) => {
+    const { data, error } = await client.from('faculty_class_evaluation_systems').upsert({
+      class_record_id: classId,
+      faculty_user_id: userId,
+      definition,
+      updated_by: userId,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'class_record_id,faculty_user_id' }).select('class_record_id').single();
+    if (error) throw error;
+    if (!data) throw new Error('This class is not assigned to your Faculty account.');
+  }));
+  return {
+    applied: classIds.filter((_, index) => outcomes[index].status === 'fulfilled'),
+    failures: classIds.flatMap((classId, index) => {
+      const outcome = outcomes[index];
+      if (outcome.status !== 'rejected') return [];
+      const reason = outcome.reason;
+      const message = reason instanceof Error ? reason.message
+        : reason && typeof reason === 'object' && 'message' in reason && typeof reason.message === 'string' ? reason.message
+        : typeof reason === 'string' ? reason : 'Could not apply evaluation criteria to this class.';
+      return [{ classId, message }];
+    }),
+  };
+}
+
+export async function deleteFacultyClassEvaluationSystem(classId: string, userId: string) {
+  if (!classId || !userId) throw new Error('An authenticated Faculty user and class are required.');
+  const { data, error } = await connected().from('faculty_class_evaluation_systems').delete()
+    .eq('class_record_id', classId).eq('faculty_user_id', userId).select('class_record_id').maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error('Your private criteria could not be deleted. It may no longer be assigned to you.');
+}
+
+export async function saveGradingSystem(userId: string, definition: GradingDefinition) {
+  const validation = validateGradingSystem(definition);
+  if (!validation.valid) throw new Error(validation.errors.join('\n'));
+  if (!userId) throw new Error('An authenticated user is required.');
+  const { error } = await connected().from('grading_systems').upsert({
+    id: definition.id, name: definition.name, description: definition.description ?? null,
+    definition, is_builtin: false, created_by: userId, updated_at: new Date().toISOString(),
+  }, { onConflict: 'id' });
+  if (error) throw error;
+}
+
+export async function deleteGradingSystem(userId: string, gradingSystemId: string) {
+  if (!userId) throw new Error('An authenticated user is required.');
+  if (!gradingSystemId || gradingSystemId === IT_GLOBAL_GRADING_SYSTEM.id) throw new Error('The built-in grading system cannot be deleted.');
+  const client = connected();
+  const { data: usage, error: usageError } = await client.from('criteria_sets').select('id').eq('grading_system_id', gradingSystemId).limit(1);
+  if (usageError) throw usageError;
+  if (usage?.length) throw new Error('This grading system is applied to a class and cannot be deleted.');
+  const { data, error } = await client.from('grading_systems').delete().eq('id', gradingSystemId).select('id').maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error('This grading system could not be deleted. It may be in use or you may not have permission.');
+}
+
+export async function applyGradingSystem(classId: string, userId: string, definition: GradingDefinition) {
+  const validation = validateGradingSystem(definition);
+  if (!validation.valid) throw new Error(validation.errors.join('\n'));
+  await saveCriteria(classId, userId, definition.name, definition.finalGradeConversion.passingPercentage ?? 80, [{ label: definition.name, weight: 100 }]);
+  const client = connected();
+  const { data, error } = await client.from('criteria_sets').select('id').eq('class_record_id', classId).eq('status', 'active').order('version', { ascending: false }).limit(1).single();
+  if (error) throw error;
+  const { error: updateError } = await client.from('criteria_sets').update({ grading_system_id: definition.id, grading_system_definition: definition }).eq('id', data.id);
+  if (updateError) throw updateError;
+}
+
+export async function applyGradingSystemToClasses(classIds: string[], userId: string, definition: GradingDefinition) {
+  const outcomes = await Promise.allSettled(classIds.map((classId) => applyGradingSystem(classId, userId, definition)));
+  return {
+    applied: classIds.filter((_, index) => outcomes[index].status === 'fulfilled'),
+    failures: classIds.flatMap((classId, index) => {
+      const outcome = outcomes[index];
+      if (outcome.status !== 'rejected') return [];
+      const reason = outcome.reason;
+      const message = reason instanceof Error ? reason.message
+        : reason && typeof reason === 'object' && 'message' in reason && typeof reason.message === 'string' ? reason.message
+        : typeof reason === 'string' ? reason : 'Could not apply this grading system.';
+      return [{ classId, message }];
+    }),
+  };
+}
+
 function componentFromLegacyType(type: string): SwunextAssessmentComponent {
   const normalized = type.trim().toLowerCase().replaceAll(/[\s-]+/g, '_');
   if (isSwunextComponent(normalized)) return normalized;
@@ -519,7 +721,23 @@ function componentFromLegacyType(type: string): SwunextAssessmentComponent {
   return 'other';
 }
 
+export function calculateEnrollmentGrade(workspace: ClassWorkspace, enrollmentId: string) {
+  const gradingSystem = workspace.criteria?.gradingSystemDefinition ?? workspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
+  const periods: any[] = gradingSystem.periods ?? [];
+  const scores = workspace.assessments.map((assessment) => {
+    const groupId = assessment.gradingGroupId ?? (assessment.moduleNumber == null ? null : `m${assessment.moduleNumber}`);
+    const periodId = assessment.gradingPeriodId ?? periods.find((period) => groupId && period.groupIds?.includes(groupId))?.id ?? null;
+    return { id: assessment.id, typeId: assessment.gradingTypeId ?? assessment.component, score: workspace.categoricalScores[`${enrollmentId}:${assessment.id}`] ?? workspace.scores[`${enrollmentId}:${assessment.id}`] ?? null, maximumScore: assessment.maximumScore, weight: assessment.instanceWeight ?? undefined, periodId, groupId };
+  });
+  return calculateGradingSystem(gradingSystem, scores);
+}
+
 export function summarizeEnrollmentStanding(workspace: ClassWorkspace, enrollmentId: string): SwunextGradeBreakdown {
+  const gradingSystem = workspace.criteria?.gradingSystemDefinition ?? workspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
+  const calculated = calculateEnrollmentGrade(workspace, enrollmentId);
+  if (gradingSystem) {
+    return { ...summarizeSwunextGrade([]), p1: calculated.periods.p1 ?? null, p2: calculated.periods.p2 ?? null, p3: calculated.periods.p3 ?? null, finalGrade: calculated.finalGrade, pointGrade: calculated.pointGrade, mastery: calculated.components.mg ?? null, remarks: calculated.remarks } as SwunextGradeBreakdown;
+  }
   return summarizeSwunextGrade(workspace.assessments.map((assessment) => ({
     component: assessment.component,
     moduleNumber: assessment.moduleNumber,
@@ -664,7 +882,7 @@ export function exportClassCsv(workspace: ClassWorkspace) {
       summary.finalGrade == null ? '' : summary.finalGrade,
       summary.gradePoint == null ? '' : summary.gradePoint.toFixed(2),
       summary.remarks,
-      ...workspace.assessments.map((assessment) => workspace.scores[`${student.enrollmentId}:${assessment.id}`] ?? ''),
+      ...workspace.assessments.map((assessment) => workspace.categoricalScores[`${student.enrollmentId}:${assessment.id}`] ?? workspace.scores[`${student.enrollmentId}:${assessment.id}`] ?? ''),
     ];
   });
   return [header, ...rows].map((row) => row.map(escape).join(',')).join('\n');

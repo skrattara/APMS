@@ -9,6 +9,7 @@ import {
   Text,
   TextInput,
   View,
+  useWindowDimensions,
   type StyleProp,
   type TextInputProps,
   type ViewStyle,
@@ -72,19 +73,25 @@ export function Field({
   label,
   error,
   containerStyle,
+  compact = false,
   inputType,
+  helpText,
+  helpExample,
   ...props
 }: TextInputProps & {
   label: string;
   error?: string;
   containerStyle?: StyleProp<ViewStyle>;
-  inputType?: "date" | "email" | "text";
+  compact?: boolean;
+  inputType?: "date" | "email" | "text" | "color";
+  helpText?: string;
+  helpExample?: string;
 }) {
   const [secureVisible, setSecureVisible] = useState(false);
   const isSecure = Boolean(props.secureTextEntry);
   return (
-    <View style={[styles.field, containerStyle]}>
-      <Text style={styles.label}>{label}</Text>
+    <View style={[styles.field, compact && styles.compactField, containerStyle]}>
+      <View style={styles.labelRow}><Text style={[styles.label, compact && styles.compactLabel]}>{label}</Text>{helpText ? <HelpTooltip title={label} text={helpText} example={helpExample} /> : null}</View>
       <View>
         <TextInput
           {...props}
@@ -92,7 +99,7 @@ export function Field({
           secureTextEntry={isSecure ? !secureVisible : props.secureTextEntry}
           accessibilityLabel={props.accessibilityLabel ?? label}
           placeholderTextColor="#99A1AF"
-          style={[styles.input, isSecure && styles.secureInput, error && styles.inputError, props.style]}
+          style={[styles.input, compact && styles.compactInput, isSecure && styles.secureInput, error && styles.inputError, props.style]}
         />
         {isSecure ? (
           <Pressable
@@ -142,7 +149,7 @@ export function DateField({
   );
 }
 
-export type SelectOption = { label: string; value: string };
+export type SelectOption = { label: string; value: string; helpText?: string; helpExample?: string };
 
 export function SelectField({
   label,
@@ -153,7 +160,11 @@ export function SelectField({
   error,
   disabled = false,
   containerStyle,
+  compact = false,
+  accessibilityLabel,
   searchable = false,
+  helpText,
+  helpExample,
 }: {
   label: string;
   value: string;
@@ -163,7 +174,11 @@ export function SelectField({
   error?: string;
   disabled?: boolean;
   containerStyle?: StyleProp<ViewStyle>;
+  compact?: boolean;
+  accessibilityLabel?: string;
   searchable?: boolean;
+  helpText?: string;
+  helpExample?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -172,18 +187,18 @@ export function SelectField({
     ? options.filter((option) => option.label.toLowerCase().includes(query.trim().toLowerCase()))
     : options;
   return (
-    <View style={[styles.field, containerStyle]}>
-      <Text style={styles.label}>{label}</Text>
+    <View style={[styles.field, compact && styles.compactField, containerStyle]}>
+      <View style={styles.labelRow}><Text style={[styles.label, compact && styles.compactLabel]}>{label}</Text>{helpText ? <HelpTooltip title={label} text={helpText} example={helpExample} /> : null}</View>
       <Pressable
         accessibilityRole="button"
-        accessibilityLabel={label}
+        accessibilityLabel={accessibilityLabel ?? label}
         accessibilityState={{ expanded: open, disabled }}
         disabled={disabled}
         onPress={() => { setQuery(''); setOpen(true); }}
-        style={[styles.input, styles.selectInput, disabled && styles.disabled]}
+        style={[styles.input, styles.selectInput, compact && styles.compactSelectInput, disabled && styles.disabled]}
       >
         <Text
-          style={[styles.selectValue, !selected && styles.selectPlaceholder]}
+          style={[styles.selectValue, compact && styles.compactSelectValue, !selected && styles.selectPlaceholder]}
         >
           {selected?.label ?? placeholder}
         </Text>
@@ -211,31 +226,33 @@ export function SelectField({
               keyboardShouldPersistTaps="handled"
             >
               {filteredOptions.map((option) => (
-                <Pressable
-                  key={option.value}
-                  accessibilityRole="button"
-                  accessibilityState={{ selected: option.value === value }}
-                  onPress={() => {
-                    onChange(option.value);
-                    setOpen(false);
-                  }}
-                  style={[
-                    styles.selectOption,
-                    option.value === value && styles.selectOptionActive,
-                  ]}
-                >
-                  <Text
+                <View key={option.value} style={styles.selectOptionRow}>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityState={{ selected: option.value === value }}
+                    onPress={() => {
+                      onChange(option.value);
+                      setOpen(false);
+                    }}
                     style={[
-                      styles.selectOptionText,
-                      option.value === value && styles.selectOptionTextActive,
+                      styles.selectOption,
+                      option.value === value && styles.selectOptionActive,
                     ]}
                   >
-                    {option.label}
-                  </Text>
-                  {option.value === value ? (
-                    <AppIcon name="success" size={15} color={colors.brand} />
-                  ) : null}
-                </Pressable>
+                    <Text
+                      style={[
+                        styles.selectOptionText,
+                        option.value === value && styles.selectOptionTextActive,
+                      ]}
+                    >
+                      {option.label}
+                    </Text>
+                    {option.value === value ? (
+                      <AppIcon name="success" size={15} color={colors.brand} />
+                    ) : null}
+                  </Pressable>
+                  {option.helpText ? <HelpTooltip title={option.label} text={option.helpText} example={option.helpExample ?? `For ${label}: ${option.label}`} /> : null}
+                </View>
               ))}
               {searchable && !filteredOptions.length ? <Text style={styles.selectEmpty}>No matching options.</Text> : null}
             </ScrollView>
@@ -302,10 +319,12 @@ export function MetricCard({
 export function Badge({
   children,
   tone = "neutral",
+  color: customColor,
 }: PropsWithChildren<{
   tone?: "neutral" | "success" | "warning" | "danger" | "info";
+  color?: string;
 }>) {
-  const color =
+  const color = customColor ?? (
     tone === "success"
       ? colors.success
       : tone === "warning"
@@ -314,10 +333,13 @@ export function Badge({
           ? colors.danger
           : tone === "info"
             ? colors.info
-            : colors.textMuted;
+            : colors.textMuted);
+  const parsedColor = customColor?.match(/^#([\da-f]{6})$/i)?.[1];
+  const isLightCustomColor = parsedColor ? ((parseInt(parsedColor.slice(0, 2), 16) * 299 + parseInt(parsedColor.slice(2, 4), 16) * 587 + parseInt(parsedColor.slice(4, 6), 16) * 114) / 1000) > 205 : false;
+  const foregroundColor = isLightCustomColor ? '#475569' : color;
   return (
-    <View style={[styles.badge, { backgroundColor: `${color}15` }]}>
-      <Text style={[styles.badgeText, { color }]}>{children}</Text>
+    <View style={[styles.badge, { backgroundColor: `${color}22`, borderWidth: isLightCustomColor ? 1 : 0, borderColor: isLightCustomColor ? '#CBD5E1' : 'transparent' }]}>
+      <Text style={[styles.badgeText, { color: foregroundColor }]}>{children}</Text>
     </View>
   );
 }
@@ -354,11 +376,13 @@ export function DataTable<Row extends DataTableCell[]>({
   rows,
   onRowPress,
   columnWidths,
+  compact = false,
 }: {
   columns: string[];
   rows: Row[];
   onRowPress?: (row: Row) => void;
   columnWidths?: number[];
+  compact?: boolean;
 }) {
   return (
     <ScrollView
@@ -367,9 +391,9 @@ export function DataTable<Row extends DataTableCell[]>({
       accessibilityLabel="Scrollable data table"
     >
       <View style={styles.table}>
-        <View style={[styles.tableRow, styles.tableHead]}>
+        <View style={[styles.tableRow, styles.tableHead, compact && styles.compactTableRow]}>
           {columns.map((column, index) => (
-            <Text key={column} style={[styles.cell, styles.headCell, columnWidths?.[index] ? { width: columnWidths[index], flexGrow: 0, flexShrink: 0 } : null]}>
+            <Text key={column} style={[styles.cell, styles.headCell, compact && styles.compactCell, columnWidths?.[index] ? { width: columnWidths[index], flexGrow: 0, flexShrink: 0 } : null]}>
               {column}
             </Text>
           ))}
@@ -385,11 +409,12 @@ export function DataTable<Row extends DataTableCell[]>({
               onPress={() => onRowPress?.(row)}
               style={({ pressed }) => [
                 styles.tableRow,
+                compact && styles.compactTableRow,
               pressed && onRowPress && styles.rowPressed,
             ]}
           >
               {row.map((cell, cellIndex) => (
-                <View key={`${cell}-${cellIndex}`} style={[styles.cell, columnWidths?.[cellIndex] ? { width: columnWidths[cellIndex], flexGrow: 0, flexShrink: 0 } : null]}>
+                <View key={`${cell}-${cellIndex}`} style={[styles.cell, compact && styles.compactCell, columnWidths?.[cellIndex] ? { width: columnWidths[cellIndex], flexGrow: 0, flexShrink: 0 } : null]}>
                   {cellIndex === row.length - 1 && isTextCell(cell) && isStatusCell(cell) ? (
                     <Badge
                       tone={
@@ -611,6 +636,64 @@ export function ToastProvider({ children }: PropsWithChildren) {
   );
 }
 
+export function HelpTooltip({ title, text, example }: { title: string; text: string; example?: string }) {
+  const [open, setOpen] = useState(false);
+  const anchorRef = useRef<any>(null);
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  const [anchor, setAnchor] = useState({ x: 8, y: 8, width: 20, height: 20 });
+  const [position, setPosition] = useState({ left: 8, top: 36, width: 260, arrowLeft: 12, side: 'below' as 'above' | 'below' });
+  const openTooltip = (event: any) => {
+    const rect = event?.currentTarget?.getBoundingClientRect?.();
+    const place = (x: number, y: number, width: number, height: number) => {
+      setAnchor({ x, y, width, height });
+      const tooltipWidth = Math.min(280, Math.max(120, screenWidth - 16));
+      const center = x + width / 2;
+      const left = Math.max(8, Math.min(center - tooltipWidth / 2, screenWidth - tooltipWidth - 8));
+      const estimatedHeight = example ? 190 : 145;
+      const side = y + height + estimatedHeight + 8 <= screenHeight - 8 ? 'below' : 'above';
+      const top = side === 'below' ? y + height + 6 : Math.max(8, y - estimatedHeight - 6);
+      const arrowLeft = Math.max(12, Math.min(center - left - 6, tooltipWidth - 24));
+      setPosition({ left, top, width: tooltipWidth, arrowLeft, side });
+      setOpen(true);
+    };
+    if (rect) place(rect.left, rect.top, rect.width, rect.height);
+    else if (anchorRef.current?.measureInWindow) anchorRef.current.measureInWindow((x: number, y: number, width: number, height: number) => place(x, y, width, height));
+    else place(8, 8, 20, 20);
+  };
+  const adjustToMeasuredHeight = (event: any) => {
+    const height = event.nativeEvent.layout.height;
+    const below = anchor.y + anchor.height + height + 6;
+    const side = below <= screenHeight - 8 ? 'below' : 'above';
+    const top = side === 'below' ? anchor.y + anchor.height + 6 : Math.max(8, anchor.y - height - 6);
+    setPosition((current) => current.top === top && current.side === side ? current : { ...current, top, side });
+  };
+  return (
+    <>
+      <Pressable
+        ref={anchorRef}
+        accessibilityRole="button"
+        accessibilityLabel={`Help for ${title}`}
+        accessibilityState={{ expanded: open }}
+        onPress={(event) => open ? setOpen(false) : openTooltip(event)}
+        style={styles.helpTooltipButton}
+      >
+        <Text style={styles.helpTooltipButtonText}>?</Text>
+      </Pressable>
+      <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)} presentationStyle="overFullScreen">
+        <View style={styles.helpTooltipOverlay}>
+          <Pressable accessibilityRole="button" accessibilityLabel="Close help" onPress={() => setOpen(false)} style={StyleSheet.absoluteFill} />
+          <View onLayout={adjustToMeasuredHeight} style={[styles.helpTooltipBubble, { left: position.left, top: position.top, width: position.width, maxHeight: screenHeight - 16 }]}>
+            <View style={[styles.helpTooltipArrow, position.side === 'below' ? styles.helpTooltipArrowAbove : styles.helpTooltipArrowBelow, { left: position.arrowLeft }]} />
+            <Text style={styles.helpTooltipTitle}>{title}</Text>
+            <Text style={styles.helpTooltipText}>{text}</Text>
+            {example ? <View style={styles.helpTooltipExample}><Text style={styles.helpTooltipExampleLabel}>Example</Text><Text style={styles.helpTooltipExampleText}>{example}</Text></View> : null}
+          </View>
+        </View>
+      </Modal>
+    </>
+  );
+}
+
 export function useToast() {
   const toast = useContext(ToastContext);
   if (!toast) throw new Error("useToast must be used inside ToastProvider.");
@@ -640,6 +723,24 @@ const styles = StyleSheet.create({
   buttonTextDark: { color: colors.text },
   field: { gap: 6 },
   label: { color: colors.text, fontSize: 13, fontWeight: "600" },
+  compactField: { gap: 2 },
+  compactLabel: { fontSize: 9, lineHeight: 10 },
+  compactInput: { minHeight: 24, height: 25, paddingHorizontal: 5, paddingVertical: 0, borderRadius: 4, fontSize: 11 },
+  compactSelectInput: { minHeight: 24, height: 25, paddingHorizontal: 5, borderRadius: 4 },
+  compactSelectValue: { fontSize: 11 },
+  labelRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  helpTooltipOverlay: { flex: 1, position: "relative", backgroundColor: "transparent" },
+  helpTooltipButton: { width: 20, height: 20, borderRadius: 10, borderWidth: 1, borderColor: "#AAB4C3", backgroundColor: "#FFF", alignItems: "center", justifyContent: "center" },
+  helpTooltipButtonText: { color: colors.brand, fontSize: 12, fontWeight: "800", lineHeight: 16 },
+  helpTooltipBubble: { position: "absolute", zIndex: 99999, padding: 12, borderRadius: 10, borderWidth: 1, borderColor: colors.border, backgroundColor: "#FFF", ...shadow },
+  helpTooltipArrow: { position: "absolute", width: 0, height: 0, borderLeftWidth: 7, borderRightWidth: 7, borderLeftColor: "transparent", borderRightColor: "transparent" },
+  helpTooltipArrowAbove: { top: -8, borderBottomWidth: 8, borderBottomColor: "#FFF" },
+  helpTooltipArrowBelow: { bottom: -8, borderTopWidth: 8, borderTopColor: "#FFF" },
+  helpTooltipTitle: { color: colors.text, fontSize: 12, fontWeight: "700", marginBottom: 4 },
+  helpTooltipText: { color: colors.textMuted, fontSize: 12, lineHeight: 17 },
+  helpTooltipExample: { marginTop: 9, paddingHorizontal: 9, paddingVertical: 7, borderRadius: 7, borderWidth: 1, borderColor: "#D8E1EF", backgroundColor: "#F2F6FC" },
+  helpTooltipExampleLabel: { color: colors.brand, fontSize: 10, fontWeight: "800", textTransform: "uppercase", marginBottom: 3 },
+  helpTooltipExampleText: { color: colors.text, fontSize: 12, lineHeight: 17, fontFamily: Platform.OS === "web" ? "monospace" : undefined },
   input: {
     minHeight: 44,
     borderWidth: 1,
@@ -700,7 +801,9 @@ const styles = StyleSheet.create({
   selectTitle: { color: colors.text, fontSize: 17, fontWeight: "700" },
   selectEmpty: { color: colors.textMuted, fontSize: 13, padding: 12, textAlign: "center" },
   selectOptions: { maxHeight: 360 },
+  selectOptionRow: { flexDirection: "row", alignItems: "center", gap: 6, paddingRight: 4 },
   selectOption: {
+    flex: 1,
     minHeight: 44,
     paddingHorizontal: 12,
     flexDirection: "row",
@@ -759,8 +862,10 @@ const styles = StyleSheet.create({
     borderColor: colors.border,
     backgroundColor: "#FFF",
   },
+  compactTableRow: { minHeight: 36 },
   tableHead: { backgroundColor: colors.surfaceMuted },
   cell: { flex: 1, minWidth: 110, paddingHorizontal: 14 },
+  compactCell: { paddingVertical: 5, paddingHorizontal: 10 },
   headCell: {
     color: colors.textMuted,
     fontSize: 11,

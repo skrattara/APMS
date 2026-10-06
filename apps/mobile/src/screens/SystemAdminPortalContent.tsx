@@ -7,6 +7,7 @@ import { Button, Card, ConfirmDialog, DataTable, DateField, Field, MetricCard, P
 import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
 import { Settings as AccountSettings } from '@/screens/AppPortalScreen';
 import { createManagedUser, deleteProgram, loadAdminWorkspace, queueBackup, saveAcademicTerm, saveDepartment, saveProgram, saveSystemSetting, updateManagedUser, type AcademicTermRecord, type AdminWorkspace, type DepartmentRecord, type ManagedUser, type ProgramRecord } from '@/services/admin';
+import { IT_GLOBAL_GRADING_SYSTEM, type GradingDefinition } from '@apms/domain';
 import { colors } from '@/theme/tokens';
 
 type CoreRole = 'system_admin' | 'academic_admin' | 'faculty';
@@ -117,15 +118,23 @@ function Logs({ data }: Props) { return <><Heading title="Access & System Logs" 
 function SystemSettings({ data, refresh, userId, toast }: Props) {
   const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(data.settings.map((row) => [row.key, typeof row.value === 'string' ? row.value : JSON.stringify(row.value)])));
   const [saving, setSaving] = useState(false);
+  const storedDefaultId = data.settings.find((row) => row.key === 'grading.default_system_id')?.value;
+  const [defaultSystemId, setDefaultSystemId] = useState(typeof storedDefaultId === 'string' ? storedDefaultId : IT_GLOBAL_GRADING_SYSTEM.id);
+  const [gradingSystems, setGradingSystems] = useState<GradingDefinition[]>([IT_GLOBAL_GRADING_SYSTEM]);
+  useEffect(() => { let active = true; if (!supabase) return; void supabase.from('grading_systems').select('definition,updated_at').order('updated_at', { ascending: false }).then(({ data: rows }) => { if (!active || !rows) return; const saved = rows.map((row: any) => row.definition as GradingDefinition).filter((system) => !!system?.id); const globalName = IT_GLOBAL_GRADING_SYSTEM.name.toLocaleLowerCase(); const savedGlobal = saved.find((system) => system.id === IT_GLOBAL_GRADING_SYSTEM.id || system.name?.trim().toLocaleLowerCase() === globalName); const unique = new Map<string, GradingDefinition>(); const defaultSystem = savedGlobal ?? IT_GLOBAL_GRADING_SYSTEM; unique.set(defaultSystem.id, defaultSystem); for (const system of saved) { const isGlobal = system.id === IT_GLOBAL_GRADING_SYSTEM.id || system.name?.trim().toLocaleLowerCase() === globalName; if (!isGlobal && !unique.has(system.id)) unique.set(system.id, system); } const systems = [...unique.values()].sort((a, b) => a.name.localeCompare(b.name)); setGradingSystems(systems); const savedId = data.settings.find((row) => row.key === 'grading.default_system_id')?.value; if (typeof savedId === 'string' && systems.some((system) => system.id === savedId)) setDefaultSystemId(savedId); else setDefaultSystemId(defaultSystem.id); }); return () => { active = false; }; }, [data.settings]);
   const update = (key: string, value: string) => setValues((current) => ({ ...current, [key]: value }));
   const saveAll = async () => {
     setSaving(true);
     try {
       for (const row of data.settings) {
+        if (row.key === 'grading.swunext_global_modules' || row.key === 'grading.default_system_id' || row.key === 'grading.default_system_definition') continue;
         let value: unknown = values[row.key] ?? '';
         try { value = JSON.parse(value as string); } catch { /* plain strings remain valid JSONB values */ }
         await saveSystemSetting(userId, row.key, value);
       }
+      const selectedDefault = gradingSystems.find((system) => system.id === defaultSystemId) ?? IT_GLOBAL_GRADING_SYSTEM;
+      await saveSystemSetting(userId, 'grading.default_system_id', selectedDefault.id);
+      await saveSystemSetting(userId, 'grading.default_system_definition', selectedDefault);
       toast.show('System settings saved.'); refresh();
     } catch (cause) { toast.show(cause instanceof Error ? cause.message : 'Settings could not be saved.'); }
     finally { setSaving(false); }
@@ -134,7 +143,7 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
   const boolValue = (key: string) => values[key] === 'true';
   return <>
     <Heading title="System Settings" subtitle="Manage the global services and policies that keep APMS running." action={<Button label="Save all changes" loading={saving} onPress={() => void saveAll()} />} />
-    {data.settings.length ? <View style={styles.settingsLayout}>
+    <View style={styles.settingsLayout}>
       <Card style={styles.settingsIntro}><Text style={styles.cardTitle}>Configuration overview</Text><Text style={styles.help}>These settings affect the whole APMS installation. Changes are permission-checked and recorded in the audit log.</Text><View style={styles.summaryRow}><Text style={styles.summaryLabel}>Last configuration update</Text><Text style={styles.summaryValue}>{date(data.settings.map((row) => row.updatedAt).sort().at(-1) ?? null)}</Text></View></Card>
       <Card style={styles.settingsCard}>
         <Text style={styles.sectionTitle}>Core services</Text>
@@ -146,14 +155,13 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
         <View style={styles.inlineField}><Field label="Retention period" value={values['backup.retention_days'] ?? ''} onChangeText={(value) => update('backup.retention_days', value.replace(/\D/g, '').slice(0, 3))} keyboardType="number-pad" containerStyle={styles.retentionField} /><Text style={styles.unit}>days</Text></View>
         <Text style={styles.help}>Minimum 1 day. Backup execution still requires the configured protected worker.</Text>
       </Card>
-      {setting('grading.swunext_global_modules') ? <Card style={styles.settingsCard}>
-        <View style={styles.sectionHeader}><View><Text style={styles.sectionTitle}>SWUNEXT grading policy</Text><Text style={styles.sectionHelp}>Active grading formula used by the academic workflows.</Text></View><Text style={styles.badge}>ACTIVE</Text></View>
-        <View style={styles.policyGrid}><PolicyItem label="Effortful learning" value="55%" /><PolicyItem label="Mastery" value="45%" /><PolicyItem label="Passing grade" value="80%" /><PolicyItem label="Passing mastery" value="80%" /></View>
-        <Text style={styles.help}>This policy is managed through criteria versions. Raw JSON is available below for controlled maintenance.</Text>
-        <Field label="Advanced policy JSON" value={values['grading.swunext_global_modules'] ?? ''} onChangeText={(value) => update('grading.swunext_global_modules', value)} multiline numberOfLines={4} style={styles.jsonField} />
-      </Card> : null}
+      <Card style={styles.settingsCard}>
+        <View style={styles.sectionHeader}><View><Text style={styles.sectionTitle}>Default grading system</Text><Text style={styles.sectionHelp}>Choose which saved grading definition is used when a class has no explicitly applied system.</Text></View><Text style={styles.badge}>DEFAULT</Text></View>
+        <SelectField label="Default grading system" value={defaultSystemId} options={gradingSystems.map((system) => ({ label: system.name, value: system.id }))} onChange={setDefaultSystemId} />
+        <Text style={styles.help}>Grading definitions are created and edited by Academic Admins. This setting selects the system-wide fallback; class-specific grading systems continue to take precedence.</Text>
+      </Card>
       <Text style={styles.updatedNote}>Settings last loaded from Supabase. {data.settings.length} configuration entries.</Text>
-    </View> : <PageState kind="empty" title="No settings initialized" message="System settings can be initialized through an approved migration." />}
+    </View>
   </>;
 }
 function PolicyItem({ label, value }: { label: string; value: string }) { return <View style={styles.policyItem}><Text style={styles.policyValue}>{value}</Text><Text style={styles.policyLabel}>{label}</Text></View>; }

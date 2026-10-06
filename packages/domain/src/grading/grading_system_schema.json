@@ -1,0 +1,1576 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/schemas/grading-system.schema.json",
+  "title": "Custom Grading System Schema",
+  "description": "Defines a configurable academic grading system. The model supports custom periods and organizational groups, reusable assessment types, recursive grading components, multiple assessment scoring and aggregation strategies, conditional component weighting, independent/formula/cumulative period calculations, explicit final-result selection, and independently configurable passing and failing grade scales.",
+  "type": "object",
+  "required": [
+    "id",
+    "name",
+    "components",
+    "calculationRootComponentId",
+    "finalResult",
+    "finalGradeConversion"
+  ],
+  "properties": {
+    "id": {
+      "$ref": "#/$defs/id",
+      "description": "Stable unique identifier for the grading system.",
+      "examples": [
+        "grading-system-a",
+        "college-standard-2026"
+      ]
+    },
+    "name": {
+      "$ref": "#/$defs/name",
+      "description": "Human-readable name of the grading system.",
+      "examples": [
+        "IT Global Grading System",
+        "Engineering Department Grading System"
+      ]
+    },
+    "description": {
+      "type": "string",
+      "description": "Optional explanation of the grading system and its intended use."
+    },
+    "periods": {
+      "type": "array",
+      "description": "Reporting or grading periods such as P1, P2, P3, Prelim, Midterm, or Final. Period names and counts are customizable.",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/period"
+      }
+    },
+    "groupTypes": {
+      "type": "array",
+      "description": "Defines organizational group types such as Module, Unit, Week, Chapter, or Block.",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/groupType"
+      }
+    },
+    "groups": {
+      "type": "array",
+      "description": "Instances of organizational groups, such as Module 1, Module 2, or Week 1.",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/group"
+      }
+    },
+    "assessmentTypes": {
+      "type": "array",
+      "description": "Custom assessment classifications such as Exam, Quiz, Assignment, Project, Laboratory, Participation, or institution-specific types.",
+      "default": [],
+      "items": {
+        "$ref": "#/$defs/assessmentType"
+      }
+    },
+    "components": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Defines the grading calculation graph. Components either aggregate assessments or combine other grading components.",
+      "items": {
+        "$ref": "#/$defs/component"
+      }
+    },
+    "calculationRootComponentId": {
+      "$ref": "#/$defs/id",
+      "description": "References the root component of the component calculation graph. This component may produce the final raw percentage directly or an intermediate standing used by period calculations.",
+      "examples": [
+        "final-grade",
+        "semester-grade",
+        "period-standing"
+      ]
+    },
+    "periodCalculation": {
+      "$ref": "#/$defs/periodCalculation",
+      "description": "Optional configuration controlling how period grades are calculated."
+    },
+    "finalResult": {
+      "$ref": "#/$defs/finalResult",
+      "description": "Identifies which calculated result becomes the final raw percentage supplied to finalGradeConversion."
+    },
+    "finalGradeConversion": {
+      "$ref": "#/$defs/finalGradeConversion",
+      "description": "Converts the final raw percentage into the institution's point grade and optionally a letter or textual grade."
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "id": {
+      "title": "Identifier",
+      "description": "A non-empty stable identifier used for cross-references. IDs should be unique within the relevant entity collection.",
+      "type": "string",
+      "minLength": 1,
+      "examples": [
+        "p1",
+        "module",
+        "quiz",
+        "written-work"
+      ]
+    },
+    "name": {
+      "title": "Display Name",
+      "description": "A non-empty human-readable display name.",
+      "type": "string",
+      "minLength": 1,
+      "examples": [
+        "P1",
+        "Written Work",
+        "Final Project"
+      ]
+    },
+    "shortCode": {
+      "title": "Short Code",
+      "description": "Optional abbreviated human-readable code used to identify an assessment type or grading component in gradebooks, reports, tables, and user interfaces.",
+      "type": "string",
+      "minLength": 1,
+      "examples": [
+        "SoC",
+        "LP",
+        "TB",
+        "WuQ",
+        "CiG",
+        "FO",
+        "CS",
+        "PE"
+      ]
+    },
+    "sequence": {
+      "title": "Sequence Number",
+      "description": "One-based ordering value used for deterministic presentation and calculations where order matters. Sequence values should normally be unique among sibling or comparable entities.",
+      "type": "integer",
+      "minimum": 1,
+      "examples": [
+        1,
+        2,
+        3
+      ]
+    },
+    "percentage": {
+      "title": "Percentage",
+      "description": "Percentage expressed on a 0 to 100 scale.",
+      "type": "number",
+      "minimum": 0,
+      "maximum": 100,
+      "examples": [
+        0,
+        60,
+        80,
+        100
+      ]
+    },
+    "weight": {
+      "title": "Weight",
+      "description": "A non-negative grading weight represented either as a decimal number or an exact fraction. Decimal weights are convenient for terminating values such as 0.30 or 0.50. Fractions are recommended for repeating values such as 1/6.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/decimalWeight"
+        },
+        {
+          "$ref": "#/$defs/fractionWeight"
+        }
+      ],
+      "examples": [
+        0.3,
+        0.5,
+        {
+          "numerator": 1,
+          "denominator": 6
+        }
+      ]
+    },
+    "decimalWeight": {
+      "title": "Decimal Weight",
+      "description": "A non-negative numeric weight. For relative weighting, 1 represents 100%, 0.5 represents 50%, and 0.25 represents 25%.",
+      "type": "number",
+      "minimum": 0,
+      "examples": [
+        0.15,
+        0.3,
+        0.5,
+        1
+      ]
+    },
+    "fractionWeight": {
+      "title": "Fractional Weight",
+      "description": "An exact non-negative rational weight represented by numerator divided by denominator. Reduced fractions are recommended but not required.",
+      "type": "object",
+      "required": [
+        "numerator",
+        "denominator"
+      ],
+      "properties": {
+        "numerator": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Numerator of the fractional weight."
+        },
+        "denominator": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Denominator of the fractional weight. Must be greater than zero."
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "numerator": 1,
+          "denominator": 6
+        },
+        {
+          "numerator": 1,
+          "denominator": 2
+        },
+        {
+          "numerator": 3,
+          "denominator": 20
+        }
+      ]
+    },
+    "period": {
+      "title": "Grading Period",
+      "description": "A named reporting or grading period. Examples include P1, P2, Prelim, Midterm, Final, Quarter 1, or Term 1.",
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "sequence"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "sequence": {
+          "$ref": "#/$defs/sequence",
+          "description": "Chronological order of the period."
+        },
+        "description": {
+          "type": "string"
+        },
+        "groupIds": {
+          "type": "array",
+          "uniqueItems": true,
+          "description": "Organizational groups assigned to this period. For example, P1 may contain Modules 1 through 4.",
+          "items": {
+            "$ref": "#/$defs/id"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "id": "p1",
+          "name": "P1",
+          "sequence": 1,
+          "groupIds": [
+            "m1",
+            "m2",
+            "m3",
+            "m4"
+          ]
+        }
+      ]
+    },
+    "groupType": {
+      "title": "Group Type",
+      "description": "Defines a customizable organizational grouping concept such as Module, Unit, Week, Chapter, or Block.",
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "id": "module",
+          "name": "Module"
+        }
+      ]
+    },
+    "group": {
+      "title": "Organizational Group",
+      "description": "An instance of a group type. Groups provide organizational scope for assessments and cumulative calculations and may themselves be nested.",
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "typeId",
+        "sequence"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "typeId": {
+          "$ref": "#/$defs/id",
+          "description": "References groupTypes[].id."
+        },
+        "sequence": {
+          "$ref": "#/$defs/sequence"
+        },
+        "description": {
+          "type": "string"
+        },
+        "parentGroupId": {
+          "$ref": "#/$defs/id",
+          "description": "Optional reference to another group when groups are nested."
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "id": "m1",
+          "name": "Module 1",
+          "typeId": "module",
+          "sequence": 1
+        }
+      ]
+    },
+    "assessmentType": {
+      "title": "Assessment Type",
+      "description": "A customizable assessment classification. Assessment types are descriptive; scoring and aggregation behavior are defined by assessmentDefinition.",
+      "type": "object",
+      "required": [
+        "id",
+        "name"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "shortCode": {
+          "$ref": "#/$defs/shortCode"
+        },
+        "description": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "id": "quiz",
+          "name": "Quiz"
+        },
+        {
+          "id": "project",
+          "name": "Project"
+        }
+      ]
+    },
+    "component": {
+      "title": "Grading Component",
+      "description": "A node in the grading calculation graph. A component either obtains its value from assessments or combines the results of other components.",
+      "type": "object",
+      "required": [
+        "id",
+        "name",
+        "sequence",
+        "calculation"
+      ],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "$ref": "#/$defs/name"
+        },
+        "shortCode": {
+          "$ref": "#/$defs/shortCode"
+        },
+        "sequence": {
+          "$ref": "#/$defs/sequence"
+        },
+        "description": {
+          "type": "string"
+        },
+        "assessmentDefinition": {
+          "$ref": "#/$defs/assessmentDefinition",
+          "description": "Defines assessments accepted by this component. Normally present when calculation.mode is assessments."
+        },
+        "calculation": {
+          "$ref": "#/$defs/componentCalculation"
+        }
+      },
+      "additionalProperties": false
+    },
+    "assessmentDefinition": {
+      "title": "Assessment Definition",
+      "description": "Defines the assessment type, count constraints, raw-score conversion, and aggregation behavior of an assessment-based component.",
+      "type": "object",
+      "required": [
+        "typeId",
+        "scoring",
+        "aggregation"
+      ],
+      "properties": {
+        "typeId": {
+          "$ref": "#/$defs/id",
+          "description": "References assessmentTypes[].id."
+        },
+        "count": {
+          "$ref": "#/$defs/assessmentCount"
+        },
+        "maxScore": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Default or required maximum raw score for assessments. For linear scoring, percentage = rawScore / maxScore × 100.",
+          "examples": [
+            3,
+            20,
+            100
+          ]
+        },
+        "scoring": {
+          "$ref": "#/$defs/assessmentScoring"
+        },
+        "aggregation": {
+          "$ref": "#/$defs/assessmentAggregation"
+        }
+      },
+      "additionalProperties": false
+    },
+    "assessmentCount": {
+      "title": "Assessment Count Constraint",
+      "description": "Restricts the number of assessments associated with a component within a specified scope.",
+      "type": "object",
+      "properties": {
+        "min": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Minimum permitted number of assessments."
+        },
+        "max": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Maximum permitted number of assessments."
+        },
+        "scope": {
+          "$ref": "#/$defs/countScope"
+        }
+      },
+      "anyOf": [
+        {
+          "required": [
+            "min"
+          ]
+        },
+        {
+          "required": [
+            "max"
+          ]
+        }
+      ],
+      "additionalProperties": false,
+      "examples": [
+        {
+          "min": 1,
+          "max": 2,
+          "scope": {
+            "type": "per_group",
+            "groupTypeId": "module"
+          }
+        }
+      ]
+    },
+    "countScope": {
+      "title": "Assessment Count Scope",
+      "description": "Determines where an assessment-count constraint is independently evaluated.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/overallCountScope"
+        },
+        {
+          "$ref": "#/$defs/perGroupCountScope"
+        },
+        {
+          "$ref": "#/$defs/perPeriodCountScope"
+        }
+      ]
+    },
+    "overallCountScope": {
+      "title": "Overall Count Scope",
+      "description": "The assessment count applies across the entire grading context.",
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "overall"
+        }
+      },
+      "additionalProperties": false
+    },
+    "perGroupCountScope": {
+      "title": "Per-Group Count Scope",
+      "description": "The assessment count applies independently to every group of the referenced group type.",
+      "type": "object",
+      "required": [
+        "type",
+        "groupTypeId"
+      ],
+      "properties": {
+        "type": {
+          "const": "per_group"
+        },
+        "groupTypeId": {
+          "$ref": "#/$defs/id",
+          "description": "References groupTypes[].id."
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "type": "per_group",
+          "groupTypeId": "module"
+        }
+      ]
+    },
+    "perPeriodCountScope": {
+      "title": "Per-Period Count Scope",
+      "description": "The assessment count applies independently to each grading period.",
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "per_period"
+        }
+      },
+      "additionalProperties": false
+    },
+    "assessmentScoring": {
+      "title": "Assessment Scoring",
+      "description": "Defines how a raw assessment result is converted into an assessment percentage before aggregation.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/linearScoring"
+        },
+        {
+          "$ref": "#/$defs/numericMappingScoring"
+        },
+        {
+          "$ref": "#/$defs/valueMappingScoring"
+        }
+      ]
+    },
+    "linearScoring": {
+      "title": "Linear Scoring",
+      "description": "Converts a numeric raw score proportionally. percentage = rawScore / maxScore × 100.",
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "const": "linear"
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "mode": "linear"
+        }
+      ]
+    },
+    "numericMappingScoring": {
+      "title": "Numeric Score Mapping",
+      "description": "Maps discrete numeric raw scores directly to percentages. Useful for rubrics or proficiency scales such as 0 → 0%, 1 → 60%, 2 → 80%, and 3 → 100%.",
+      "type": "object",
+      "required": [
+        "mode",
+        "mapping"
+      ],
+      "properties": {
+        "mode": {
+          "const": "numeric_mapping"
+        },
+        "mapping": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/numericScoreMapping"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "mode": "numeric_mapping",
+          "mapping": [
+            {
+              "value": 0,
+              "percentage": 0
+            },
+            {
+              "value": 1,
+              "percentage": 60
+            },
+            {
+              "value": 2,
+              "percentage": 80
+            },
+            {
+              "value": 3,
+              "percentage": 100
+            }
+          ]
+        }
+      ]
+    },
+    "numericScoreMapping": {
+      "title": "Numeric Score Mapping Entry",
+      "description": "Maps a discrete numeric raw score to a percentage.",
+      "type": "object",
+      "required": [
+        "value",
+        "percentage"
+      ],
+      "properties": {
+        "value": {
+          "type": "number",
+          "description": "Raw numeric assessment score."
+        },
+        "percentage": {
+          "$ref": "#/$defs/percentage"
+        }
+      },
+      "additionalProperties": false
+    },
+    "valueMappingScoring": {
+      "title": "Categorical Value Mapping",
+      "description": "Maps non-numeric raw assessment values directly to percentages. Examples include Present/Absent, Pass/Fail, Complete/Incomplete, or competency levels.",
+      "type": "object",
+      "required": [
+        "mode",
+        "mapping"
+      ],
+      "properties": {
+        "mode": {
+          "const": "value_mapping"
+        },
+        "mapping": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/valueScoreMapping"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "mode": "value_mapping",
+          "mapping": [
+            {
+              "value": "P",
+              "percentage": 100
+            },
+            {
+              "value": "A",
+              "percentage": 0
+            }
+          ]
+        }
+      ]
+    },
+    "valueScoreMapping": {
+      "title": "Categorical Score Mapping Entry",
+      "description": "Maps one categorical raw assessment value to a percentage.",
+      "type": "object",
+      "required": [
+        "value",
+        "percentage"
+      ],
+      "properties": {
+        "value": {
+          "type": "string",
+          "minLength": 1
+        },
+        "percentage": {
+          "$ref": "#/$defs/percentage"
+        }
+      },
+      "additionalProperties": false
+    },
+    "assessmentAggregation": {
+      "title": "Assessment Aggregation",
+      "description": "Defines how multiple assessment results within an assessment-based component are combined.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/pointsAggregation"
+        },
+        {
+          "$ref": "#/$defs/equalAggregation"
+        },
+        {
+          "$ref": "#/$defs/weightedAssessmentAggregation"
+        }
+      ]
+    },
+    "pointsAggregation": {
+      "title": "Points Aggregation",
+      "description": "Combines assessments according to their point contribution. For ordinary linear scores this is equivalent to total earned points divided by total possible points. When score mappings are used, converted percentages may be converted to effective points according to the grading engine's calculation rules.",
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "const": "points"
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "mode": "points"
+        }
+      ]
+    },
+    "equalAggregation": {
+      "title": "Equal Assessment Aggregation",
+      "description": "Every assessment percentage contributes equally regardless of maximum score.",
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "const": "equal"
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "mode": "equal"
+        }
+      ]
+    },
+    "weightedAssessmentAggregation": {
+      "title": "Weighted Assessment Aggregation",
+      "description": "Assessments contribute according to explicit assessment-instance weights. The actual assessment data must provide the weights.",
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "const": "weighted"
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "mode": "weighted"
+        }
+      ]
+    },
+    "componentCalculation": {
+      "title": "Component Calculation",
+      "description": "Determines whether a component obtains its value from assessments or by combining other components.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/assessmentComponentCalculation"
+        },
+        {
+          "$ref": "#/$defs/weightedComponentCalculation"
+        }
+      ]
+    },
+    "assessmentComponentCalculation": {
+      "title": "Assessment-Based Component Calculation",
+      "description": "The component obtains its percentage from assessments according to assessmentDefinition.",
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "const": "assessments"
+        }
+      },
+      "additionalProperties": false
+    },
+    "weightedComponentCalculation": {
+      "title": "Weighted Component Calculation",
+      "description": "Calculates a component by combining the percentages produced by referenced child components.",
+      "type": "object",
+      "required": [
+        "mode",
+        "weightMode",
+        "components"
+      ],
+      "properties": {
+        "mode": {
+          "const": "weighted"
+        },
+        "weightMode": {
+          "type": "string",
+          "enum": [
+            "relative",
+            "absolute"
+          ],
+          "description": "relative means weights are proportions of this parent component and should normally total 1. absolute means weights represent direct contributions at a broader grading level."
+        },
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Default child-component weights.",
+          "items": {
+            "$ref": "#/$defs/componentWeight"
+          }
+        },
+        "rules": {
+          "type": "array",
+          "description": "Optional conditional overrides that alter component weighting when runtime conditions are satisfied.",
+          "items": {
+            "$ref": "#/$defs/calculationRule"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "componentWeight": {
+      "title": "Weighted Component Source",
+      "description": "A weighted input to a component calculation. The source may reference a component directly or a component evaluated within a specific grading period.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/directComponentWeight"
+        },
+        {
+          "$ref": "#/$defs/periodComponentWeight"
+        }
+      ]
+    },
+    "directComponentWeight": {
+      "title": "Direct Component Weight",
+      "description": "Uses the calculated result of another grading component without imposing a specific period context.",
+      "type": "object",
+      "required": [
+        "source",
+        "componentId",
+        "weight"
+      ],
+      "properties": {
+        "source": {
+          "const": "component",
+          "description": "Indicates that the source is a grading component evaluated in the current calculation context."
+        },
+        "componentId": {
+          "$ref": "#/$defs/id",
+          "description": "References components[].id."
+        },
+        "weight": {
+          "$ref": "#/$defs/weight",
+          "description": "Weight assigned to the referenced component."
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "source": "component",
+          "componentId": "el",
+          "weight": 0.55
+        },
+        {
+          "source": "component",
+          "componentId": "final-project",
+          "weight": {
+            "numerator": 1,
+            "denominator": 2
+          }
+        }
+      ]
+    },
+    "periodComponentWeight": {
+      "title": "Period-Scoped Component Weight",
+      "description": "Uses the calculated result of a grading component evaluated within a specific grading period. This allows one reusable component definition, such as Period Grade, to produce distinct P1, P2, and P3 results.",
+      "type": "object",
+      "required": [
+        "source",
+        "componentId",
+        "periodId",
+        "weight"
+      ],
+      "properties": {
+        "source": {
+          "const": "period_component",
+          "description": "Indicates that the referenced component must be evaluated in the specified period context."
+        },
+        "componentId": {
+          "$ref": "#/$defs/id",
+          "description": "References components[].id."
+        },
+        "periodId": {
+          "$ref": "#/$defs/id",
+          "description": "References periods[].id and specifies the period context in which the component is evaluated."
+        },
+        "weight": {
+          "$ref": "#/$defs/weight",
+          "description": "Weight assigned to the period-scoped component result."
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "source": "period_component",
+          "componentId": "period-grade",
+          "periodId": "p1",
+          "weight": {
+            "numerator": 1,
+            "denominator": 6
+          }
+        }
+      ]
+    },
+    "calculationRule": {
+      "title": "Conditional Calculation Rule",
+      "description": "Overrides a weighted component calculation when a runtime condition is true.",
+      "type": "object",
+      "required": [
+        "when",
+        "override"
+      ],
+      "properties": {
+        "when": {
+          "$ref": "#/$defs/condition"
+        },
+        "override": {
+          "$ref": "#/$defs/calculationOverride"
+        }
+      },
+      "additionalProperties": false
+    },
+    "condition": {
+      "title": "Calculation Condition",
+      "description": "A runtime condition evaluated by the grading engine. The current schema supports assessment-count conditions and can be extended with additional condition types.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/assessmentCountCondition"
+        }
+      ]
+    },
+    "assessmentCountCondition": {
+      "title": "Assessment Count Condition",
+      "description": "Tests the number of assessments associated with a grading component.",
+      "type": "object",
+      "required": [
+        "type",
+        "componentId",
+        "operator",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "const": "assessment_count"
+        },
+        "componentId": {
+          "$ref": "#/$defs/id",
+          "description": "References components[].id."
+        },
+        "operator": {
+          "type": "string",
+          "enum": [
+            "eq",
+            "ne",
+            "lt",
+            "lte",
+            "gt",
+            "gte"
+          ],
+          "description": "Comparison operator: equal, not equal, less than, less than or equal, greater than, or greater than or equal."
+        },
+        "value": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "type": "assessment_count",
+          "componentId": "cig",
+          "operator": "eq",
+          "value": 1
+        }
+      ]
+    },
+    "calculationOverride": {
+      "title": "Calculation Override",
+      "description": "Replacement component weighting applied when a conditional calculation rule is satisfied.",
+      "type": "object",
+      "required": [
+        "components"
+      ],
+      "properties": {
+        "weightMode": {
+          "type": "string",
+          "enum": [
+            "relative",
+            "absolute"
+          ],
+          "description": "Optional replacement weight mode. If omitted, the parent calculation's weightMode remains in effect."
+        },
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/componentWeight"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "periodCalculation": {
+      "title": "Period Calculation Strategy",
+      "description": "Defines how period-level grades behave. Supported strategies are independent periods, explicit period formulas, and cumulative periods/groups.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/independentPeriodsCalculation"
+        },
+        {
+          "$ref": "#/$defs/periodFormulaCalculation"
+        },
+        {
+          "$ref": "#/$defs/cumulativePeriodCalculation"
+        }
+      ]
+    },
+    "independentPeriodsCalculation": {
+      "title": "Independent Periods",
+      "description": "Each period is calculated independently. Assessments or grades from earlier periods are not automatically carried into later periods.",
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "const": "independent"
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "mode": "independent"
+        }
+      ]
+    },
+    "periodFormulaCalculation": {
+      "title": "Period Formula Calculation",
+      "description": "Each reported period grade is calculated using an explicit weighted formula that may combine the current period standing and previously calculated period grades.",
+      "type": "object",
+      "required": [
+        "mode",
+        "periods"
+      ],
+      "properties": {
+        "mode": {
+          "const": "period_formula"
+        },
+        "periods": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/periodFormula"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "periodFormula": {
+      "title": "Period Formula",
+      "description": "Defines the weighted sources used to calculate one reported period grade.",
+      "type": "object",
+      "required": [
+        "periodId",
+        "components"
+      ],
+      "properties": {
+        "periodId": {
+          "$ref": "#/$defs/id",
+          "description": "References periods[].id."
+        },
+        "components": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/periodFormulaComponent"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "periodFormulaComponent": {
+      "title": "Period Formula Source",
+      "description": "A weighted source used by a period formula.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/currentPeriodFormulaComponent"
+        },
+        {
+          "$ref": "#/$defs/previousPeriodFormulaComponent"
+        }
+      ]
+    },
+    "currentPeriodFormulaComponent": {
+      "title": "Current Period Standing Source",
+      "description": "Uses the calculation root component evaluated for the current period.",
+      "type": "object",
+      "required": [
+        "source",
+        "weight"
+      ],
+      "properties": {
+        "source": {
+          "const": "current_period"
+        },
+        "weight": {
+          "$ref": "#/$defs/weight"
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "source": "current_period",
+          "weight": 0.6
+        }
+      ]
+    },
+    "previousPeriodFormulaComponent": {
+      "title": "Period Grade Source",
+      "description": "Uses an already calculated period grade as an input to another period formula.",
+      "type": "object",
+      "required": [
+        "source",
+        "periodId",
+        "weight"
+      ],
+      "properties": {
+        "source": {
+          "const": "period_grade"
+        },
+        "periodId": {
+          "$ref": "#/$defs/id",
+          "description": "References periods[].id."
+        },
+        "weight": {
+          "$ref": "#/$defs/weight"
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "source": "period_grade",
+          "periodId": "prelim",
+          "weight": {
+            "numerator": 1,
+            "denominator": 4
+          }
+        }
+      ]
+    },
+    "cumulativePeriodCalculation": {
+      "title": "Cumulative Period Calculation",
+      "description": "Later periods include data from earlier periods or organizational groups according to sequence.",
+      "type": "object",
+      "required": [
+        "mode",
+        "scope"
+      ],
+      "properties": {
+        "mode": {
+          "const": "cumulative"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "periods",
+            "groups"
+          ],
+          "description": "Whether cumulative inclusion follows period sequence or organizational group sequence."
+        },
+        "groupTypeId": {
+          "$ref": "#/$defs/id",
+          "description": "Group type whose sequence controls cumulative inclusion when scope is groups."
+        },
+        "finalPeriodId": {
+          "$ref": "#/$defs/id",
+          "description": "Optional period representing the final cumulative reporting period."
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "mode": "cumulative",
+          "scope": "groups",
+          "groupTypeId": "module",
+          "finalPeriodId": "p3"
+        }
+      ]
+    },
+    "finalResult": {
+      "title": "Final Result Source",
+      "description": "Identifies which calculated result represents the final raw percentage before final-grade conversion. This separates the component calculation root from the final result of the overall grading process.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/componentFinalResult"
+        },
+        {
+          "$ref": "#/$defs/periodGradeFinalResult"
+        }
+      ]
+    },
+    "componentFinalResult": {
+      "title": "Component Final Result",
+      "description": "Uses the calculated percentage of a grading component as the final raw percentage.",
+      "type": "object",
+      "required": [
+        "source",
+        "componentId"
+      ],
+      "properties": {
+        "source": {
+          "const": "component"
+        },
+        "componentId": {
+          "$ref": "#/$defs/id",
+          "description": "References components[].id."
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "source": "component",
+          "componentId": "semester-grade"
+        }
+      ]
+    },
+    "periodGradeFinalResult": {
+      "title": "Period Grade Final Result",
+      "description": "Uses the calculated grade of a specific reporting period as the final raw percentage.",
+      "type": "object",
+      "required": [
+        "source",
+        "periodId"
+      ],
+      "properties": {
+        "source": {
+          "const": "period_grade"
+        },
+        "periodId": {
+          "$ref": "#/$defs/id",
+          "description": "References periods[].id."
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "source": "period_grade",
+          "periodId": "final"
+        }
+      ]
+    },
+    "rounding": {
+      "title": "Rounding Configuration",
+      "description": "Defines how calculated values are rounded and how many decimal digits are retained.",
+      "type": "object",
+      "required": [
+        "mode",
+        "precision"
+      ],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": [
+            "nearest",
+            "floor",
+            "ceiling"
+          ],
+          "description": "nearest rounds to the nearest value, floor rounds downward, and ceiling rounds upward."
+        },
+        "precision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10,
+          "description": "Number of decimal digits retained.",
+          "examples": [
+            0,
+            2,
+            4
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "mode": "nearest",
+          "precision": 2
+        }
+      ]
+    },
+    "finalGradeConversion": {
+      "title": "Final Grade Conversion",
+      "description": "Converts the final raw percentage into a point grade and optionally a letter/textual grade. Passing and failing portions of the scale are independently configurable.",
+      "type": "object",
+      "required": [
+        "passingPercentage",
+        "passingScale",
+        "failingScale",
+        "rounding"
+      ],
+      "properties": {
+        "passingPercentage": {
+          "$ref": "#/$defs/percentage",
+          "description": "Minimum raw percentage considered passing. Values greater than or equal to this threshold use passingScale; values below it use failingScale."
+        },
+        "passingScale": {
+          "$ref": "#/$defs/passingGradeScale"
+        },
+        "failingScale": {
+          "$ref": "#/$defs/failingGradeScale"
+        },
+        "rounding": {
+          "$ref": "#/$defs/rounding"
+        }
+      },
+      "additionalProperties": false
+    },
+    "passingGradeScale": {
+      "title": "Passing Grade Scale",
+      "description": "Defines how passing percentages are converted to point and optionally textual grades.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/passingEqualIntervalScale"
+        },
+        {
+          "$ref": "#/$defs/gradeMappingScale"
+        }
+      ]
+    },
+    "failingGradeScale": {
+      "title": "Failing Grade Scale",
+      "description": "Defines how percentages below the passing threshold are converted. It is independent of the passing scale.",
+      "oneOf": [
+        {
+          "$ref": "#/$defs/failingEqualIntervalScale"
+        },
+        {
+          "$ref": "#/$defs/gradeMappingScale"
+        }
+      ]
+    },
+    "passingEqualIntervalScale": {
+      "title": "Passing Equal-Interval Scale",
+      "description": "Distributes the range from passingPercentage through maximumPercentage across fixed point-grade intervals from passingPoint through bestPoint.",
+      "type": "object",
+      "required": [
+        "mode",
+        "maximumPercentage",
+        "bestPoint",
+        "passingPoint",
+        "pointInterval"
+      ],
+      "properties": {
+        "mode": {
+          "const": "equal_interval"
+        },
+        "maximumPercentage": {
+          "$ref": "#/$defs/percentage",
+          "description": "Highest percentage represented by the passing scale, normally 100."
+        },
+        "bestPoint": {
+          "type": "number",
+          "description": "Best point grade assigned at maximumPercentage.",
+          "examples": [
+            1
+          ]
+        },
+        "passingPoint": {
+          "type": "number",
+          "description": "Point grade assigned at finalGradeConversion.passingPercentage.",
+          "examples": [
+            3
+          ]
+        },
+        "pointInterval": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Difference between consecutive point-grade values.",
+          "examples": [
+            0.25,
+            0.5
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "mode": "equal_interval",
+          "maximumPercentage": 100,
+          "bestPoint": 1,
+          "passingPoint": 3,
+          "pointInterval": 0.25
+        }
+      ]
+    },
+    "failingEqualIntervalScale": {
+      "title": "Failing Equal-Interval Scale",
+      "description": "Distributes percentages below the passing threshold across fixed point-grade intervals from firstFailingPoint through worstPoint.",
+      "type": "object",
+      "required": [
+        "mode",
+        "minimumPercentage",
+        "firstFailingPoint",
+        "worstPoint",
+        "pointInterval"
+      ],
+      "properties": {
+        "mode": {
+          "const": "equal_interval"
+        },
+        "minimumPercentage": {
+          "$ref": "#/$defs/percentage",
+          "description": "Lowest percentage represented by the failing scale, normally 0."
+        },
+        "firstFailingPoint": {
+          "type": "number",
+          "description": "Best point grade that is still failing. For a passing point of 3.00 and interval of 0.25 this might be 3.25.",
+          "examples": [
+            3.25
+          ]
+        },
+        "worstPoint": {
+          "type": "number",
+          "description": "Worst point grade assigned at minimumPercentage.",
+          "examples": [
+            5
+          ]
+        },
+        "pointInterval": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "description": "Difference between consecutive failing point-grade values.",
+          "examples": [
+            0.25,
+            0.5
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "mode": "equal_interval",
+          "minimumPercentage": 0,
+          "firstFailingPoint": 3.25,
+          "worstPoint": 5,
+          "pointInterval": 0.25
+        }
+      ]
+    },
+    "gradeMappingScale": {
+      "title": "Explicit Grade Mapping Scale",
+      "description": "Defines explicit percentage thresholds instead of deriving grade boundaries from equal intervals. The same structure can independently define passing or failing grades.",
+      "type": "object",
+      "required": [
+        "mode",
+        "mapping"
+      ],
+      "properties": {
+        "mode": {
+          "const": "mapping"
+        },
+        "mapping": {
+          "type": "array",
+          "minItems": 1,
+          "description": "Grade thresholds. An entry applies when the raw percentage is greater than or equal to minimumPercentage and no higher applicable threshold exists.",
+          "items": {
+            "$ref": "#/$defs/finalGradeMapping"
+          }
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "mode": "mapping",
+          "mapping": [
+            {
+              "minimumPercentage": 75,
+              "point": 3.25
+            },
+            {
+              "minimumPercentage": 70,
+              "point": 3.5
+            },
+            {
+              "minimumPercentage": 60,
+              "point": 4
+            },
+            {
+              "minimumPercentage": 0,
+              "point": 5
+            }
+          ]
+        }
+      ]
+    },
+    "finalGradeMapping": {
+      "title": "Final Grade Mapping",
+      "description": "Defines a lower percentage threshold and the point/letter grade assigned when that threshold is the highest satisfied threshold.",
+      "type": "object",
+      "required": [
+        "minimumPercentage",
+        "point"
+      ],
+      "properties": {
+        "minimumPercentage": {
+          "$ref": "#/$defs/percentage"
+        },
+        "point": {
+          "type": "number",
+          "description": "Point-grade value."
+        },
+        "letter": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Optional letter or textual grade.",
+          "examples": [
+            "A",
+            "A-",
+            "Pass",
+            "Fail"
+          ]
+        }
+      },
+      "additionalProperties": false,
+      "examples": [
+        {
+          "minimumPercentage": 90,
+          "point": 1.5,
+          "letter": "A"
+        }
+      ]
+    }
+  }
+}

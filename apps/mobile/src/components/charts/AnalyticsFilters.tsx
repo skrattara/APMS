@@ -16,6 +16,7 @@ const riskOptions = [
   { label: "Low risk", value: "low" },
   { label: "Medium risk", value: "medium" },
   { label: "High risk", value: "high" },
+  { label: "Unavailable", value: "unavailable" },
 ];
 
 export function useAnalyticsFilters(records: EvaluationRecord[]) {
