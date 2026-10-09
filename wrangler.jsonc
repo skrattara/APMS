@@ -1,0 +1,8 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "apms-web",
+  "compatibility_date": "2026-10-09",
+  "assets": {
+    "directory": "./apps/mobile/dist"
+  }
+}
