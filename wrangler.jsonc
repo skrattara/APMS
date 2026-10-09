@@ -3,7 +3,8 @@
   "name": "apms-web",
   "compatibility_date": "2026-10-09",
   "assets": {
-    "directory": "./apps/mobile/dist"
+    "directory": "./apps/mobile/dist",
+    "not_found_handling": "single-page-application"
   },
   "vars": {
     "EXPO_PUBLIC_DEMO_MODE": "false",
