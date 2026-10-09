@@ -6,6 +6,7 @@
     "directory": "./apps/mobile/dist"
   },
   "vars": {
+    "EXPO_PUBLIC_DEMO_MODE": "false",
     "EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY": "sb_publishable_Dv-yiSMjjwgsvkctFlJaFQ_EP6W4RV9",
     "EXPO_PUBLIC_SUPABASE_URL": "https://ysmpnxmpuegzewmgxoaz.supabase.co"
   },
