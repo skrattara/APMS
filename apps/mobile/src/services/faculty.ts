@@ -1,3 +1,4 @@
+import { getErrorMessage } from '@/services/errors';
 import {
   isSwunextComponent,
   parseCsv,
@@ -11,7 +12,7 @@ import {
   type SwunextAssessmentComponent,
   type SwunextGradeBreakdown,
 } from '@apms/domain';
-import { DEFAULT_EVALUATION_SYSTEM, removeStandaloneMasteryFactor, validateEvaluationSystem, type EvaluationDefinition } from '@apms/domain';
+import { DEFAULT_EVALUATION_SYSTEM, evaluateStudentPerformanceDetailed, removeStandaloneMasteryFactor, validateEvaluationSystem, type EvaluationDefinition, type EvaluationValue } from '@apms/domain';
 import * as XLSX from 'xlsx';
 
 import { supabase } from './supabase';
@@ -83,7 +84,7 @@ export type FacultyAttendanceSession = { id: string; date: string; label: string
 export type EvaluationRow = {
   enrollmentId: string;
   currentStanding: number | null;
-  riskLevel: 'low' | 'medium' | 'high' | 'unknown';
+  riskLevel: 'low' | 'medium' | 'high' | 'unavailable' | 'unknown';
   predictedStanding: number | null;
   riskProbability?: number | null;
   predictionGeneratedAt?: string | null;
@@ -96,7 +97,7 @@ export type FeedbackRecord = {
   enrollmentId: string;
   body: string;
   category: string;
-  status: 'draft' | 'ready' | 'sent' | 'failed' | 'archived';
+  status: 'draft' | 'ready' | 'sent' | 'published' | 'failed' | 'archived';
   createdAt: string;
 };
 
@@ -405,7 +406,7 @@ async function importRosterPreview(classId: string, programId: string, fileName:
       await addStudentToClass({ classId, programId, ...row.value! });
       success += 1;
     } catch (cause) {
-      row.errors.push(cause instanceof Error ? cause.message : 'Import failed');
+      row.errors.push(getErrorMessage(cause, 'Import failed'));
     }
   }
   const failures = preview.length - success;
@@ -643,9 +644,7 @@ export async function applyFacultyEvaluationSystemToClasses(classIds: string[], 
       const outcome = outcomes[index];
       if (outcome.status !== 'rejected') return [];
       const reason = outcome.reason;
-      const message = reason instanceof Error ? reason.message
-        : reason && typeof reason === 'object' && 'message' in reason && typeof reason.message === 'string' ? reason.message
-        : typeof reason === 'string' ? reason : 'Could not apply evaluation criteria to this class.';
+      const message = getErrorMessage(reason, 'Could not apply evaluation criteria to this class.');
       return [{ classId, message }];
     }),
   };
@@ -701,9 +700,7 @@ export async function applyGradingSystemToClasses(classIds: string[], userId: st
       const outcome = outcomes[index];
       if (outcome.status !== 'rejected') return [];
       const reason = outcome.reason;
-      const message = reason instanceof Error ? reason.message
-        : reason && typeof reason === 'object' && 'message' in reason && typeof reason.message === 'string' ? reason.message
-        : typeof reason === 'string' ? reason : 'Could not apply this grading system.';
+      const message = getErrorMessage(reason, 'Could not apply this grading system.');
       return [{ classId, message }];
     }),
   };
@@ -752,13 +749,15 @@ export type PredictionInput = {
   recentScores: number[];
   attendanceRate: number;
   missingAssessmentCount: number;
+  evaluationValues: EvaluationValue;
+  recordContext: Record<string, unknown>;
 };
 
 export type PredictionResult = {
   enrollmentId: string;
   predictedStanding: number;
-  riskProbability: number;
-  riskLevel: 'low' | 'medium' | 'high';
+  riskProbability: number | null;
+  riskLevel: 'low' | 'medium' | 'high' | 'unavailable';
   trend: 'improving' | 'stable' | 'declining';
   factors: string[];
   modelVersion: string;
@@ -769,10 +768,12 @@ function aiServiceUrl() {
   return process.env.EXPO_PUBLIC_APMS_AI_SERVICE_URL ?? process.env.APMS_AI_SERVICE_URL ?? '';
 }
 
-export async function runAiPredictions(classId: string, inputs: PredictionInput[]) {
+export async function runAiPredictions(classId: string, gradingSystem: GradingDefinition, evaluationCriteria: EvaluationDefinition, inputs: PredictionInput[]) {
   const endpoint = aiServiceUrl();
   if (!inputs.length) throw new Error('At least one student needs scores before prediction can run.');
-  const predictions: PredictionResult[] = [];
+  if (!validateGradingSystem(gradingSystem).valid) throw new Error('The applied grading system is invalid. Fix it before running predictions.');
+  if (!validateEvaluationSystem(evaluationCriteria).valid) throw new Error('The applied evaluation criteria are invalid. Fix them before running predictions.');
+  const rawPredictions: { input: PredictionInput; predictedStanding: number; riskProbability: number | null; aiRiskLevel: string | null; trend: PredictionResult['trend']; factors: string[]; modelVersion: string; dataBasis: string }[] = [];
   if (endpoint) {
     for (const input of inputs) {
       const response = await fetch(`${endpoint.replace(/\/$/, '')}/v1/predictions`, {
@@ -780,35 +781,35 @@ export async function runAiPredictions(classId: string, inputs: PredictionInput[
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           enrollment_id: input.enrollmentId,
-          current_standing: input.currentStanding,
-          recent_scores: input.recentScores,
-          attendance_rate: input.attendanceRate,
-          missing_assessment_count: input.missingAssessmentCount,
+          grading_system: gradingSystem,
+          evaluation_criteria: evaluationCriteria,
+          evaluation_values: input.evaluationValues,
+          student_records: input.recordContext,
         }),
       });
       if (!response.ok) throw new Error(`AI prediction failed (${response.status}). Student records remain available.`);
       const payload = await response.json();
-      predictions.push({
-        enrollmentId: payload.enrollment_id,
+      rawPredictions.push({
+        input,
         predictedStanding: Number(payload.predicted_standing),
-        riskProbability: Number(payload.risk_probability),
-        riskLevel: payload.risk_level,
-        trend: payload.trend,
+        riskProbability: payload.risk_probability == null || !Number.isFinite(Number(payload.risk_probability)) ? null : Number(payload.risk_probability),
+        aiRiskLevel: typeof payload.ai_risk_level === 'string' ? payload.ai_risk_level : typeof payload.risk_level === 'string' ? payload.risk_level : null,
+        trend: ['improving', 'stable', 'declining'].includes(payload.trend) ? payload.trend : 'stable',
         factors: Array.isArray(payload.factors) ? payload.factors : [],
-        modelVersion: payload.model_version,
-        dataBasis: payload.data_basis,
+        modelVersion: String(payload.model_version ?? 'external-ai-service'),
+        dataBasis: String(payload.data_basis ?? 'applied_schema_context'),
       });
     }
   } else {
     const { data, error } = await connected().functions.invoke('apms-predictions', {
       body: {
         class_id: classId,
+        grading_system: gradingSystem,
+        evaluation_criteria: evaluationCriteria,
         inputs: inputs.map((input) => ({
           enrollment_id: input.enrollmentId,
-          current_standing: input.currentStanding,
-          recent_scores: input.recentScores,
-          attendance_rate: input.attendanceRate,
-          missing_assessment_count: input.missingAssessmentCount,
+          evaluation_values: input.evaluationValues,
+          records: input.recordContext,
         })),
       },
     });
@@ -824,24 +825,53 @@ export async function runAiPredictions(classId: string, inputs: PredictionInput[
       throw new Error(detail || error.message || 'AI prediction could not run. Student records remain available.');
     }
     const payload = data as { predictions?: any[]; model_version?: string; data_basis?: string };
-    for (const result of payload.predictions ?? []) {
-      predictions.push({
-        enrollmentId: result.enrollment_id,
+    const resultByEnrollment = new Map((payload.predictions ?? []).map((result) => [result.enrollment_id, result]));
+    for (const input of inputs) {
+      const result = resultByEnrollment.get(input.enrollmentId);
+      if (!result) throw new Error('Prediction response did not include every requested student.');
+      rawPredictions.push({
+        input,
         predictedStanding: Number(result.predicted_standing),
-        riskProbability: Number(result.risk_probability),
-        riskLevel: result.risk_level,
-        trend: result.trend,
+        riskProbability: result.risk_probability == null || !Number.isFinite(Number(result.risk_probability)) ? null : Number(result.risk_probability),
+        aiRiskLevel: typeof result.ai_risk_level === 'string' ? result.ai_risk_level : typeof result.risk_level === 'string' ? result.risk_level : null,
+        trend: ['improving', 'stable', 'declining'].includes(result.trend) ? result.trend : 'stable',
         factors: Array.isArray(result.factors) ? result.factors : [],
         modelVersion: payload.model_version ?? 'unversioned',
-        dataBasis: payload.data_basis ?? 'gemini_llm_heuristic',
+        dataBasis: payload.data_basis ?? 'applied_schema_context',
       });
     }
   }
+  const predictions: PredictionResult[] = rawPredictions.map((prediction) => {
+    const predictedStanding = Math.min(100, Math.max(0, prediction.predictedStanding));
+    const riskProbability = prediction.riskProbability == null ? null : Math.min(1, Math.max(0, prediction.riskProbability));
+    const values: EvaluationValue = {
+      ...prediction.input.evaluationValues,
+      predicted_standing: predictedStanding,
+      risk_probability: riskProbability,
+      model_confidence: riskProbability,
+      prediction_available: true,
+      trend: prediction.trend,
+      recent_trend: prediction.trend,
+      ai_risk_level: prediction.aiRiskLevel,
+      prediction_age_hours: 0,
+    };
+    const evaluation = evaluateStudentPerformanceDetailed(evaluationCriteria, values);
+    return {
+      enrollmentId: prediction.input.enrollmentId,
+      predictedStanding,
+      riskProbability,
+      riskLevel: evaluation.severity,
+      trend: prediction.trend,
+      factors: prediction.factors,
+      modelVersion: prediction.modelVersion,
+      dataBasis: prediction.dataBasis,
+    };
+  });
   const { data, error } = await connected().rpc('faculty_save_prediction_run', {
     p_class_record_id: classId,
     p_model_name: 'APMS AI Service',
     p_model_version: predictions[0]?.modelVersion ?? 'unversioned',
-    p_input_snapshot: { inputs, advisory_only: true },
+    p_input_snapshot: { grading_system: gradingSystem, evaluation_criteria: evaluationCriteria, inputs, advisory_only: true },
     p_predictions: predictions.map((prediction) => ({
       enrollment_id: prediction.enrollmentId,
       predicted_score: prediction.predictedStanding,
@@ -856,8 +886,9 @@ export async function runAiPredictions(classId: string, inputs: PredictionInput[
   return { runId: data as string, predictions };
 }
 
-export async function saveFeedbackDraft(enrollmentId: string, body: string, category: string, status: 'draft' | 'ready') {
-  const { data, error } = await connected().rpc('faculty_save_feedback_draft', {
+export async function saveFacultyFeedback(enrollmentId: string, body: string, category: string, status: 'draft' | 'published', feedbackId?: string) {
+  const { data, error } = await connected().rpc('faculty_upsert_feedback', {
+    p_feedback_id: feedbackId ?? null,
     p_enrollment_id: enrollmentId,
     p_body: body,
     p_category: category,
@@ -865,6 +896,48 @@ export async function saveFeedbackDraft(enrollmentId: string, body: string, cate
   });
   if (error) throw error;
   return data as string;
+}
+
+export async function sendFacultyFeedbackEmail(enrollmentId: string, body: string, category: string, feedbackId?: string) {
+  const { data, error } = await connected().functions.invoke('apms-feedback-send', {
+    body: { enrollment_id: enrollmentId, body, category, feedback_id: feedbackId ?? null },
+  });
+  if (error) {
+    let detail = '';
+    const functionError = error as typeof error & { context?: Response };
+    if (functionError.context) {
+      try {
+        const payload = await functionError.context.clone().json() as { error?: string; message?: string };
+        detail = payload.error ?? payload.message ?? '';
+      } catch { /* Fall back to the SDK error when the response body is not JSON. */ }
+    }
+    throw new Error(detail || error.message || 'Feedback email could not be sent.');
+  }
+  const result = data as { feedback_id?: unknown; recipient?: unknown } | null;
+  if (typeof result?.feedback_id !== 'string' || typeof result.recipient !== 'string') {
+    throw new Error('The email service returned an invalid response.');
+  }
+  return result;
+}
+
+export async function generateFacultyFeedbackDraft(classId: string, enrollmentId: string, studentName: string, records: Record<string, unknown>) {
+  const { data, error } = await connected().functions.invoke('apms-feedback-draft', {
+    body: { class_id: classId, enrollment_id: enrollmentId, student_name: studentName, records },
+  });
+  if (error) {
+    let detail = '';
+    const functionError = error as typeof error & { context?: Response };
+    if (functionError.context) {
+      try {
+        const payload = await functionError.context.clone().json() as { error?: string; message?: string };
+        detail = payload.error ?? payload.message ?? '';
+      } catch { /* Fall back to the SDK error when the response body is not JSON. */ }
+    }
+    throw new Error(detail || error.message || 'Gemini could not generate a feedback draft.');
+  }
+  const draft = (data as { body?: unknown } | null)?.body;
+  if (typeof draft !== 'string' || !draft.trim()) throw new Error('Gemini returned an empty feedback draft.');
+  return draft.trim();
 }
 
 export function exportClassCsv(workspace: ClassWorkspace) {

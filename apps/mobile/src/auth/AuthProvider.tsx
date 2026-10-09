@@ -7,6 +7,7 @@ import * as WebBrowser from 'expo-web-browser';
 
 import { DEMO_USERS, type DemoUser } from '@/data/demo';
 import { isSupabaseConfigured, supabase } from '@/services/supabase';
+import { getErrorMessage } from '@/services/errors';
 
 export type AuthUser = { id: string; email: string; firstName: string; lastName: string; role: Role };
 type AuthResult = { ok: true; user: AuthUser } | { ok: false; message: string } | { ok: false; mfaRequired: true; factorId: string };
@@ -135,13 +136,12 @@ export function AuthProvider({ children }: PropsWithChildren) {
     if (demoMode) return { ok: false as const, message: 'MFA is unavailable for development-only accounts.' };
     if (!supabase) return { ok: false as const, message: 'APMS is not connected.' };
     const { data: factors, error: factorsError } = await supabase.auth.mfa.listFactors();
-    if (factorsError) return { ok: false as const, message: `MFA setup could not be started: ${factorsError.message}` };
+    if (factorsError) return { ok: false as const, message: getErrorMessage(factorsError, 'MFA setup could not be started. Try again.') };
     if (factors?.totp.some((factor) => factor.status === 'verified')) return { ok: false as const, message: 'MFA is already enabled for this account.' };
     const friendlyName = `APMS authenticator ${Date.now()}`;
     const { data, error } = await supabase.auth.mfa.enroll({ factorType: 'totp', friendlyName });
     if (error || !data?.id || !data.totp) {
-      const detail = error?.message?.trim();
-      return { ok: false as const, message: detail ? `MFA setup could not be started: ${detail}` : 'MFA setup could not be started. Try again.' };
+      return { ok: false as const, message: getErrorMessage(error, 'MFA setup could not be started. Try again.') };
     }
     return { ok: true as const, enrollment: { factorId: data.id, qrCode: data.totp.qr_code, secret: data.totp.secret } };
   }, []);

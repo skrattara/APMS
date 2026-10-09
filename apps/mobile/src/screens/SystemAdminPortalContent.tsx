@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { getErrorMessage } from '@/services/errors';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useAuth } from '@/auth/AuthProvider';
 import { supabase } from '@/services/supabase';
-import { Button, Card, ConfirmDialog, DataTable, DateField, Field, MetricCard, PageState, SelectField, useToast } from '@/components/ui';
+import { Button, Card, ConfirmDialog, DataTable, DateField, Field, MetricCard, PageState, RefreshIndicator, SelectField, useToast } from '@/components/ui';
 import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
 import { Settings as AccountSettings } from '@/screens/AppPortalScreen';
 import { createManagedUser, deleteProgram, loadAdminWorkspace, queueBackup, saveAcademicTerm, saveDepartment, saveProgram, saveSystemSetting, updateManagedUser, type AcademicTermRecord, type AdminWorkspace, type DepartmentRecord, type ManagedUser, type ProgramRecord } from '@/services/admin';
@@ -15,9 +16,10 @@ const roleOptions = [{ label: 'System Admin', value: 'system_admin' }, { label: 
 
 function useWorkspace() {
   const { user } = useAuth();
-  const [data, setData] = useState<AdminWorkspace | null>(null); const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [version, setVersion] = useState(0);
+  const [data, setData] = useState<AdminWorkspace | null>(null); const [loading, setLoading] = useState(true); const [refreshing, setRefreshing] = useState(false); const [error, setError] = useState(''); const [version, setVersion] = useState(0);
+  const hasLoadedWorkspace = useRef(false);
   const refresh = useCallback(() => setVersion((value) => value + 1), []);
-  useEffect(() => { let active = true; setLoading(true); setError(''); loadAdminWorkspace().then((value) => active && setData(value)).catch((cause) => active && setError(cause instanceof Error ? cause.message : 'Unable to load system administration records.')).finally(() => active && setLoading(false)); return () => { active = false; }; }, [version]);
+  useEffect(() => { let active = true; if (hasLoadedWorkspace.current) setRefreshing(true); else setLoading(true); loadAdminWorkspace().then((value) => { if (!active) return; setData(value); setError(''); hasLoadedWorkspace.current = true; }).catch((cause) => { if (active && !hasLoadedWorkspace.current) setError(getErrorMessage(cause, 'Unable to load system administration records.')); }).finally(() => { if (active) { setLoading(false); setRefreshing(false); } }); return () => { active = false; }; }, [version]);
   useEffect(() => {
     const client = supabase;
     if (!user || !client) return;
@@ -31,7 +33,7 @@ function useWorkspace() {
     const poll = setInterval(refresh, 60_000);
     return () => { clearInterval(poll); if (timer) clearTimeout(timer); void client.removeChannel(channel); };
   }, [refresh, user]);
-  return { data, loading, error, refresh };
+  return { data, loading, refreshing, error, refresh };
 }
 
 export function SystemAdminPortalContent({ screen }: { screen: string }) {
@@ -41,6 +43,7 @@ export function SystemAdminPortalContent({ screen }: { screen: string }) {
   if (state.error || !state.data) return <PageState kind="error" title="System administration unavailable" message={state.error || 'No administration data is available.'} action={<Button label="Retry" onPress={state.refresh} />} />;
   const props = { data: state.data, refresh: state.refresh, userId: user.id, toast };
   return <View style={styles.screen}>
+    <RefreshIndicator visible={state.refreshing} />
     {screen === 'overview' ? <Overview {...props} /> : null}
     {screen === 'admins' ? <Users {...props} /> : null}
     {screen === 'setup' ? <AcademicSetup {...props} /> : null}
@@ -76,8 +79,8 @@ function Users({ data, refresh, toast }: Props) {
   const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [firstName, setFirstName] = useState(''); const [lastName, setLastName] = useState(''); const [role, setRole] = useState<CoreRole>('faculty'); const [departmentId, setDepartmentId] = useState(data.departments[0]?.id ?? ''); const [employeeId, setEmployeeId] = useState('');
   const [editRole, setEditRole] = useState<CoreRole>('faculty'); const [editDepartment, setEditDepartment] = useState(data.departments[0]?.id ?? ''); const [editEmployeeId, setEditEmployeeId] = useState(''); const [editPassword, setEditPassword] = useState('');
   const openManage = (user: ManagedUser) => { setSelected(user); setEditRole(user.role ?? 'faculty'); setEditDepartment(user.scopeId ?? data.departments[0]?.id ?? ''); setEditEmployeeId(''); setEditPassword(''); };
-  const create = async () => { setSaving(true); try { await createManagedUser({ email, password, firstName, lastName, role, departmentId: role === 'system_admin' ? undefined : departmentId, employeeId: role === 'faculty' ? employeeId : undefined }); setCreateOpen(false); setEmail(''); setPassword(''); setFirstName(''); setLastName(''); setEmployeeId(''); toast.show('The account was created in Supabase Auth and assigned its APMS role.'); refresh(); } catch (cause) { toast.show(cause instanceof Error ? cause.message : 'Account creation failed.'); } finally { setSaving(false); } };
-  const update = async (status?: ManagedUser['status']) => { if (!selected) return; setSaving(true); try { await updateManagedUser({ userId: selected.id, status, role: editRole, departmentId: editRole === 'system_admin' ? undefined : editDepartment, employeeId: editRole === 'faculty' ? editEmployeeId || undefined : undefined, password: editPassword || undefined }); setSelected(null); toast.show('Account role, scope, and status were updated.'); refresh(); } catch (cause) { toast.show(cause instanceof Error ? cause.message : 'Account update failed.'); } finally { setSaving(false); } };
+  const create = async () => { setSaving(true); try { await createManagedUser({ email, password, firstName, lastName, role, departmentId: role === 'system_admin' ? undefined : departmentId, employeeId: role === 'faculty' ? employeeId : undefined }); setCreateOpen(false); setEmail(''); setPassword(''); setFirstName(''); setLastName(''); setEmployeeId(''); toast.show('Account created and APMS role assigned.'); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Could not create the account. Check the details and try again.')); } finally { setSaving(false); } };
+  const update = async (status?: ManagedUser['status']) => { if (!selected) return; setSaving(true); try { await updateManagedUser({ userId: selected.id, status, role: editRole, departmentId: editRole === 'system_admin' ? undefined : editDepartment, employeeId: editRole === 'faculty' ? editEmployeeId || undefined : undefined, password: editPassword || undefined }); setSelected(null); toast.show('Account role, scope, and status were updated.'); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Account update failed.')); } finally { setSaving(false); } };
   const activeDepartments = data.departments.filter((department) => department.status === 'active');
   return <><Heading title="User Management" subtitle="Create and manage the three core APMS roles. Passwords are set through the protected server endpoint and are never displayed." action={<Button label="Create user" onPress={() => setCreateOpen(true)} />} /><Card>{data.users.length ? <DataTable columns={['Name', 'Email', 'Role', 'Scope', 'Last login', 'Manage', 'Status']} rows={data.users.map((user) => [`${user.firstName} ${user.lastName}`, user.email, displayRole(user.role), user.scopeType === 'global' ? 'Global' : data.departments.find((department) => department.id === user.scopeId)?.code ?? 'Unassigned', date(user.lastLoginAt), <Button key={user.id} label="Manage" variant="secondary" onPress={() => openManage(user)} />, `${user.status[0].toUpperCase()}${user.status.slice(1)}`])} /> : <PageState kind="empty" title="No APMS users" message="Create a System Admin, Academic Admin, or Faculty account." />}</Card>
     <Dialog visible={createOpen} title="Create APMS account" onClose={() => setCreateOpen(false)}><View style={styles.formGrid}><Field label="First name" value={firstName} onChangeText={setFirstName} /><Field label="Last name" value={lastName} onChangeText={setLastName} /><Field label="Institutional email" value={email} keyboardType="email-address" onChangeText={setEmail} /><Field label="Temporary password (12+ characters)" value={password} secureTextEntry onChangeText={setPassword} /></View><SelectField label="Core role" value={role} options={roleOptions} onChange={(value) => setRole(value as CoreRole)} />{role !== 'system_admin' ? <SelectField label="Department scope" value={departmentId} options={activeDepartments.map((department) => ({ label: `${department.code} · ${department.name}`, value: department.id }))} onChange={setDepartmentId} /> : null}{role === 'faculty' ? <Field label="Employee ID" value={employeeId} onChangeText={setEmployeeId} /> : null}<Button label="Create account" loading={saving} disabled={!email.trim() || password.length < 12 || !firstName.trim() || !lastName.trim() || (role !== 'system_admin' && !departmentId) || (role === 'faculty' && !employeeId.trim())} onPress={() => void create()} /></Dialog>
@@ -99,8 +102,8 @@ function AcademicSetup({ data, refresh, toast }: Props) {
   const openDepartment = (value?: DepartmentRecord) => { setDepartment(value ?? null); setCode(value?.code ?? ''); setName(value?.name ?? ''); setStatus(value?.status ?? 'active'); setDialog('department'); };
   const openProgram = (value?: ProgramRecord) => { setProgram(value ?? null); setCode(value?.code ?? ''); setName(value?.name ?? ''); setDepartmentId(value?.departmentId ?? data.departments.find((item) => item.status === 'active')?.id ?? ''); setStatus(value?.status ?? 'active'); setDialog('program'); };
   const openTerm = (value?: AcademicTermRecord) => { setTerm(value ?? null); setAcademicYear(value?.academicYear ?? ''); setSemester(value?.semester ?? ''); setStartsOn(value?.startsOn ?? ''); setEndsOn(value?.endsOn ?? ''); setTermStatus(value?.status ?? 'planned'); setDialog('term'); };
-  const save = async () => { setSaving(true); try { if (dialog === 'department') await saveDepartment({ id: department?.id, code, name, status }); if (dialog === 'program') await saveProgram({ id: program?.id, departmentId, code, name, status }); if (dialog === 'term') await saveAcademicTerm({ id: term?.id, academicYear, semester, startsOn, endsOn, status: termStatus }); toast.show('Academic setup saved.'); close(); refresh(); } catch (cause) { toast.show(cause instanceof Error ? cause.message : 'Academic setup could not be saved.'); } finally { setSaving(false); } };
-  const removeProgram = async () => { if (!deletingProgram) return; setSaving(true); try { await deleteProgram(deletingProgram.id); toast.show('Program deleted.'); setDeletingProgram(null); close(); refresh(); } catch (cause) { toast.show(cause instanceof Error ? cause.message : 'Program could not be deleted.'); } finally { setSaving(false); } };
+  const save = async () => { setSaving(true); try { if (dialog === 'department') await saveDepartment({ id: department?.id, code, name, status }); if (dialog === 'program') await saveProgram({ id: program?.id, departmentId, code, name, status }); if (dialog === 'term') await saveAcademicTerm({ id: term?.id, academicYear, semester, startsOn, endsOn, status: termStatus }); toast.show('Academic setup saved.'); close(); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Academic setup could not be saved.')); } finally { setSaving(false); } };
+  const removeProgram = async () => { if (!deletingProgram) return; setSaving(true); try { await deleteProgram(deletingProgram.id); toast.show('Program deleted.'); setDeletingProgram(null); close(); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Program could not be deleted.')); } finally { setSaving(false); } };
   const activeDepartments = data.departments.filter((item) => item.status === 'active');
   return <><Heading title="Academic Setup" subtitle="Create the departments, programs, and academic terms used for account scope and academic records." action={<Button label="Add department" onPress={() => openDepartment()} />} />
     <Card><View style={styles.sectionHeader}><View><Text style={styles.sectionTitle}>Departments</Text><Text style={styles.sectionHelp}>Departments define the scope available to Academic Admin and Faculty accounts.</Text></View></View>{data.departments.length ? <DataTable columns={['Code', 'Department', 'Status', 'Manage']} rows={data.departments.map((item) => [item.code, item.name, item.status[0].toUpperCase() + item.status.slice(1), <Button key={item.id} label="Edit" variant="secondary" onPress={() => openDepartment(item)} />])} /> : <PageState kind="empty" title="No departments yet" message="Use Add department above to create the first department." />}</Card>
@@ -113,30 +116,50 @@ function AcademicSetup({ data, refresh, toast }: Props) {
   </>;
 }
 function Roles({ data }: Props) { return <><Heading title="Roles & Permissions" subtitle="The revised APMS role model contains exactly System Admin, Academic Admin, and Faculty; Super Admin is merged and Grader is removed." /><Card><DataTable columns={['Role', 'Key', 'Assigned users', 'Permissions', 'Scope']} rows={data.roles.filter((role) => ['system_admin', 'academic_admin', 'faculty'].includes(role.key)).map((role) => [role.name, role.key, String(role.users), String(role.permissions), role.key === 'system_admin' ? 'Global' : 'Department / assigned classes'])} /></Card></>; }
-function Backups({ data, refresh, userId, toast }: Props) { const [saving, setSaving] = useState(false); const queue = async () => { setSaving(true); try { await queueBackup(userId); toast.show('Backup request queued. Completion requires the configured protected backup worker.'); refresh(); } catch (cause) { toast.show(cause instanceof Error ? cause.message : 'Backup could not be queued.'); } finally { setSaving(false); } }; return <><Heading title="System & Backup Status" subtitle="Queue and monitor protected backup requests without exposing database credentials." action={<Button label="Queue full backup" loading={saving} onPress={() => void queue()} />} /><Card>{data.backups.length ? <DataTable columns={['Created', 'Scope', 'Completed', 'Status']} rows={data.backups.map((row) => [date(row.createdAt), row.scope, date(row.completedAt), `${row.status[0].toUpperCase()}${row.status.slice(1)}`])} /> : <PageState kind="empty" title="No backup requests" message="Queue a backup after an institutional backup worker and protected destination are configured." />}</Card></>; }
+function Backups({ data, refresh, userId, toast }: Props) { const [saving, setSaving] = useState(false); const queue = async () => { setSaving(true); try { await queueBackup(userId); toast.show('Backup request queued. Completion requires the configured protected backup worker.'); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Backup could not be queued.')); } finally { setSaving(false); } }; return <><Heading title="System & Backup Status" subtitle="Queue and monitor protected backup requests without exposing database credentials." action={<Button label="Queue full backup" loading={saving} onPress={() => void queue()} />} /><Card>{data.backups.length ? <DataTable columns={['Created', 'Scope', 'Completed', 'Status']} rows={data.backups.map((row) => [date(row.createdAt), row.scope, date(row.completedAt), `${row.status[0].toUpperCase()}${row.status.slice(1)}`])} /> : <PageState kind="empty" title="No backup requests" message="Queue a backup after an institutional backup worker and protected destination are configured." />}</Card></>; }
 function Logs({ data }: Props) { return <><Heading title="Access & System Logs" subtitle="Immutable audit trail for account, data, criteria, and administrative operations." /><Card>{data.logs.length ? <DataTable columns={['ID', 'Timestamp', 'Action', 'Entity', 'Actor', 'Status']} rows={data.logs.map((row) => [String(row.id), date(row.createdAt), row.action, row.entityType, row.actorId ?? 'System', 'Recorded'])} /> : <PageState kind="empty" title="No logs" message="No audit records are visible." />}</Card></>; }
 function SystemSettings({ data, refresh, userId, toast }: Props) {
   const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(data.settings.map((row) => [row.key, typeof row.value === 'string' ? row.value : JSON.stringify(row.value)])));
+  const storedFeedbackFromEmail = data.settings.find((row) => row.key === 'FEEDBACK_FROM_EMAIL')?.value;
+  const [feedbackFromEmail, setFeedbackFromEmail] = useState(typeof storedFeedbackFromEmail === 'string' ? storedFeedbackFromEmail : '');
+  const storedFeedbackFromName = data.settings.find((row) => row.key === 'FEEDBACK_FROM_NAME')?.value;
+  const [feedbackFromName, setFeedbackFromName] = useState(typeof storedFeedbackFromName === 'string' && storedFeedbackFromName.trim() ? storedFeedbackFromName : 'APMS Feedback');
   const [saving, setSaving] = useState(false);
   const storedDefaultId = data.settings.find((row) => row.key === 'grading.default_system_id')?.value;
   const [defaultSystemId, setDefaultSystemId] = useState(typeof storedDefaultId === 'string' ? storedDefaultId : IT_GLOBAL_GRADING_SYSTEM.id);
   const [gradingSystems, setGradingSystems] = useState<GradingDefinition[]>([IT_GLOBAL_GRADING_SYSTEM]);
+  useEffect(() => {
+    const saved = data.settings.find((row) => row.key === 'FEEDBACK_FROM_EMAIL')?.value;
+    setFeedbackFromEmail(typeof saved === 'string' ? saved : '');
+    const savedName = data.settings.find((row) => row.key === 'FEEDBACK_FROM_NAME')?.value;
+    setFeedbackFromName(typeof savedName === 'string' && savedName.trim() ? savedName : 'APMS Feedback');
+  }, [data.settings]);
   useEffect(() => { let active = true; if (!supabase) return; void supabase.from('grading_systems').select('definition,updated_at').order('updated_at', { ascending: false }).then(({ data: rows }) => { if (!active || !rows) return; const saved = rows.map((row: any) => row.definition as GradingDefinition).filter((system) => !!system?.id); const globalName = IT_GLOBAL_GRADING_SYSTEM.name.toLocaleLowerCase(); const savedGlobal = saved.find((system) => system.id === IT_GLOBAL_GRADING_SYSTEM.id || system.name?.trim().toLocaleLowerCase() === globalName); const unique = new Map<string, GradingDefinition>(); const defaultSystem = savedGlobal ?? IT_GLOBAL_GRADING_SYSTEM; unique.set(defaultSystem.id, defaultSystem); for (const system of saved) { const isGlobal = system.id === IT_GLOBAL_GRADING_SYSTEM.id || system.name?.trim().toLocaleLowerCase() === globalName; if (!isGlobal && !unique.has(system.id)) unique.set(system.id, system); } const systems = [...unique.values()].sort((a, b) => a.name.localeCompare(b.name)); setGradingSystems(systems); const savedId = data.settings.find((row) => row.key === 'grading.default_system_id')?.value; if (typeof savedId === 'string' && systems.some((system) => system.id === savedId)) setDefaultSystemId(savedId); else setDefaultSystemId(defaultSystem.id); }); return () => { active = false; }; }, [data.settings]);
   const update = (key: string, value: string) => setValues((current) => ({ ...current, [key]: value }));
   const saveAll = async () => {
+    if (feedbackFromEmail.trim() && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(feedbackFromEmail.trim())) {
+      toast.show('Enter a valid feedback sender email address.');
+      return;
+    }
+    if (!feedbackFromName.trim() || feedbackFromName.trim().length > 100 || /[\r\n<>]/.test(feedbackFromName)) {
+      toast.show('Enter a sender name up to 100 characters without angle brackets or line breaks.');
+      return;
+    }
     setSaving(true);
     try {
       for (const row of data.settings) {
-        if (row.key === 'grading.swunext_global_modules' || row.key === 'grading.default_system_id' || row.key === 'grading.default_system_definition') continue;
+        if (row.key === 'grading.swunext_global_modules' || row.key === 'grading.default_system_id' || row.key === 'grading.default_system_definition' || row.key === 'FEEDBACK_FROM_EMAIL' || row.key === 'FEEDBACK_FROM_NAME') continue;
         let value: unknown = values[row.key] ?? '';
         try { value = JSON.parse(value as string); } catch { /* plain strings remain valid JSONB values */ }
         await saveSystemSetting(userId, row.key, value);
       }
+      await saveSystemSetting(userId, 'FEEDBACK_FROM_EMAIL', feedbackFromEmail.trim());
+      await saveSystemSetting(userId, 'FEEDBACK_FROM_NAME', feedbackFromName.trim());
       const selectedDefault = gradingSystems.find((system) => system.id === defaultSystemId) ?? IT_GLOBAL_GRADING_SYSTEM;
       await saveSystemSetting(userId, 'grading.default_system_id', selectedDefault.id);
       await saveSystemSetting(userId, 'grading.default_system_definition', selectedDefault);
       toast.show('System settings saved.'); refresh();
-    } catch (cause) { toast.show(cause instanceof Error ? cause.message : 'Settings could not be saved.'); }
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Settings could not be saved.')); }
     finally { setSaving(false); }
   };
   const setting = (key: string) => data.settings.find((row) => row.key === key);
@@ -149,6 +172,13 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
         <Text style={styles.sectionTitle}>Core services</Text>
         <Text style={styles.sectionHelp}>Control optional services and their availability.</Text>
         <View style={styles.settingRow}><View style={styles.settingCopy}><Text style={styles.settingLabel}>AI assistant</Text><Text style={styles.help}>Allow approved decision-support features to run.</Text></View><Pressable accessibilityRole="switch" accessibilityState={{ checked: boolValue('ai.enabled') }} onPress={() => update('ai.enabled', String(!boolValue('ai.enabled')))} style={[styles.switch, boolValue('ai.enabled') && styles.switchOn]}><View style={[styles.switchThumb, boolValue('ai.enabled') && styles.switchThumbOn]} /></Pressable></View>
+      </Card>
+      <Card style={styles.settingsCard}>
+        <Text style={styles.sectionTitle}>Feedback email</Text>
+        <Text style={styles.sectionHelp}>Set the sender name and address used when Faculty emails feedback to a student.</Text>
+        <Field label="Sender name (FEEDBACK_FROM_NAME)" value={feedbackFromName} onChangeText={setFeedbackFromName} placeholder="APMS Feedback" autoCapitalize="words" maxLength={100} />
+        <Field label="Sender email (FEEDBACK_FROM_EMAIL)" value={feedbackFromEmail} onChangeText={setFeedbackFromEmail} placeholder="feedback@your-verified-domain.edu" keyboardType="email-address" autoCapitalize="none" />
+        <Text style={styles.help}>Save the address here. Keep only RESEND_API_KEY in Edge Function Secrets. Resend must verify the sender’s domain before emails can be sent.</Text>
       </Card>
       <Card style={styles.settingsCard}>
         <Text style={styles.sectionTitle}>Backup policy</Text><Text style={styles.sectionHelp}>Set how long completed backup artifacts should be retained.</Text>

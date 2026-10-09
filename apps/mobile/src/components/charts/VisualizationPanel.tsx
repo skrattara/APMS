@@ -1,4 +1,5 @@
-import { useRef, useState } from "react";
+import { getErrorMessage } from '@/services/errors';
+import { useRef, useState, type ReactNode } from "react";
 import { Platform, StyleSheet, Text, View } from "react-native";
 import { captureRef } from "react-native-view-shot";
 import * as Sharing from "expo-sharing";
@@ -42,6 +43,7 @@ export function VisualizationPanel({
   suffix,
   height,
   color,
+  controls,
 }: {
   title: string;
   description?: string;
@@ -50,6 +52,7 @@ export function VisualizationPanel({
   suffix?: string;
   height?: number;
   color?: string;
+  controls?: ReactNode;
 }) {
   const chartRef = useRef<View>(null);
   const [exporting, setExporting] = useState(false);
@@ -70,7 +73,7 @@ export function VisualizationPanel({
         } else setExportError("PNG sharing is unavailable on this device.");
       }
     } catch (cause) {
-      setExportError(cause instanceof Error ? cause.message : "The chart image could not be exported.");
+      setExportError(getErrorMessage(cause, "The chart image could not be exported."));
     } finally {
       setExporting(false);
     }
@@ -85,6 +88,7 @@ export function VisualizationPanel({
         </View>
         <Button label={exporting ? "Exporting…" : "Export PNG"} variant="secondary" loading={exporting} onPress={() => void exportPng()} />
       </View>
+      {controls ? <View style={styles.controls}>{controls}</View> : null}
       <View ref={chartRef} collapsable={false} style={styles.exportArea}>
         <VisualizationChart data={data} type={type} suffix={suffix} height={height} color={color} />
       </View>
@@ -96,6 +100,7 @@ export function VisualizationPanel({
 const styles = StyleSheet.create({
   card: { minWidth: 0, flex: 1 },
   heading: { flexDirection: "row", alignItems: "flex-start", justifyContent: "space-between", flexWrap: "wrap", gap: 10, marginBottom: 12 },
+  controls: { marginBottom: 12 },
   titleBlock: { flex: 1, minWidth: 180 },
   title: { color: colors.text, fontSize: 15, fontWeight: "700" },
   description: { color: colors.textMuted, fontSize: 12, lineHeight: 18, marginTop: 4 },

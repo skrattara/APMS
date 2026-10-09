@@ -26,6 +26,8 @@ npm run dev
 
 Client variables are `EXPO_PUBLIC_SUPABASE_URL`, `EXPO_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and optional fictional `EXPO_PUBLIC_DEMO_MODE`. Never expose a service-role key or database password through `EXPO_PUBLIC_`. Existing populated variables must not be replaced.
 
+Set `EXPO_PUBLIC_APMS_SHOW_ERROR_DETAILS=true` only while debugging to show technical error details. It defaults to `false`, which shows user-friendly error messages and toasts. This is a client-side setting and must not be used to expose secrets.
+
 ## Supabase and migrations
 
 ```powershell

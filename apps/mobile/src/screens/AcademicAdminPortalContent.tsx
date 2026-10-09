@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useState, type ReactNode } from 'react';
+import { getErrorMessage } from '@/services/errors';
+import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { Modal, Platform, Pressable, Share, StyleSheet, Text, View } from 'react-native';
 
 import { useAuth } from '@/auth/AuthProvider';
 import { supabase } from '@/services/supabase';
-import { Badge, Button, Card, ConfirmDialog, DataTable, Field, HelpTooltip, MetricCard, PageState, SelectField, useToast } from '@/components/ui';
+import { Badge, Button, Card, ConfirmDialog, DataTable, Field, HelpTooltip, MetricCard, PageState, RefreshIndicator, SelectField, useToast } from '@/components/ui';
 import { useAnalyticsFilters } from '@/components/charts/AnalyticsFilters';
 import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
 import {
@@ -107,9 +108,10 @@ function risk(workspace: ClassWorkspace, enrollmentId: string, definition: Evalu
 function riskLabel(value: string) { return value === 'unavailable' ? 'Risk unavailable' : `${value[0].toUpperCase()}${value.slice(1)} Risk`; }
 
 function useWorkspace(userId: string) {
-  const [data, setData] = useState<AcademicWorkspace | null>(null); const [loading, setLoading] = useState(true); const [error, setError] = useState(''); const [version, setVersion] = useState(0);
+  const [data, setData] = useState<AcademicWorkspace | null>(null); const [loading, setLoading] = useState(true); const [refreshing, setRefreshing] = useState(false); const [error, setError] = useState(''); const [version, setVersion] = useState(0);
+  const hasLoadedWorkspace = useRef(false);
   const refresh = useCallback(() => setVersion((value) => value + 1), []);
-  useEffect(() => { let active = true; setLoading(true); setError(''); loadAcademicWorkspace(userId).then((value) => active && setData(value)).catch((cause) => active && setError(cause instanceof Error ? cause.message : 'Unable to load academic records.')).finally(() => active && setLoading(false)); return () => { active = false; }; }, [userId, version]);
+  useEffect(() => { let active = true; if (hasLoadedWorkspace.current) setRefreshing(true); else setLoading(true); loadAcademicWorkspace(userId).then((value) => { if (!active) return; setData(value); setError(''); hasLoadedWorkspace.current = true; }).catch((cause) => { if (active && !hasLoadedWorkspace.current) setError(getErrorMessage(cause, 'Unable to load academic records.')); }).finally(() => { if (active) { setLoading(false); setRefreshing(false); } }); return () => { active = false; }; }, [userId, version]);
   useEffect(() => {
     const client = supabase;
     if (!userId || !client) return;
@@ -123,7 +125,7 @@ function useWorkspace(userId: string) {
     const poll = setInterval(refresh, 60_000);
     return () => { clearInterval(poll); if (timer) clearTimeout(timer); void client.removeChannel(channel); };
   }, [refresh, userId]);
-  return { data, loading, error, refresh };
+  return { data, loading, refreshing, error, refresh };
 }
 
 export function AcademicAdminPortalContent({ screen }: { screen: string }) {
@@ -133,6 +135,7 @@ export function AcademicAdminPortalContent({ screen }: { screen: string }) {
   if (state.error || !state.data) return <PageState kind="error" title="Academic data unavailable" message={state.error || 'No department scope is assigned.'} action={<Button label="Retry" onPress={state.refresh} />} />;
   const props = { data: state.data, refresh: state.refresh, userId: user.id, toast };
   return <View style={styles.screen}>
+    <RefreshIndicator visible={state.refreshing} />
     {screen === 'overview' ? <Overview {...props} /> : null}
     {screen === 'units' ? <Units {...props} /> : null}
     {screen === 'subjects' ? <Subjects {...props} /> : null}
@@ -187,15 +190,15 @@ function GradingCriteria({ data, userId, refresh, toast }: Props) {
       const checked = validateGradingSystem(value);
       setValidation(checked.errors);
       return checked.valid ? value : null;
-    } catch (cause) { setValidation([cause instanceof Error ? cause.message : 'Definition must be valid JSON.']); return null; }
+    } catch (cause) { setValidation([getErrorMessage(cause, 'Definition must be valid JSON.')]); return null; }
   };
   const editSystem = (system: GradingDefinition) => { const editable = system.id === IT_GLOBAL_GRADING_SYSTEM.id ? copyWithFreshIds(system) : system; if (system.id === IT_GLOBAL_GRADING_SYSTEM.id) editable.name = `${system.name} (Custom)`; setEditedDefinition(editable); setShowJson(false); setShowBuilder(true); };
   const newCustomCopy = () => { const copy = copyWithFreshIds(IT_GLOBAL_GRADING_SYSTEM); copy.name = `${IT_GLOBAL_GRADING_SYSTEM.name} (Custom)`; setEditedDefinition(copy); setShowJson(false); setShowBuilder(true); };
   const openApply = (id: string) => { setApplySystemId(id); setSelectedClasses([]); setShowBulk(true); };
-  const save = async () => { const definition = parseDefinition(); if (!definition) return; const normalizedName = definition.name.trim().toLocaleLowerCase(); const duplicate = systems.find((item) => item.id !== definition.id && item.name.trim().toLocaleLowerCase() === normalizedName); if (duplicate) { setValidation([`A grading system named “${duplicate.name}” already exists. Edit that system to create a new version.`]); return; } setBusy(true); try { await saveGradingSystem(userId, definition); setSystems((old) => [...old.filter((item) => item.id !== definition.id), definition].sort((a, b) => a.name.localeCompare(b.name))); setSystemUpdatedAt((old) => ({ ...old, [definition.id]: new Date().toISOString() })); toast.show('Grading system saved.'); setShowBuilder(false); setShowJson(false); } catch (cause) { toast.show(cause instanceof Error ? cause.message : 'Could not save grading system.'); } finally { setBusy(false); } };
+  const save = async () => { const definition = parseDefinition(); if (!definition) return; const normalizedName = definition.name.trim().toLocaleLowerCase(); const duplicate = systems.find((item) => item.id !== definition.id && item.name.trim().toLocaleLowerCase() === normalizedName); if (duplicate) { setValidation([`A grading system named “${duplicate.name}” already exists. Edit that system to create a new version.`]); return; } setBusy(true); try { await saveGradingSystem(userId, definition); setSystems((old) => [...old.filter((item) => item.id !== definition.id), definition].sort((a, b) => a.name.localeCompare(b.name))); setSystemUpdatedAt((old) => ({ ...old, [definition.id]: new Date().toISOString() })); toast.show('Grading system saved.'); setShowBuilder(false); setShowJson(false); } catch (cause) { toast.show(getErrorMessage(cause, 'Could not save grading system.')); } finally { setBusy(false); } };
   const validate = () => { const parsed = parseDefinition(); if (parsed) toast.show('Grading system is valid.'); };
-  const apply = async () => { const selectedDefinition = systems.find((item) => item.id === applySystemId); if (!selectedDefinition || !selectedClasses.length) return; setBusy(true); try { const result = await applyGradingSystemToClasses(selectedClasses, userId, selectedDefinition); if (result.failures.length) { const described = result.failures.map((failure) => `${data.classes.find((item) => item.id === failure.classId)?.code ?? failure.classId}: ${failure.message}`); setValidation(described); toast.show(`Applied to ${result.applied.length} of ${selectedClasses.length}. ${described[0]}`); } else { setValidation([]); toast.show(`${selectedDefinition.name} applied to ${result.applied.length} classes.`); setShowBulk(false); } refresh(); } catch (cause) { toast.show(cause instanceof Error ? cause.message : 'Could not apply grading system.'); } finally { setBusy(false); } };
-  const confirmDelete = async (system: GradingDefinition) => { setBusy(true); try { await deleteGradingSystem(userId, system.id); setSystems((current) => current.filter((item) => item.id !== system.id)); setPendingDeleteId(null); toast.show(`${system.name} deleted.`); } catch (cause) { toast.show(cause instanceof Error ? cause.message : 'Could not delete grading system.'); } finally { setBusy(false); } };
+  const apply = async () => { const selectedDefinition = systems.find((item) => item.id === applySystemId); if (!selectedDefinition || !selectedClasses.length) return; setBusy(true); try { const result = await applyGradingSystemToClasses(selectedClasses, userId, selectedDefinition); if (result.failures.length) { const described = result.failures.map((failure) => `${data.classes.find((item) => item.id === failure.classId)?.code ?? failure.classId}: ${failure.message}`); setValidation(described); toast.show(`Applied to ${result.applied.length} of ${selectedClasses.length}. ${described[0]}`); } else { setValidation([]); toast.show(`${selectedDefinition.name} applied to ${result.applied.length} classes.`); setShowBulk(false); } refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Could not apply grading system.')); } finally { setBusy(false); } };
+  const confirmDelete = async (system: GradingDefinition) => { setBusy(true); try { await deleteGradingSystem(userId, system.id); setSystems((current) => current.filter((item) => item.id !== system.id)); setPendingDeleteId(null); toast.show(`${system.name} deleted.`); } catch (cause) { toast.show(getErrorMessage(cause, 'Could not delete grading system.')); } finally { setBusy(false); } };
   const toggleClass = (id: string) => setSelectedClasses((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
   const handleJsonChange = (value: string) => { setDefinitionText(value); setValidation([]); try { const parsed = JSON.parse(value); if (validateGradingSystem(parsed).valid) setDefinition(parsed); } catch { /* partial JSON stays editable until validation */ } };
   const appliedRows = data.classes.map((item) => [
@@ -261,7 +264,7 @@ function StudentEvaluationCriteria({ data, userId, refresh, toast }: Props) {
   const updateDefinition = (value: EvaluationDefinition) => { setDefinition(value); setDefinitionText(JSON.stringify(value, null, 2)); setErrors([]); };
   const openBuilder = (value: EvaluationDefinition, scope: 'department' | 'user' = 'department') => { setAvailability(scope); updateDefinition(value); setShowJson(false); setShowApply(false); setShowBuilder(true); };
   const createEvaluationId = () => globalThis.crypto?.randomUUID?.() ?? 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (char) => { const value = Math.floor(Math.random() * 16); return (char === 'x' ? value : (value & 3) | 8).toString(16); });
-  const parse = () => { try { const value = JSON.parse(definitionText) as EvaluationDefinition; const validation = validateEvaluationSystem(value); setErrors(validation.errors); return validation.valid ? value : null; } catch (cause) { setErrors([cause instanceof Error ? cause.message : 'Definition must be valid JSON.']); return null; } };
+  const parse = () => { try { const value = JSON.parse(definitionText) as EvaluationDefinition; const validation = validateEvaluationSystem(value); setErrors(validation.errors); return validation.valid ? value : null; } catch (cause) { setErrors([getErrorMessage(cause, 'Definition must be valid JSON.')]); return null; } };
   const changeJson = (value: string) => {
     setDefinitionText(value);
     try {
@@ -270,7 +273,7 @@ function StudentEvaluationCriteria({ data, userId, refresh, toast }: Props) {
       setErrors(validation.errors);
       if (validation.valid) setDefinition(parsed);
     } catch (cause) {
-      setErrors([cause instanceof Error ? `JSON is incomplete or invalid: ${cause.message}` : 'Definition must be valid JSON.']);
+      setErrors([getErrorMessage(cause, 'JSON is incomplete or invalid. Check the definition syntax and try again.')]);
     }
   };
   const save = async () => {
@@ -296,7 +299,7 @@ function StudentEvaluationCriteria({ data, userId, refresh, toast }: Props) {
         toast.show(`Evaluation criteria v${nextVersion} saved. Apply it to selected classes when ready.`);
       }
       setShowBuilder(false); refresh();
-    } catch (cause) { toast.show(cause instanceof Error ? cause.message : 'Could not save evaluation system.'); }
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Could not save evaluation system.')); }
     finally { setSaving(false); }
   };
   const openApply = (systemId: string) => { setApplyScope('department'); setApplySystemId(systemId); setSelectedClasses([]); setShowApply(true); };
@@ -314,7 +317,7 @@ function StudentEvaluationCriteria({ data, userId, refresh, toast }: Props) {
       setSelectedClasses([]);
       setShowApply(true);
     } catch (cause) {
-      toast.show(cause instanceof Error ? cause.message : 'Could not prepare the default evaluation criteria for class assignment.');
+      toast.show(getErrorMessage(cause, 'Could not prepare the default evaluation criteria for class assignment.'));
     } finally { setSaving(false); }
   };
   const toggleClass = (classId: string) => setSelectedClasses((current) => current.includes(classId) ? current.filter((id) => id !== classId) : [...current, classId]);
@@ -330,7 +333,7 @@ function StudentEvaluationCriteria({ data, userId, refresh, toast }: Props) {
         setErrors(messages); toast.show(`Applied to ${result.applied.length} of ${selectedClasses.length} classes. ${messages[0]}`);
       } else { setErrors([]); setShowApply(false); toast.show(`Evaluation criteria applied to ${result.applied.length} classes.`); }
       refresh();
-    } catch (cause) { toast.show(cause instanceof Error ? cause.message : 'Could not apply evaluation criteria.'); }
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Could not apply evaluation criteria.')); }
     finally { setSaving(false); }
   };
   const confirmDeleteCriteria = async () => {
@@ -351,7 +354,7 @@ function StudentEvaluationCriteria({ data, userId, refresh, toast }: Props) {
       setPendingDeleteTarget(null);
       refresh();
     } catch (cause) {
-      toast.show(cause instanceof Error ? cause.message : 'Could not delete evaluation criteria.');
+      toast.show(getErrorMessage(cause, 'Could not delete evaluation criteria.'));
     } finally { setDeletingCriteria(false); }
   };
   const classRows = data.classes.map((item) => {
@@ -540,7 +543,7 @@ function Subjects({ data, toast, refresh }: Props) {
       setSubjects(subs);
       setRequests(reqs);
     } catch (err) {
-      toast.show(err instanceof Error ? err.message : 'Unable to load subjects');
+      toast.show(getErrorMessage(err, 'Unable to load subjects'));
     } finally {
       setLoading(false);
     }
@@ -596,7 +599,7 @@ function Subjects({ data, toast, refresh }: Props) {
       await loadData();
       refresh();
     } catch (cause) {
-      toast.show(cause instanceof Error ? cause.message : 'Failed to save subject.');
+      toast.show(getErrorMessage(cause, 'Failed to save subject.'));
     } finally {
       setSaving(false);
     }
@@ -616,7 +619,7 @@ function Subjects({ data, toast, refresh }: Props) {
       await loadData();
       refresh();
     } catch (cause) {
-      toast.show(cause instanceof Error ? cause.message : 'Failed to review request.');
+      toast.show(getErrorMessage(cause, 'Failed to review request.'));
     } finally {
       setSaving(false);
     }

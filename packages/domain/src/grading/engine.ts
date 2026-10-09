@@ -4,7 +4,7 @@ import itGlobalDefinition from './systems/it_global_grading_system.json';
 
 export type GradingDefinition = Record<string, any> & { id: string; name: string; components: any[]; calculationRootComponentId: string; finalResult: any; finalGradeConversion: any };
 export const IT_GLOBAL_GRADING_SYSTEM = itGlobalDefinition as GradingDefinition;
-export type GradingAssessment = { id: string; typeId: string; score: number | string | null; maximumScore?: number; weight?: number; periodId?: string | null; groupId?: string | null };
+export type GradingAssessment = { id: string; typeId: string; score: number | string | null; missingScorePercentage?: number; maximumScore?: number; weight?: number; periodId?: string | null; groupId?: string | null };
 export type GradingResult = { components: Record<string, number | null>; groups: Record<string, number | null>; groupComponents: Record<string, Record<string, number | null>>; periods: Record<string, number | null>; periodComponents: Record<string, Record<string, number | null>>; nonPeriodComponents: Record<string, number | null>; nonPeriod: number | null; rawFinal: number | null; finalGrade: number | null; pointGrade: number | null; letterGrade: string | null; remarks: 'passing' | 'failing' | 'incomplete' };
 
 const ajv = new Ajv2020({ allErrors: true, strict: false });
@@ -108,9 +108,11 @@ export function calculateGradingSystem(definition: GradingDefinition, assessment
         .filter((row) => !groupId || row.groupId === groupId || (!row.groupId && !row.periodId));
       countCache.set(key, rows.length);
       let values = rows.flatMap((row) => {
-        if (row.score == null) return [];
         const max = row.maximumScore ?? d.maxScore ?? 100;
         const scoring = d.scoring;
+        if (row.score == null) {
+          return row.missingScorePercentage == null ? [] : [{ value: row.missingScorePercentage, weight: row.weight ?? 1, maxScore: max }];
+        }
         let numeric: number | null = null;
         let percentage: number;
         if (scoring?.mode === 'value_mapping') {
@@ -128,7 +130,7 @@ export function calculateGradingSystem(definition: GradingDefinition, assessment
         }
         return [{ value: percentage, weight: row.weight ?? 1, maxScore: row.maximumScore ?? d.maxScore ?? 100 }];
       });
-      const weightsPresent = d.aggregation?.mode !== 'weighted' || rows.filter((row) => row.score != null).every((row) => row.weight != null);
+      const weightsPresent = d.aggregation?.mode !== 'weighted' || rows.filter((row) => row.score != null || row.missingScorePercentage != null).every((row) => row.weight != null);
       let countValid = true;
       const countScope = d.count?.scope?.type;
       if (countScope === 'per_group' && !groupId) {

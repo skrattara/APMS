@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Platform, StyleSheet, Text, View, type LayoutChangeEvent, type PointerEvent } from "react-native";
-import { Bar, CartesianChart, Line, Pie, PolarChart } from "victory-native";
+import { Bar, CartesianChart, Line, Pie, PolarChart, Scatter } from "victory-native";
 
 import { PageState } from "@/components/ui";
 import { colors } from "@/theme/tokens";
@@ -74,6 +74,14 @@ function clamp(value: number, min: number, max: number) {
 
 const escapeXml = (value: string) => value.replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&apos;" })[character]!);
 
+function formatTimeSeriesLabel(point: VisualizationDatum) {
+  if (point.kind !== "timeseries" || !point.timestamp) return point.label;
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(point.timestamp);
+  if (!match) return point.label;
+  const date = new Date(Number(match[1]), Number(match[2]) - 1, Number(match[3]));
+  return `${new Intl.DateTimeFormat("en", { month: "short" }).format(date)} ${date.getDate()}`;
+}
+
 /** Creates a vector snapshot for web PNG export because Skia's canvas isn't serialized by DOM snapshot libraries. */
 export function createVisualizationSvg(data: VisualizationDatum[], type: VisualizationType, suffix = "", color: string = colors.brand) {
   const validData = data.filter((point) => Number.isFinite(point.value) && (type !== "pie" || point.value > 0));
@@ -110,7 +118,8 @@ export function createVisualizationSvg(data: VisualizationDatum[], type: Visuali
     const plot = { left: 76, top: 28, right: 930, bottom: 378 };
     const plotWidth = plot.right - plot.left;
     const plotHeight = plot.bottom - plot.top;
-    const maxValue = Math.max(1, ...points.map((point) => point.value));
+    const isPercentageChart = (type === "bar" || type === "line") && suffix === "%";
+    const maxValue = isPercentageChart ? 100 : Math.max(1, ...points.map((point) => point.value));
     const tickStep = maxValue / 4;
     const grid = Array.from({ length: 5 }, (_, index) => {
       const value = tickStep * index;
@@ -119,14 +128,18 @@ export function createVisualizationSvg(data: VisualizationDatum[], type: Visuali
     }).join("");
     const slotWidth = plotWidth / points.length;
     const marks = type === "line"
-      ? `<path d="${points.map((point, index) => `${index ? "L" : "M"} ${plot.left + slotWidth * (index + 0.5)} ${plot.bottom - point.value / maxValue * plotHeight}`).join(" ")}" fill="none" stroke="${chartColor}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>${points.map((point, index) => `<circle cx="${plot.left + slotWidth * (index + 0.5)}" cy="${plot.bottom - point.value / maxValue * plotHeight}" r="6" fill="${chartColor}"/>`).join("")}`
+      ? `<path d="${points.map((point, index) => `${index ? "L" : "M"} ${plot.left + slotWidth * (index + 0.5)} ${plot.bottom - point.value / maxValue * plotHeight}`).join(" ")}" fill="none" stroke="${chartColor}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>${points.map((point, index) => `<circle cx="${plot.left + slotWidth * (index + 0.5)}" cy="${plot.bottom - point.value / maxValue * plotHeight}" r="7" fill="#FFFFFF" stroke="${chartColor}" stroke-width="3"/>`).join("")}`
       : points.map((point, index) => {
         const barWidth = Math.max(2, slotWidth * (type === "histogram" ? 0.9 : 0.68));
         const barHeight = point.value / maxValue * plotHeight;
         return `<rect x="${plot.left + slotWidth * index + (slotWidth - barWidth) / 2}" y="${plot.bottom - barHeight}" width="${barWidth}" height="${barHeight}" rx="4" fill="${chartColor}"/>`;
       }).join("");
-    const xLabels = shortLabels.map(({ point, index }) => label(point.label, plot.left + slotWidth * (index + 0.5), plot.bottom + 30, "middle", 12)).join("");
-    content = `${grid}${marks}<line x1="${plot.left}" y1="${plot.bottom}" x2="${plot.right}" y2="${plot.bottom}" stroke="#98A2B3"/>${xLabels}`;
+    const xTicks = shortLabels.map(({ index }) => {
+      const x = plot.left + slotWidth * (index + 0.5);
+      return `<line x1="${x}" y1="${plot.bottom}" x2="${x}" y2="${plot.bottom + 5}" stroke="#98A2B3"/>`;
+    }).join("");
+    const xLabels = shortLabels.map(({ point, index }) => label(formatTimeSeriesLabel(point), plot.left + slotWidth * (index + 0.5), plot.bottom + 22, "middle", 12)).join("");
+    content = `${grid}${marks}<line x1="${plot.left}" y1="${plot.bottom}" x2="${plot.right}" y2="${plot.bottom}" stroke="#98A2B3"/>${xTicks}${xLabels}`;
   }
 
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="#fff"/>${content}</svg>`;
@@ -154,8 +167,11 @@ export function VisualizationChart({
   );
   const [hover, setHover] = useState<{ index: number; x: number; y: number } | null>(null);
   const [yAxisTicks, setYAxisTicks] = useState<Array<{ label: string; y: number }>>([]);
+  const [xAxisTicks, setXAxisTicks] = useState<Array<{ label: string; x: number }>>([]);
   const yAxisTicksRef = useRef<Array<{ label: string; y: number }>>([]);
   const axisUpdateScheduled = useRef(false);
+  const xAxisTicksRef = useRef<Array<{ label: string; x: number }>>([]);
+  const xAxisUpdateScheduled = useRef(false);
   const chartWidth = useRef(0);
   const chartBounds = useRef<{ left: number; right: number } | null>(null);
   const pieTotal = useMemo(() => safeData.reduce((sum, point) => sum + point.value, 0), [safeData]);
@@ -195,13 +211,11 @@ export function VisualizationChart({
   };
   useEffect(() => setHover(null), [safeData, type]);
   const hoveredPoint = hover ? safeData[hover.index] : undefined;
-  const isTimeseries = type === "line" && safeData.some((point) => point.kind === "timeseries" || point.timestamp);
-  const timeAxisLabels = useMemo(() => {
-    if (!isTimeseries) return [];
+  const xAxisLabelIndexes = useMemo(() => {
     const tickCount = Math.min(6, safeData.length);
-    if (tickCount <= 1) return safeData.map((point) => point.label);
-    return Array.from({ length: tickCount }, (_, index) => safeData[Math.round(index * (safeData.length - 1) / (tickCount - 1))].label);
-  }, [isTimeseries, safeData]);
+    return Array.from({ length: tickCount }, (_, index) => tickCount <= 1 ? 0 : Math.round(index * (safeData.length - 1) / (tickCount - 1)));
+  }, [safeData.length]);
+  const isPercentageChart = (type === "bar" || type === "line") && suffix === "%";
   const tooltipLeft = hover ? clamp(hover.x + 12, 4, Math.max(4, chartWidth.current - 176)) : 0;
   const tooltipTop = hover ? clamp(hover.y - 56, 4, Math.max(4, height - 52)) : 0;
   const syncYAxisTicks = (ticks: Array<{ label: string; y: number }>) => {
@@ -213,6 +227,17 @@ export function VisualizationChart({
     requestAnimationFrame(() => {
       axisUpdateScheduled.current = false;
       setYAxisTicks(yAxisTicksRef.current);
+    });
+  };
+  const syncXAxisTicks = (ticks: Array<{ label: string; x: number }>) => {
+    const current = xAxisTicksRef.current;
+    const unchanged = current.length === ticks.length && current.every((tick, index) => tick.label === ticks[index]?.label && Math.abs(tick.x - (ticks[index]?.x ?? 0)) < 0.5);
+    if (unchanged || xAxisUpdateScheduled.current) return;
+    xAxisTicksRef.current = ticks;
+    xAxisUpdateScheduled.current = true;
+    requestAnimationFrame(() => {
+      xAxisUpdateScheduled.current = false;
+      setXAxisTicks(xAxisTicksRef.current);
     });
   };
 
@@ -260,13 +285,22 @@ export function VisualizationChart({
             data={safeData}
             xKey="label"
             yKeys={["value"]}
+            domain={isPercentageChart ? { y: [0, 100] } : undefined}
             domainPadding={{ left: 16, right: 16, top: 12 }}
           >
             {({ points, chartBounds: bounds, yTicks, yScale }) => {
               chartBounds.current = bounds;
-              syncYAxisTicks(yTicks.map((tick) => ({ label: `${Number(tick.toFixed(1)).toLocaleString()}${suffix}`, y: yScale(tick) })));
+              const displayYTicks = isPercentageChart ? [0, 25, 50, 75, 100] : yTicks;
+              syncYAxisTicks(displayYTicks.map((tick) => ({ label: `${(isPercentageChart ? Math.round(tick) : Number(tick.toFixed(1))).toLocaleString()}${suffix}`, y: yScale(tick) })));
+              syncXAxisTicks(xAxisLabelIndexes.flatMap((index) => {
+                const point = points.value[index];
+                return point ? [{ label: formatTimeSeriesLabel(safeData[index]), x: point.x }] : [];
+              }));
               return type === "line"
-                ? <Line points={points.value} color={color} strokeWidth={3} curveType="natural" />
+                ? <>
+                    <Line points={points.value} color={color} strokeWidth={3} curveType="natural" />
+                    <Scatter points={points.value} color={color} style="stroke" strokeWidth={3} radius={6} />
+                  </>
                 : <Bar points={points.value} chartBounds={bounds} color={color} roundedCorners={{ topLeft: 5, topRight: 5 }} />;
             }}
           </CartesianChart>
@@ -277,9 +311,12 @@ export function VisualizationChart({
           {Platform.OS === "web" ? <View pointerEvents="box-only" onPointerMove={handlePointerMove} onPointerLeave={() => setHover(null)} style={StyleSheet.absoluteFill} /> : null}
         </View>
       </View>
-      {isTimeseries ? <View accessibilityRole="text" accessibilityLabel={`Time axis: ${timeAxisLabels.join(", ")}`} style={styles.timeAxis}>
-        {timeAxisLabels.map((label, index) => <Text key={`${index}-${label}`} numberOfLines={1} style={styles.timeAxisLabel}>{label}</Text>)}
-      </View> : null}
+      <View accessibilityRole="text" accessibilityLabel={`X axis: ${xAxisTicks.map((tick) => tick.label).join(", ")}`} style={styles.xAxis}>
+        {xAxisTicks.map((tick, index) => <View key={`${index}-${tick.label}`}>
+          <View style={[styles.xAxisTick, { left: tick.x }]} />
+          <Text numberOfLines={1} style={[styles.xAxisLabel, { left: tick.x }]}>{tick.label}</Text>
+        </View>)}
+      </View>
       {type !== "line" ? <View style={styles.legend}>
         {safeData.map((point, index) => (
           <View key={`${index}-${point.label}`} style={styles.legendItem}>
@@ -297,8 +334,9 @@ const styles = StyleSheet.create({
   cartesianRow: { flexDirection: "row", width: "100%" },
   yAxis: { width: 42, position: "relative", justifyContent: "center", borderRightWidth: StyleSheet.hairlineWidth, borderRightColor: colors.border },
   yAxisLabel: { position: "absolute", right: 4, color: colors.textMuted, fontSize: 10, textAlign: "right", width: 36 },
-  timeAxis: { flexDirection: "row", justifyContent: "space-between", gap: 4, paddingLeft: 64, paddingRight: 22, paddingTop: 3 },
-  timeAxisLabel: { color: colors.textMuted, fontSize: 10, flex: 1, textAlign: "center" },
+  xAxis: { position: "relative", height: 25, marginLeft: 42 },
+  xAxisTick: { position: "absolute", top: 0, width: StyleSheet.hairlineWidth, height: 5, backgroundColor: colors.textMuted },
+  xAxisLabel: { position: "absolute", top: 6, width: 80, marginLeft: -40, color: colors.textMuted, fontSize: 10, textAlign: "center" },
   legendItem: { flexDirection: "row", alignItems: "center", gap: 5, maxWidth: "100%" },
   legendLabel: { color: colors.textMuted, fontSize: 11, flexShrink: 1 },
   legendValue: { color: colors.text, fontSize: 11, fontWeight: "700" },

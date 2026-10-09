@@ -10,7 +10,8 @@ export type AppIconName =
   | 'trend' | 'chart' | 'person' | 'error' | 'denied' | 'empty' | 'success'
   | 'metric' | 'chevronDown'
   | 'copy' | 'paste' | 'clear' | 'sortAscending' | 'sortDescending' | 'filter'
-  | 'hide' | 'show' | 'expand' | 'collapse' | 'edit' | 'delete';
+  | 'hide' | 'show' | 'expand' | 'collapse' | 'edit' | 'delete'
+  | 'add' | 'save' | 'download' | 'upload' | 'cancel' | 'refresh' | 'apply';
 
 const ICONS: Record<AppIconName, SymbolViewProps['name']> = {
   home: { ios: 'house.fill', android: 'home', web: 'home' },
@@ -63,6 +64,13 @@ const ICONS: Record<AppIconName, SymbolViewProps['name']> = {
   collapse: { ios: 'arrow.up.left.and.arrow.down.right', android: 'unfold_less', web: 'unfold_less' },
   edit: { ios: 'pencil', android: 'edit', web: 'edit' },
   delete: { ios: 'trash', android: 'delete', web: 'delete' },
+  add: { ios: 'plus', android: 'add', web: 'add' },
+  save: { ios: 'square.and.arrow.down', android: 'save', web: 'save' },
+  download: { ios: 'arrow.down.to.line', android: 'download', web: 'download' },
+  upload: { ios: 'arrow.up.doc', android: 'upload_file', web: 'upload_file' },
+  cancel: { ios: 'xmark', android: 'close', web: 'close' },
+  refresh: { ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' },
+  apply: { ios: 'checkmark', android: 'done', web: 'done' },
 };
 
 export function AppIcon({ name, size = 18, color, style }: { name: AppIconName; size?: number; color: string; style?: StyleProp<ViewStyle> }) {

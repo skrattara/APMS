@@ -101,7 +101,7 @@ function FacultyCriteria() {
           <Field label="Examination weight (%)" value={exam} onChangeText={setExam} keyboardType="numeric" />
         </View>
         <Text style={[styles.rowMeta, { color: total === 100 ? colors.success : colors.danger }]}>Total: {total}% · {total === 100 ? 'Valid' : 'Weights must total 100%'}</Text>
-        <Text style={styles.rowMeta}>Changes apply to monitoring calculations only and are audit logged when saved to Supabase.</Text>
+        <Text style={styles.rowMeta}>Changes apply to monitoring calculations only and are recorded in the audit log.</Text>
       </Card>
     </View>
   );

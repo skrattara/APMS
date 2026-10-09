@@ -1,3 +1,4 @@
+import { getErrorMessage } from '@/services/errors';
 import type { Role } from "@apms/domain";
 import { useMemo, useState } from "react";
 import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
@@ -282,9 +283,7 @@ export function AppPortalScreen({
       setDialogOpen(false);
     } catch (cause) {
       toast.show(
-        cause instanceof Error
-          ? cause.message
-          : "The action could not be completed.",
+        getErrorMessage(cause, "The action could not be completed."),
       );
     } finally {
       setPending(false);
@@ -404,9 +403,7 @@ function EventDialog({
       });
     } catch (cause) {
       setError(
-        cause instanceof Error
-          ? cause.message
-          : "The event could not be created.",
+        getErrorMessage(cause, "The event could not be created."),
       );
     } finally {
       setSaving(false);
@@ -928,7 +925,7 @@ export function Settings({
       onMessage(await saveSettings(screen, user, demoMode, payload));
     } catch (cause) {
       onMessage(
-        cause instanceof Error ? cause.message : "Settings could not be saved.",
+        getErrorMessage(cause, "Settings could not be saved."),
       );
     } finally {
       setSaving(false);
@@ -943,9 +940,7 @@ export function Settings({
       );
     } catch (cause) {
       onMessage(
-        cause instanceof Error
-          ? cause.message
-          : "Password could not be changed.",
+        getErrorMessage(cause, "Password could not be changed."),
       );
     } finally {
       setSaving(false);

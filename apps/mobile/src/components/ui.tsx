@@ -11,12 +11,38 @@ import {
   View,
   useWindowDimensions,
   type StyleProp,
+  type TextStyle,
   type TextInputProps,
   type ViewStyle,
 } from "react-native";
 
 import { colors, radius, shadow, space } from "@/theme/tokens";
 import { AppIcon } from "@/components/Icon";
+import type { AppIconName } from "@/components/Icon";
+
+function buttonIcon(label: string): AppIconName {
+  const action = label.trim().toLowerCase();
+  if (/delete|remove|deactivate|reject|clear/.test(action)) return "delete";
+  if (/edit|manage|update|review/.test(action)) return "edit";
+  if (/save|submit/.test(action)) return "save";
+  if (/confirm|approve|record/.test(action)) return "apply";
+  if (/export|download|report/.test(action)) return "download";
+  if (/import|upload|browse|choose file/.test(action)) return "upload";
+  if (/search|filter/.test(action)) return "search";
+  if (/retry|refresh/.test(action)) return "refresh";
+  if (/close|cancel|back/.test(action)) return "cancel";
+  if (/show|view|open|details/.test(action)) return "show";
+  if (/hide/.test(action)) return "hide";
+  if (/apply|assign/.test(action)) return "apply";
+  if (/create|add|new/.test(action)) return "add";
+  if (/log ?out|sign ?out/.test(action)) return "logout";
+  return "info";
+}
+
+function buttonDescription(label: string) {
+  const action = label.trim().replace(/\s+/g, " ");
+  return `${action.endsWith("?") ? action : `${action}.`} Activate to continue.`;
+}
 
 export function Button({
   label,
@@ -24,17 +50,25 @@ export function Button({
   variant = "primary",
   disabled = false,
   loading = false,
+  icon,
+  description,
 }: {
   label: string;
   onPress?: () => void;
   variant?: "primary" | "secondary" | "danger" | "ghost";
   disabled?: boolean;
   loading?: boolean;
+  icon?: AppIconName;
+  description?: string;
 }) {
+  const hint = description ?? buttonDescription(label);
   return (
     <Pressable
       accessibilityRole="button"
+      accessibilityLabel={label}
+      accessibilityHint={hint}
       accessibilityState={{ disabled: disabled || loading, busy: loading }}
+      {...(Platform.OS === "web" ? ({ title: hint } as never) : {})}
       disabled={disabled || loading}
       onPress={onPress}
       style={({ pressed }) => [
@@ -54,16 +88,19 @@ export function Button({
           }
         />
       ) : (
-        <Text
-          style={[
-            styles.buttonText,
-            variant !== "primary" &&
-              variant !== "danger" &&
-              styles.buttonTextDark,
-          ]}
-        >
-          {label}
-        </Text>
+        <View style={styles.buttonContent}>
+          <AppIcon name={icon ?? buttonIcon(label)} size={15} color={variant === "primary" || variant === "danger" ? "#FFF" : colors.brand} />
+          <Text
+            style={[
+              styles.buttonText,
+              variant !== "primary" &&
+                variant !== "danger" &&
+                styles.buttonTextDark,
+            ]}
+          >
+            {label}
+          </Text>
+        </View>
       )}
     </Pressable>
   );
@@ -73,6 +110,8 @@ export function Field({
   label,
   error,
   containerStyle,
+  inputRef,
+  onKeyDown,
   compact = false,
   inputType,
   helpText,
@@ -82,6 +121,8 @@ export function Field({
   label: string;
   error?: string;
   containerStyle?: StyleProp<ViewStyle>;
+  inputRef?: (instance: TextInput | null) => void;
+  onKeyDown?: (event: any) => void;
   compact?: boolean;
   inputType?: "date" | "email" | "text" | "color";
   helpText?: string;
@@ -95,6 +136,8 @@ export function Field({
       <View>
         <TextInput
           {...props}
+          ref={inputRef}
+          {...(onKeyDown ? ({ onKeyDown } as any) : {})}
           {...(Platform.OS === "web" && inputType ? ({ type: inputType } as never) : {})}
           secureTextEntry={isSecure ? !secureVisible : props.secureTextEntry}
           accessibilityLabel={props.accessibilityLabel ?? label}
@@ -160,11 +203,15 @@ export function SelectField({
   error,
   disabled = false,
   containerStyle,
+  controlStyle,
+  valueStyle,
   compact = false,
   accessibilityLabel,
   searchable = false,
   helpText,
   helpExample,
+  controlRef,
+  onKeyDown,
 }: {
   label: string;
   value: string;
@@ -174,11 +221,15 @@ export function SelectField({
   error?: string;
   disabled?: boolean;
   containerStyle?: StyleProp<ViewStyle>;
+  controlStyle?: StyleProp<ViewStyle>;
+  valueStyle?: StyleProp<TextStyle>;
   compact?: boolean;
   accessibilityLabel?: string;
   searchable?: boolean;
   helpText?: string;
   helpExample?: string;
+  controlRef?: (instance: any) => void;
+  onKeyDown?: (event: any) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -190,15 +241,17 @@ export function SelectField({
     <View style={[styles.field, compact && styles.compactField, containerStyle]}>
       <View style={styles.labelRow}><Text style={[styles.label, compact && styles.compactLabel]}>{label}</Text>{helpText ? <HelpTooltip title={label} text={helpText} example={helpExample} /> : null}</View>
       <Pressable
+        ref={controlRef as any}
         accessibilityRole="button"
         accessibilityLabel={accessibilityLabel ?? label}
         accessibilityState={{ expanded: open, disabled }}
         disabled={disabled}
         onPress={() => { setQuery(''); setOpen(true); }}
-        style={[styles.input, styles.selectInput, compact && styles.compactSelectInput, disabled && styles.disabled]}
+        {...(onKeyDown ? ({ onKeyDown } as any) : {})}
+        style={[styles.input, styles.selectInput, compact && styles.compactSelectInput, disabled && styles.disabled, controlStyle]}
       >
         <Text
-          style={[styles.selectValue, compact && styles.compactSelectValue, !selected && styles.selectPlaceholder]}
+          style={[styles.selectValue, compact && styles.compactSelectValue, !selected && styles.selectPlaceholder, valueStyle]}
         >
           {selected?.label ?? placeholder}
         </Text>
@@ -636,6 +689,16 @@ export function ToastProvider({ children }: PropsWithChildren) {
   );
 }
 
+export function RefreshIndicator({ visible, label = "Updating records…" }: { visible: boolean; label?: string }) {
+  if (!visible) return null;
+  return (
+    <View pointerEvents="none" accessibilityRole="progressbar" accessibilityLabel={label} accessibilityLiveRegion="polite" style={styles.refreshIndicator}>
+      <ActivityIndicator size="small" color={colors.brand} />
+      <Text style={styles.refreshIndicatorText}>{label}</Text>
+    </View>
+  );
+}
+
 export function HelpTooltip({ title, text, example }: { title: string; text: string; example?: string }) {
   const [open, setOpen] = useState(false);
   const anchorRef = useRef<any>(null);
@@ -721,6 +784,9 @@ const styles = StyleSheet.create({
   disabled: { opacity: 0.5 },
   buttonText: { color: "#FFF", fontSize: 13, fontWeight: "600" },
   buttonTextDark: { color: colors.text },
+  buttonContent: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7 },
+  refreshIndicator: { position: "absolute", top: 0, right: 0, zIndex: 10, flexDirection: "row", alignItems: "center", gap: 7, minHeight: 24 },
+  refreshIndicatorText: { color: colors.textMuted, fontSize: 11 },
   field: { gap: 6 },
   label: { color: colors.text, fontSize: 13, fontWeight: "600" },
   compactField: { gap: 2 },

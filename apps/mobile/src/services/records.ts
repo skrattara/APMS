@@ -1,3 +1,4 @@
+import { getErrorMessage } from '@/services/errors';
 import { useCallback, useEffect, useState } from "react";
 import type { Role } from "@apms/domain";
 
@@ -140,7 +141,7 @@ async function fetchScreenData(screen: string, role: Role): Promise<ScreenData> 
         date(item.created_at),
         text(item.category),
         text(item.body).slice(0, 80),
-        item.status === "sent" ? "Sent" : "Not sent",
+        item.status === "sent" || item.status === "published" ? "Published" : "Not published",
         text(item.status),
       ]),
     };
@@ -290,7 +291,7 @@ export function useScreenRecords(screen: string, role: Role): State {
       .catch((cause: unknown) => {
         if (active)
           setError(
-            cause instanceof Error ? cause.message : "Unable to load records.",
+            getErrorMessage(cause, "Unable to load records."),
           );
       })
       .finally(() => {
