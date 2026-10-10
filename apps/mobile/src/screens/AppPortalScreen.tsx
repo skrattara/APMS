@@ -1,6 +1,6 @@
 import { getErrorMessage } from '@/services/errors';
 import type { Role } from "@apms/domain";
-import { useEffect, useMemo, useState } from "react";
+import { lazy, Suspense, useEffect, useMemo, useState, type ComponentProps } from "react";
 import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { SvgXml } from "react-native-svg";
 
@@ -55,15 +55,22 @@ import {
   type EventStatus,
 } from "@/services/events";
 import { useScreenRecords } from "@/services/records";
-import { FacultyPortalContent } from "@/screens/FacultyPortalContent";
 import { FacultyLivePortalContent } from "@/screens/FacultyLivePortalContent";
-import { AcademicAdminPortalContent } from "@/screens/AcademicAdminPortalContent";
-import { SystemAdminPortalContent } from "@/screens/SystemAdminPortalContent";
-import { DataGeneratorDevScreen } from "@/screens/DataGeneratorDevScreen";
 import { colors, radius, space } from "@/theme/tokens";
+import { tracePerformanceEvent } from "@/services/performanceTrace";
 import { useAnalyticsFilters } from "@/components/charts/AnalyticsFilters";
-import { VisualizationPanel } from "@/components/charts/VisualizationPanel";
 import type { EvaluationRecord } from "@/services/analytics";
+
+const LazyFacultyPortalContent = lazy(() => import("@/screens/FacultyPortalContent").then((module) => ({ default: module.FacultyPortalContent })));
+const LazyAcademicAdminPortalContent = lazy(() => import("@/screens/AcademicAdminPortalContent").then((module) => ({ default: module.AcademicAdminPortalContent })));
+const LazySystemAdminPortalContent = lazy(() => import("@/screens/SystemAdminPortalContent").then((module) => ({ default: module.SystemAdminPortalContent })));
+const LazyDataGeneratorDevScreen = lazy(() => import("@/screens/DataGeneratorDevScreen").then((module) => ({ default: module.DataGeneratorDevScreen })));
+const LazyVisualizationPanel = lazy(() => import("@/components/charts/VisualizationPanel").then((module) => ({ default: module.VisualizationPanel })));
+type VisualizationPanelProps = ComponentProps<typeof LazyVisualizationPanel>;
+
+function DashboardChart(props: VisualizationPanelProps) {
+  return <Suspense fallback={<Card><Text style={styles.sectionTitle}>Preparing chart…</Text></Card>}><LazyVisualizationPanel {...props} /></Suspense>;
+}
 
 type ScreenKind =
   "dashboard" | "table" | "analytics" | "settings" | "assistant" | "security";
@@ -314,13 +321,13 @@ export function AppPortalScreen({
     hidePageHeader={(liveRolePortal || role === "faculty") && screen !== "settings"}
     >
       {role === "faculty" && screen !== "settings" ? (
-        demoMode ? <FacultyPortalContent screen={screen} /> : <FacultyLivePortalContent screen={screen} />
+        demoMode ? <Suspense fallback={<PageState kind="loading" title="Loading Faculty dashboard" message="Preparing your dashboard." />}><LazyFacultyPortalContent screen={screen} /></Suspense> : <FacultyLivePortalContent screen={screen} />
       ) : role === "academic_admin" && !demoMode ? (
-        <AcademicAdminPortalContent screen={screen} />
+        <Suspense fallback={<PageState kind="loading" title="Loading academic workspace" message="Preparing your workspace." />}><LazyAcademicAdminPortalContent screen={screen} /></Suspense>
       ) : role === "system_admin" && screen === "data-generator" && __DEV__ && !demoMode ? (
-        <DataGeneratorDevScreen />
+        <Suspense fallback={<PageState kind="loading" title="Loading data generator" message="Preparing the generator." />}><LazyDataGeneratorDevScreen /></Suspense>
       ) : role === "system_admin" && !demoMode ? (
-        <SystemAdminPortalContent screen={screen} />
+        <Suspense fallback={<PageState kind="loading" title="Loading system workspace" message="Preparing your workspace." />}><LazySystemAdminPortalContent screen={screen} /></Suspense>
       ) : (
         <>
           {definition.kind === "dashboard" ? <Dashboard role={role} /> : null}
@@ -532,6 +539,7 @@ function Dashboard({ role }: { role: Role }) {
   const { metrics, error } = useDashboardMetrics(role);
   const { demoMode } = useAuth();
   const data = DASHBOARD_MOCKS[role];
+  useEffect(() => { tracePerformanceEvent('dashboard.screen.open', { role }); }, [role]);
   return (
     <>
       {demoMode ? (
@@ -569,8 +577,8 @@ function Dashboard({ role }: { role: Role }) {
       {demoMode ? (
         <>
           <View style={styles.columns}>
-            <VisualizationPanel title={data.trendTitle} description={data.trendSubtitle} data={data.trend.map((point) => ({ ...point, kind: "timeseries" as const }))} type="line" suffix={role === "system_admin" ? "" : "%"} />
-            <VisualizationPanel title={role === "system_admin" ? "User Distribution" : "Risk Distribution"} description="Breakdown of the current monitoring data." data={data.risk} type="pie" suffix={role === "academic_admin" ? "%" : ""} />
+            <DashboardChart title={data.trendTitle} description={data.trendSubtitle} data={data.trend.map((point) => ({ ...point, kind: "timeseries" as const }))} type="line" suffix={role === "system_admin" ? "" : "%"} />
+            <DashboardChart title={role === "system_admin" ? "User Distribution" : "Risk Distribution"} description="Breakdown of the current monitoring data." data={data.risk} type="pie" suffix={role === "academic_admin" ? "%" : ""} />
           </View>
           <Card>
             <Text style={styles.sectionTitle}>{data.tableTitle}</Text>
@@ -776,8 +784,8 @@ function Analytics({ screen }: { screen: string }) {
       </Card>
       {demoFilters.controls}
       <View style={styles.columns}>
-        <VisualizationPanel title={`${tab} validation analysis`} description="Fictional validation series; this chart is not an AI output." data={filteredSeries} type={tab === "Risk Factors" ? "pie" : "line"} suffix="%" height={230} />
-        {tab !== "Risk Factors" ? <VisualizationPanel title="Score histogram" description="Filtered fictional scores grouped into percentage bands." data={filteredHistogram} type="histogram" suffix="%" height={230} /> : null}
+        <DashboardChart title={`${tab} validation analysis`} description="Fictional validation series; this chart is not an AI output." data={filteredSeries} type={tab === "Risk Factors" ? "pie" : "line"} suffix="%" height={230} />
+        {tab !== "Risk Factors" ? <DashboardChart title="Score histogram" description="Filtered fictional scores grouped into percentage bands." data={filteredHistogram} type="histogram" suffix="%" height={230} /> : null}
       </View>
     </>
   );
@@ -836,9 +844,9 @@ function LiveAnalyticsContent({
         </View>
       </Card>
       <View style={styles.columns}>
-        <VisualizationPanel title={title} description="Daily average evaluation score from records matching the selected filters." data={filteredScoreSeries} type="line" suffix="%" height={230} />
-        <VisualizationPanel title="Score histogram" description="Filtered continuous evaluation scores grouped into percentage bands." data={filteredScoreDistribution} type="histogram" suffix="%" height={230} />
-        <VisualizationPanel title="Risk Distribution" description="Persisted low, medium, high, and unclassified risk levels." data={filteredRiskSeries} type="pie" height={230} />
+        <DashboardChart title={title} description="Daily average evaluation score from records matching the selected filters." data={filteredScoreSeries} type="line" suffix="%" height={230} />
+        <DashboardChart title="Score histogram" description="Filtered continuous evaluation scores grouped into percentage bands." data={filteredScoreDistribution} type="histogram" suffix="%" height={230} />
+        <DashboardChart title="Risk Distribution" description="Persisted low, medium, high, and unclassified risk levels." data={filteredRiskSeries} type="pie" height={230} />
       </View>
     </>
   );

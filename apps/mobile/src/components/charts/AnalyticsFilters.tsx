@@ -1,9 +1,10 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { StyleSheet, Text, View } from "react-native";
 
 import { Field, SelectField } from "@/components/ui";
 import { colors } from "@/theme/tokens";
 import type { EvaluationRecord } from "@/services/analytics";
+import type { RiskSelectOption } from "@/services/evaluationRiskOptions";
 
 const periodOptions = [
   { label: "Any time", value: "all" },
@@ -11,7 +12,7 @@ const periodOptions = [
   { label: "Last 30 days", value: "30" },
   { label: "Last 90 days", value: "90" },
 ];
-const riskOptions = [
+const defaultRiskOptions = [
   { label: "All risks", value: "all" },
   { label: "Low risk", value: "low" },
   { label: "Medium risk", value: "medium" },
@@ -19,13 +20,16 @@ const riskOptions = [
   { label: "Unavailable", value: "unavailable" },
 ];
 
-export function useAnalyticsFilters(records: EvaluationRecord[]) {
+export function useAnalyticsFilters<T extends EvaluationRecord>(records: T[], configuredRiskOptions?: RiskSelectOption[]) {
   const [search, setSearch] = useState("");
   const [risk, setRisk] = useState("all");
   const [category, setCategory] = useState("all");
   const [classification, setClassification] = useState("all");
   const [period, setPeriod] = useState("all");
   const [minimumScore, setMinimumScore] = useState("");
+  useEffect(() => {
+    if (configuredRiskOptions && !configuredRiskOptions.some((option) => option.value === risk)) setRisk("all");
+  }, [configuredRiskOptions, risk]);
   const categoryOptions = useMemo(() => [
     { label: "All classes / categories", value: "all" },
     ...Array.from(new Set(records.map((record) => record.category).filter(Boolean))).sort().map((value) => ({ label: value, value })),
@@ -54,7 +58,7 @@ export function useAnalyticsFilters(records: EvaluationRecord[]) {
       <View style={styles.row}>
         <Field label="Search student or class" value={search} onChangeText={setSearch} placeholder="Name, subject, or section" containerStyle={styles.search} />
         <SelectField label="Class / category" value={category} options={categoryOptions} onChange={setCategory} containerStyle={styles.field} searchable />
-        <SelectField label="Risk" value={risk} options={riskOptions} onChange={setRisk} containerStyle={styles.field} />
+        <SelectField label="Risk" value={risk} options={configuredRiskOptions ?? defaultRiskOptions} onChange={setRisk} containerStyle={styles.field} />
         <SelectField label="Classification" value={classification} options={classificationOptions} onChange={setClassification} containerStyle={styles.field} />
         <SelectField label="Period" value={period} options={periodOptions} onChange={setPeriod} containerStyle={styles.field} />
         <Field label="Minimum score" value={minimumScore} onChangeText={setMinimumScore} placeholder="0–100" keyboardType="decimal-pad" containerStyle={styles.field} />

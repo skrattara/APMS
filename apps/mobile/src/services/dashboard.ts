@@ -3,6 +3,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { useAuth } from "@/auth/AuthProvider";
 import { supabase } from "./supabase";
+import { captureDatabasePlan, tracePerformanceSpan, tracePerformanceEvent } from "./performanceTrace";
 
 export type DashboardMetrics = {
   primaryLabel: string;
@@ -41,7 +42,12 @@ async function count(table: string, filters?: (query: any) => any) {
     .from(table)
     .select("*", { count: "exact", head: true });
   if (filters) query = filters(query);
-  const { count: value, error } = await query;
+  captureDatabasePlan(`dashboard.${table}`, () => {
+    let explainQuery: any = supabase!.from(table).select("*", { count: "exact", head: true });
+    if (filters) explainQuery = filters(explainQuery);
+    return explainQuery;
+  });
+  const { count: value, error } = await tracePerformanceSpan<any>(`dashboard.query.${table}`, () => query);
   if (error) throw error;
   return value ?? 0;
 }
@@ -108,7 +114,8 @@ export function useDashboardMetrics(role: Role) {
         active = false;
       };
     }
-    const loader = role === "system_admin" ? loadSystemAdmin() : loadAcademicStaff();
+    tracePerformanceEvent('dashboard.metrics.start', { role });
+    const loader = tracePerformanceSpan('dashboard.metrics.load', () => role === "system_admin" ? loadSystemAdmin() : loadAcademicStaff(), { role });
     loader
       .then((next) => {
         if (active) {
@@ -130,17 +137,26 @@ export function useDashboardMetrics(role: Role) {
   useEffect(() => {
     const client = supabase;
     if (demoMode || !client || !user) return;
+    let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+    const scheduleRefresh = () => {
+      if (refreshTimer) clearTimeout(refreshTimer);
+      refreshTimer = setTimeout(() => {
+        refreshTimer = undefined;
+        refresh();
+      }, 300);
+    };
     const tables = role === "system_admin"
       ? ["profiles"]
       : ["students", "class_records", "performance_evaluations", "assessment_results"];
     const channel = client.channel(`dashboard-${user.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
     for (const table of tables) {
-      channel.on("postgres_changes", { event: "*", schema: "public", table }, refresh);
+      channel.on("postgres_changes", { event: "*", schema: "public", table }, scheduleRefresh);
     }
     channel.subscribe();
-    const poll = setInterval(refresh, 60_000);
+    const poll = setInterval(scheduleRefresh, 60_000);
     return () => {
       clearInterval(poll);
+      if (refreshTimer) clearTimeout(refreshTimer);
       void client.removeChannel(channel);
     };
   }, [demoMode, refresh, role, user]);

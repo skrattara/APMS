@@ -340,11 +340,13 @@ export function MetricCard({
   value,
   delta,
   tone = "brand",
+  valueColor,
 }: {
   label: string;
   value: string;
   delta?: string;
   tone?: "brand" | "success" | "warning" | "danger" | "info";
+  valueColor?: string;
 }) {
   return (
     <Card style={styles.metric}>
@@ -368,7 +370,7 @@ export function MetricCard({
         <AppIcon name="metric" size={18} color={colors[tone]} />
       </View>
       <Text style={styles.metricLabel}>{label}</Text>
-      <Text style={styles.metricValue}>{value}</Text>
+      <Text style={[styles.metricValue, valueColor ? { color: valueColor } : null]}>{value}</Text>
       {delta ? <Text style={styles.metricDelta}>{delta}</Text> : null}
     </Card>
   );

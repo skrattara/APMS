@@ -1,5 +1,26 @@
 import { expect, test, type Locator } from '@playwright/test';
 
+test('profiles the signed-in Faculty Dashboard before gradebook navigation', async ({ page }) => {
+  test.setTimeout(120_000);
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('Profiler.enable');
+  await cdp.send('Profiler.setSamplingInterval', { interval: 10000 });
+  await cdp.send('Profiler.start');
+  await page.goto('/portal/faculty/overview');
+  await page.waitForTimeout(20_000);
+  const { profile } = await cdp.send('Profiler.stop');
+  const sampleTimes = new Map<number, number>();
+  profile.samples?.forEach((nodeId: number, index: number) => sampleTimes.set(nodeId, (sampleTimes.get(nodeId) ?? 0) + (profile.timeDeltas?.[index] ?? 0)));
+  const hotFunctions = (profile.nodes ?? []).map((node: any) => ({
+    function: node.callFrame.functionName || '(anonymous)',
+    source: node.callFrame.url ? node.callFrame.url.split('/').at(-1) : '(runtime)',
+    line: node.callFrame.lineNumber + 1,
+    selfMs: Math.round((sampleTimes.get(node.id) ?? 0) / 1000),
+  })).filter((node: any) => node.selfMs > 0).sort((a: any, b: any) => b.selfMs - a.selfMs).slice(0, 20);
+  console.info('[Faculty Dashboard CPU profile]', JSON.stringify(hotFunctions));
+  await cdp.detach();
+});
+
 test('250-student test class switches to Full View and scrolls without gradebook stalls', async ({ page }) => {
   test.setTimeout(180_000);
   await page.addInitScript(() => {
@@ -60,8 +81,13 @@ test('250-student test class switches to Full View and scrolls without gradebook
     supabaseRequests.push({ path: new URL(response.url()).pathname, status: response.status(), durationMs: Date.now() - started });
   });
 
+  await page.goto('/portal/faculty/overview');
+  await expect(page.getByRole('heading', { name: 'Faculty Dashboard' })).toBeVisible({ timeout: 120_000 });
   const workspaceStarted = Date.now();
-  await page.goto('/portal/faculty/gradebook');
+  const gradebookNavigation = page.getByRole('link', { name: /Gradebook/ });
+  await expect(gradebookNavigation, 'Faculty sidebar should expose Gradebook navigation').toBeVisible();
+  await gradebookNavigation.click();
+  await page.waitForURL('**/portal/faculty/gradebook', { timeout: 30_000 });
   await expect(page.getByRole('heading', { name: 'Class Gradebook' })).toBeVisible({ timeout: 120_000 });
   const workspaceLoadMs = Date.now() - workspaceStarted;
 

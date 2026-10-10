@@ -8,6 +8,7 @@ import * as WebBrowser from 'expo-web-browser';
 import { DEMO_USERS, type DemoUser } from '@/data/demo';
 import { isSupabaseConfigured, supabase } from '@/services/supabase';
 import { getErrorMessage } from '@/services/errors';
+import { captureDatabasePlan, tracePerformanceSpan } from '@/services/performanceTrace';
 
 export type AuthUser = { id: string; email: string; firstName: string; lastName: string; role: Role };
 type AuthResult = { ok: true; user: AuthUser } | { ok: false; message: string } | { ok: false; mfaRequired: true; factorId: string };
@@ -29,19 +30,55 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 const demoMode = process.env.EXPO_PUBLIC_DEMO_MODE === 'true';
 const demoSessionKey = 'apms.demo.session';
 
+type SessionResolution = { user: AuthUser | null; factorId: string | null; mfaEnabled: boolean };
+const sessionResolutions = new Map<string, Promise<SessionResolution>>();
+
 async function loadSupabaseUser(session: Session): Promise<AuthUser | null> {
   if (!supabase) return null;
-  const { data: assurance } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
-  if (assurance?.nextLevel === 'aal2' && assurance.currentLevel !== 'aal2') return null;
-  const { data, error } = await supabase
+  captureDatabasePlan('auth.profile', () => supabase!.from('profiles')
+    .select('id,email,first_name,last_name,status,user_roles!user_roles_user_id_fkey!inner(roles!inner(key))')
+    .eq('id', session.user.id)
+    .single());
+  const { data, error } = await tracePerformanceSpan<any>('auth.profile.load', () => supabase!
     .from('profiles')
     .select('id,email,first_name,last_name,status,user_roles!user_roles_user_id_fkey!inner(roles!inner(key))')
     .eq('id', session.user.id)
-    .single();
+    .single());
   if (error || !data || data.status !== 'active') return null;
   const nested = data.user_roles as unknown as { roles: { key: Role } }[];
   const role = nested[0]?.roles?.key;
   return role ? { id: data.id, email: data.email, firstName: data.first_name, lastName: data.last_name, role } : null;
+}
+
+function resolveSupabaseSession(session: Session): Promise<SessionResolution> {
+  const cached = sessionResolutions.get(session.access_token);
+  if (cached) return cached;
+
+  const resolution = tracePerformanceSpan('auth.session.resolve', async (): Promise<SessionResolution> => {
+    if (!supabase) return { user: null, factorId: null, mfaEnabled: false };
+    const [assuranceResult, factorsResult] = await Promise.all([
+      supabase.auth.mfa.getAuthenticatorAssuranceLevel(),
+      supabase.auth.mfa.listFactors(),
+    ]);
+    const factor = factorsResult.data?.totp.find((candidate) => candidate.status === 'verified');
+    const needsMfa = assuranceResult.data?.nextLevel === 'aal2'
+      && assuranceResult.data.currentLevel !== 'aal2'
+      && Boolean(factor);
+    return {
+      user: needsMfa ? null : await loadSupabaseUser(session),
+      factorId: needsMfa ? factor!.id : null,
+      mfaEnabled: Boolean(factor),
+    };
+  });
+
+  sessionResolutions.set(session.access_token, resolution);
+  // Auth emits a session event as sign-in/getSession resolves. Share only an
+  // in-flight lookup; later auth events must re-read current profile and MFA state.
+  void resolution.then(
+    () => { if (sessionResolutions.get(session.access_token) === resolution) sessionResolutions.delete(session.access_token); },
+    () => sessionResolutions.delete(session.access_token),
+  );
+  return resolution;
 }
 
 function fromDemo(user: DemoUser): AuthUser {
@@ -56,6 +93,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   useEffect(() => {
     let active = true;
+    let authEventSeen = false;
+    let sessionRevision = 0;
     if (demoMode) {
       const savedId = globalThis.localStorage?.getItem(demoSessionKey);
       const saved = DEMO_USERS.find((candidate) => candidate.id === savedId);
@@ -65,27 +104,41 @@ export function AuthProvider({ children }: PropsWithChildren) {
     }
     if (!supabase) { setLoading(false); return () => { active = false; }; }
     const client = supabase;
-    client.auth.getSession().then(async ({ data }) => {
-      if (active && data.session) {
-        const { data: assurance } = await client.auth.mfa.getAuthenticatorAssuranceLevel();
-        const { data: factors } = await client.auth.mfa.listFactors();
-        const factor = factors?.totp.find((candidate) => candidate.status === 'verified');
-        setMfaEnabled(Boolean(factor));
-        if (assurance?.nextLevel === 'aal2' && assurance.currentLevel !== 'aal2' && factor) setMfaFactorId(factor.id);
-        else setUser(await loadSupabaseUser(data.session));
+    const applySession = async (session: Session | null) => {
+      const revision = ++sessionRevision;
+      if (!session) {
+        setUser(null);
+        setMfaFactorId(null);
+        setMfaEnabled(false);
+        return;
       }
+      const resolution = await resolveSupabaseSession(session);
+      if (!active || revision !== sessionRevision) return;
+      setMfaEnabled(resolution.mfaEnabled);
+      setMfaFactorId(resolution.factorId);
+      setUser(resolution.user);
+    };
+    client.auth.getSession().then(async ({ data }) => {
+      // onAuthStateChange can deliver a newer session while getSession is in
+      // flight. In that case, let the event own the state update.
+      if (active && !authEventSeen) await applySession(data.session);
       if (active) setLoading(false);
-    });
+    }).catch(() => { if (active) setLoading(false); });
     const { data: listener } = client.auth.onAuthStateChange((_event, session) => {
+      authEventSeen = true;
       void (async () => {
         if (!active) return;
-        if (!session) { setUser(null); setMfaFactorId(null); return; }
-        const { data: assurance } = await client.auth.mfa.getAuthenticatorAssuranceLevel();
-        const { data: factors } = await client.auth.mfa.listFactors();
-        const factor = factors?.totp.find((candidate) => candidate.status === 'verified');
-        setMfaEnabled(Boolean(factor));
-        if (assurance?.nextLevel === 'aal2' && assurance.currentLevel !== 'aal2' && factor) { setUser(null); setMfaFactorId(factor.id); }
-        else { setMfaFactorId(null); setUser(await loadSupabaseUser(session)); }
+        try {
+          await applySession(session);
+        } catch {
+          if (active) {
+            setUser(null);
+            setMfaFactorId(null);
+            setMfaEnabled(false);
+          }
+        } finally {
+          if (active) setLoading(false);
+        }
       })();
     });
     return () => { active = false; listener.subscription.unsubscribe(); };
@@ -99,17 +152,15 @@ export function AuthProvider({ children }: PropsWithChildren) {
       const next = fromDemo(found); globalThis.localStorage?.setItem(demoSessionKey, found.id); setUser(next); return { ok: true, user: next };
     }
     if (!supabase) return { ok: false, message: 'APMS is not connected. Configure the Supabase variables in .env.' };
-    const { data, error } = await supabase.auth.signInWithPassword({ email: normalized, password });
+    const { data, error } = await tracePerformanceSpan('auth.password.sign-in', () => supabase!.auth.signInWithPassword({ email: normalized, password }));
     if (error || !data.session) return { ok: false, message: 'The email or password is incorrect.' };
-    const { data: assurance } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
-    const { data: factors } = await supabase.auth.mfa.listFactors();
-    const factor = factors?.totp.find((candidate) => candidate.status === 'verified');
-    setMfaEnabled(Boolean(factor));
-    if (assurance?.nextLevel === 'aal2' && assurance.currentLevel !== 'aal2' && factor) {
-      setMfaFactorId(factor.id);
-      return { ok: false, mfaRequired: true, factorId: factor.id };
+    const resolution = await resolveSupabaseSession(data.session);
+    setMfaEnabled(resolution.mfaEnabled);
+    if (resolution.factorId) {
+      setMfaFactorId(resolution.factorId);
+      return { ok: false, mfaRequired: true, factorId: resolution.factorId };
     }
-    const next = await loadSupabaseUser(data.session);
+    const next = resolution.user;
     if (!next) {
       await supabase.auth.signOut();
       return { ok: false, message: 'This account is inactive or has no assigned APMS role.' };
@@ -120,9 +171,9 @@ export function AuthProvider({ children }: PropsWithChildren) {
   const verifyMfa = useCallback(async (code: string, factorId = mfaFactorId ?? undefined) => {
     if (!supabase || !factorId) return { ok: false, message: 'No MFA challenge is active.' };
     if (!/^\d{6}$/.test(code.trim())) return { ok: false, message: 'Enter the six-digit code from your authenticator app.' };
-    const { data: challenge, error: challengeError } = await supabase.auth.mfa.challenge({ factorId });
+    const { data: challenge, error: challengeError } = await tracePerformanceSpan<any>('auth.mfa.challenge', () => supabase!.auth.mfa.challenge({ factorId }));
     if (challengeError || !challenge) return { ok: false, message: 'The MFA challenge could not be started. Try again.' };
-    const { error } = await supabase.auth.mfa.verify({ factorId, challengeId: challenge.id, code: code.trim() });
+    const { error } = await tracePerformanceSpan<any>('auth.mfa.verify', () => supabase!.auth.mfa.verify({ factorId, challengeId: challenge.id, code: code.trim() }));
     if (error) return { ok: false, message: 'That MFA code is invalid or expired.' };
     const { data: sessionData } = await supabase.auth.getSession();
     const next = sessionData.session ? await loadSupabaseUser(sessionData.session) : null;

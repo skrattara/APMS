@@ -16,6 +16,10 @@
     "test:schema": "node scripts/verify-schema.mjs",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:e2e:dashboard-startup": "playwright test --config=playwright.dashboard-startup.config.ts",
+    "test:e2e:dashboard-hydration": "playwright test --config=playwright.dashboard-hydration.config.ts",
+    "test:e2e:dashboard-gradebook": "playwright test --config=playwright.dashboard-gradebook.config.ts",
+    "test:e2e:workspace-roundtrip": "playwright test --config=playwright.workspace-cache-roundtrip.config.ts",
     "db:start": "supabase start",
     "db:reset": "supabase db reset",
     "db:lint": "supabase db lint --local"
