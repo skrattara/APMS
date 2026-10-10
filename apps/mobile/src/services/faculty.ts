@@ -16,13 +16,8 @@ import { DEFAULT_EVALUATION_SYSTEM, evaluateStudentPerformanceDetailed, removeSt
 import * as XLSX from 'xlsx';
 
 import { supabase } from './supabase';
-import { captureDatabasePlan, isExplainCaptureEnabled, tracePerformanceEvent } from './performanceTrace';
 
 const CLASS_WORKSPACE_PAGE_SIZE = 1000;
-function captureGradebookPlan(enabled: boolean, label: string, buildQuery: () => any) {
-  if (enabled) captureDatabasePlan(`gradebook.${label}`, buildQuery);
-}
-
 async function fetchAllPages<T>(fetchPage: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown | null }>) {
   const rows: T[] = [];
   for (let from = 0; ; from += CLASS_WORKSPACE_PAGE_SIZE) {
@@ -194,10 +189,8 @@ function shareInFlight<T>(key: string, load: () => Promise<T>): Promise<T> {
   const existing = inFlightFacultyReads.get(key) as Promise<T> | undefined;
   const resource = key.slice(0, key.indexOf(':'));
   if (existing) {
-    tracePerformanceEvent('faculty.read.inflight.join', { resource });
     return existing;
   }
-  tracePerformanceEvent('faculty.read.inflight.start', { resource });
   const request = load().finally(() => {
     if (inFlightFacultyReads.get(key) === request) inFlightFacultyReads.delete(key);
   });
@@ -216,7 +209,6 @@ async function shareForSignedInUser<T>(requesterUserId: string | undefined, key:
     }
   }
   if (!userId) {
-    tracePerformanceEvent('faculty.read.inflight.skip', { resource: key.slice(0, key.indexOf(':')), reason: 'no-session-user' });
     return load();
   }
   return shareInFlight(`${key}:${userId}`, load);
@@ -226,7 +218,6 @@ export function loadFacultyClasses(includeStudentCounts = false, requesterUserId
   const cacheKey = requesterUserId ? `${requesterUserId}:${includeStudentCounts}` : null;
   const cached = cacheKey ? facultyClassesCache.get(cacheKey) : undefined;
   if (cached && Date.now() - cached.loadedAt < FACULTY_CLASSES_CACHE_TTL_MS) {
-    tracePerformanceEvent('faculty.classes.cache.hit', { count: cached.classes.length });
     return Promise.resolve(cached.classes);
   }
   return shareForSignedInUser(requesterUserId, `classes:${includeStudentCounts}`, async () => {
@@ -243,7 +234,6 @@ async function loadFacultyClassesRequest(includeStudentCounts: boolean): Promise
     .select(`id,subject_id,section,subjects(code,title),academic_terms(academic_year,semester)${includeStudentCounts ? ',enrollments(count)' : ''}`)
     .eq('status', 'active')
     .order('created_at', { ascending: false });
-  captureDatabasePlan('faculty.classes', buildQuery);
   const { data, error } = await buildQuery();
   if (error) throw error;
   return (data ?? []).map((row: any) => ({
@@ -299,9 +289,6 @@ async function loadFacultyReferenceDataRequest(): Promise<FacultyReferenceData> 
   const subjectQuery = () => client.from('subjects').select('id,code,title').order('code');
   const termsQuery = () => client.from('academic_terms').select('id,academic_year,semester,status').in('status', ['active', 'planned']).order('starts_on', { ascending: false });
   const programsQuery = () => client.from('programs').select('id,code,name').eq('status', 'active').order('code');
-  captureDatabasePlan('faculty.references.subjects', subjectQuery);
-  captureDatabasePlan('faculty.references.terms', termsQuery);
-  captureDatabasePlan('faculty.references.programs', programsQuery);
   const [subjects, terms, programs] = await Promise.all([subjectQuery(), termsQuery(), programsQuery()]);
   const error = subjects.error ?? terms.error ?? programs.error;
   if (error) throw error;
@@ -559,7 +546,6 @@ export function loadClassWorkspace(classId: string, departmentEvaluationSystem?:
     && (!requested.includeAttendance || cached.includes.includeAttendance)
     && (!requested.includeFeedback || cached.includes.includeFeedback)
     && (!requested.includeEvaluations || cached.includes.includeEvaluations)) {
-    tracePerformanceEvent('faculty.workspace.cache.hit', { classId });
     return Promise.resolve(cached.workspace);
   }
   const load = async () => {
@@ -579,17 +565,9 @@ export function loadClassWorkspace(classId: string, departmentEvaluationSystem?:
 
 async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSystem?: EvaluationDefinition, facultyUserId?: string, personalClassEvaluationSystem?: EvaluationDefinition, options: FacultyWorkspaceLoadOptions = {}): Promise<ClassWorkspace> {
   const client = connected();
-  const capturePlans = isExplainCaptureEnabled();
-  if (capturePlans) console.info('[APMS EXPLAIN] Capturing database reads until gradebook Full View finishes loading; query results continue normally.');
   const includeAttendance = options.includeAttendance ?? true;
   const includeFeedback = options.includeFeedback ?? true;
   const includeEvaluations = options.includeEvaluations ?? true;
-  captureGradebookPlan(capturePlans, 'enrollments', () => client.from('enrollments').select('id,student_id,students(program_id,institutional_id,email,first_name,last_name,year_level,section,programs(id,code))').eq('class_record_id', classId).eq('status', 'active').order('created_at').order('id').range(0, CLASS_WORKSPACE_PAGE_SIZE - 1));
-  captureGradebookPlan(capturePlans, 'assessments', () => client.from('assessments').select('id,title,type,component_key,module_number,maximum_score,assessment_date,grading_period,source,grading_type_id,grading_group_id,grading_period_id,grading_instance_weight,optional').eq('class_record_id', classId).neq('status', 'archived').order('assessment_date').order('id').range(0, CLASS_WORKSPACE_PAGE_SIZE - 1));
-  captureGradebookPlan(capturePlans, 'criteria_sets', () => client.from('criteria_sets').select('id,name,version,passing_threshold,grading_system_id,grading_system_definition,criteria_nodes(id,label,weight)').eq('class_record_id', classId).eq('status', 'active').order('version', { ascending: false }).limit(1));
-  if (includeAttendance) captureGradebookPlan(capturePlans, 'attendance_sessions', () => client.from('attendance_sessions').select('id,session_date,label').eq('class_record_id', classId).order('session_date', { ascending: false }).order('id').range(0, CLASS_WORKSPACE_PAGE_SIZE - 1));
-  captureGradebookPlan(capturePlans, 'system_settings', () => client.from('system_settings').select('value').eq('key', 'grading.default_system_definition').maybeSingle());
-  captureGradebookPlan(capturePlans, 'class_records', () => client.from('class_records').select('department_id,academic_terms(starts_on,ends_on)').eq('id', classId).single());
   const [enrollments, assessments, criteriaSets, sessions, defaultSystemSetting, classMetaResult] = await Promise.all([
     fetchAllPages((from, to) => client.from('enrollments').select('id,student_id,students(program_id,institutional_id,email,first_name,last_name,year_level,section,programs(id,code))').eq('class_record_id', classId).eq('status', 'active').order('created_at').order('id').range(from, to)),
     fetchAllPages((from, to) => client.from('assessments').select('id,title,type,component_key,module_number,maximum_score,assessment_date,grading_period,source,grading_type_id,grading_group_id,grading_period_id,grading_instance_weight,optional').eq('class_record_id', classId).neq('status', 'archived').order('assessment_date').order('id').range(from, to)),
@@ -607,7 +585,6 @@ async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSy
   let hasPrivateEvaluationSystem = false;
   let hasClassEvaluationSystem = false;
   if (!departmentEvaluationSystem) {
-    if (facultyUserId) captureGradebookPlan(capturePlans, 'faculty_class_evaluation_systems', () => client.from('faculty_class_evaluation_systems').select('definition').eq('class_record_id', classId).eq('faculty_user_id', facultyUserId).maybeSingle());
     const [facultyEvaluationResult] = await Promise.all([
       facultyUserId
         ? client.from('faculty_class_evaluation_systems').select('definition').eq('class_record_id', classId).eq('faculty_user_id', facultyUserId).maybeSingle()
@@ -619,8 +596,6 @@ async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSy
       hasPrivateEvaluationSystem = true;
     }
     if (!evaluationRow) {
-      captureGradebookPlan(capturePlans, 'class_evaluation_criteria', () => client.from('class_evaluation_criteria').select('evaluation_criteria_systems(definition)').eq('class_record_id', classId).maybeSingle());
-      captureGradebookPlan(capturePlans, 'evaluation_systems', () => client.from('evaluation_systems').select('definition').eq('department_id', classMeta.department_id).maybeSingle());
       const [assignmentResult, departmentResult] = await Promise.all([
         client.from('class_evaluation_criteria').select('evaluation_criteria_systems(definition)').eq('class_record_id', classId).maybeSingle(),
         client.from('evaluation_systems').select('definition').eq('department_id', classMeta.department_id).maybeSingle(),
@@ -653,12 +628,7 @@ async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSy
   const enrollmentIds = students.map((row) => row.enrollmentId);
   const assessmentIds = assessmentRows.map((row) => row.id);
   const sessionIds = (sessions.data ?? []).map((row) => row.id);
-  if (assessmentIds.length) captureGradebookPlan(capturePlans, 'assessment_results (class batch)', () => client.rpc('load_class_assessment_results', { p_class_record_id: classId }));
-  if (includeAttendance && sessionIds.length) captureGradebookPlan(capturePlans, 'attendance_records (first 25 sessions)', () => client.from('attendance_records').select('attendance_session_id,enrollment_id,status').in('attendance_session_id', sessionIds.slice(0, 25)).order('attendance_session_id').order('enrollment_id').range(0, CLASS_WORKSPACE_PAGE_SIZE - 1));
   if (includeEvaluations && enrollmentIds.length) {
-    captureGradebookPlan(capturePlans, 'performance_evaluations (first 50 enrollments)', () => client.from('performance_evaluations').select('enrollment_id,score,risk_level,explanation').in('enrollment_id', enrollmentIds.slice(0, 50)).order('enrollment_id').range(0, CLASS_WORKSPACE_PAGE_SIZE - 1));
-    captureGradebookPlan(capturePlans, 'performance_predictions (first 50 enrollments)', () => client.from('performance_predictions').select('enrollment_id,predicted_score,risk_level,trend,confidence,explanation,created_at').in('enrollment_id', enrollmentIds.slice(0, 50)).order('created_at', { ascending: false }).order('id', { ascending: false }).range(0, CLASS_WORKSPACE_PAGE_SIZE - 1));
-    if (includeFeedback) captureGradebookPlan(capturePlans, 'feedback_records (first 50 enrollments)', () => client.from('feedback_records').select('id,enrollment_id,body,category,status,created_at').in('enrollment_id', enrollmentIds.slice(0, 50)).order('created_at', { ascending: false }).order('id', { ascending: false }).range(0, CLASS_WORKSPACE_PAGE_SIZE - 1));
   }
   const [results, attendance, evaluations, predictions, feedback] = await Promise.all([
     assessmentIds.length

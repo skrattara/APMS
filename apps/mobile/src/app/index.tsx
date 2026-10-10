@@ -16,7 +16,6 @@ import {
 import { useAuth } from "@/auth/AuthProvider";
 import { AppIcon } from "@/components/Icon";
 import { colors } from "@/theme/tokens";
-import { tracePerformanceEvent } from "@/services/performanceTrace";
 
 const rememberedEmailKey = "apms.remembered.email";
 function homePath(role: Role): Href {
@@ -57,12 +56,10 @@ export default function LoginPage() {
       setError("Email and password are required.");
       return;
     }
-    tracePerformanceEvent('login.submit');
     setSubmitting(true);
     const result = await signIn(email, password);
     setSubmitting(false);
     if (!result.ok) {
-      tracePerformanceEvent('login.rejected', { mfaRequired: 'mfaRequired' in result });
       if ('mfaRequired' in result) return;
       setError(result.message);
       return;
@@ -73,7 +70,6 @@ export default function LoginPage() {
         email.trim().toLowerCase(),
       );
     else globalThis.localStorage?.removeItem(rememberedEmailKey);
-    tracePerformanceEvent('login.authenticated', { role: result.user.role });
     router.replace(homePath(result.user.role));
   };
   const googleSignIn = async () => {
@@ -87,8 +83,7 @@ export default function LoginPage() {
     setMfaError(""); setSubmitting(true);
     const result = await verifyMfa(mfaCode, mfaFactorId ?? undefined);
     setSubmitting(false);
-    if (!result.ok) { tracePerformanceEvent('login.mfa.rejected'); setMfaError(result.message); return; }
-    tracePerformanceEvent('login.mfa.authenticated');
+    if (!result.ok) { setMfaError(result.message); return; }
     setMfaCode("");
   };
   if (loading)

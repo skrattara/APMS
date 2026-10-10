@@ -1,5 +1,4 @@
 import { getErrorMessage } from '@/services/errors';
-import { tracePerformanceEvent, tracePerformanceSpan } from '@/services/performanceTrace';
 import { useIsFocused } from 'expo-router';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ActivityIndicator, Modal, Platform, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
@@ -148,7 +147,6 @@ function useFacultyWorkspace(screen: string) {
   const [version, setVersion] = useState(0);
   const [classesReady, setClassesReady] = useState(false);
   const hasLoadedWorkspace = useRef(false);
-  useEffect(() => { tracePerformanceEvent('faculty.screen.open', { screen }); }, [screen]);
   const refresh = useCallback(() => {
     invalidateFacultyClassesCache(user?.id);
     invalidateFacultyClassWorkspaceCache(user?.id, selectedClassId || undefined);
@@ -158,10 +156,9 @@ function useFacultyWorkspace(screen: string) {
     let active = true;
     if (hasLoadedWorkspace.current) setRefreshing(true);
     else setLoading(true);
-    tracePerformanceEvent('faculty.classes-and-references.start', { screen });
     Promise.all([
-      tracePerformanceSpan('faculty.classes.load', () => loadFacultyClasses(screen === 'classes', user?.id)),
-      screen === 'gradebook' || screen === 'records' || screen === 'overview' ? Promise.resolve({ subjects: [], terms: [], programs: [] } as FacultyReferenceData) : tracePerformanceSpan('faculty.references.load', () => loadFacultyReferenceData(user?.id)),
+      loadFacultyClasses(screen === 'classes', user?.id),
+      screen === 'gradebook' || screen === 'records' || screen === 'overview' ? Promise.resolve({ subjects: [], terms: [], programs: [] } as FacultyReferenceData) : loadFacultyReferenceData(user?.id),
     ])
       .then(([nextClasses, nextReferences]) => {
         if (!active) return;
@@ -204,12 +201,10 @@ function useFacultyWorkspace(screen: string) {
     if (screen === 'overview' && workspaceClassId !== selectedClassId) setWorkspaceLoading(true);
     setError(null);
     const gradebook = screen === 'gradebook' || screen === 'records';
-    tracePerformanceEvent('faculty.workspace.start', { screen });
-    tracePerformanceSpan('faculty.workspace.load', () => loadClassWorkspace(selectedClassId, undefined, user?.id, undefined, { includeAttendance: !gradebook, includeFeedback: screen === 'feedback', includeEvaluations: !gradebook }), { screen })
+    loadClassWorkspace(selectedClassId, undefined, user?.id, undefined, { includeAttendance: !gradebook, includeFeedback: screen === 'feedback', includeEvaluations: !gradebook })
       .then((nextWorkspace) => {
         if (!active) return;
         setWorkspace(nextWorkspace);
-        if (screen === 'gradebook') tracePerformanceEvent('gradebook.workspace.ready', { students: nextWorkspace.students.length, assessments: nextWorkspace.assessments.length });
         setError(null);
         hasLoadedWorkspace.current = true;
         setWorkspaceClassId(selectedClassId);
@@ -597,12 +592,8 @@ function DashboardOverviewModule(props: StateProps) {
   const workspaceReady = props.classesReady && (props.classes.length === 0
     || (props.workspaceClassId === props.selectedClassId && !props.workspaceLoading));
   const workspaceError = props.error && !props.loading ? props.error : null;
-  useEffect(() => { tracePerformanceEvent('faculty.dashboard.shell.rendered'); }, []);
   const overviewRecordsResult = useDashboardOverviewRecords(props.workspace, evaluationDefinition, overviewIndex, workspaceReady);
   const dashboardDataReady = workspaceReady && overviewRecordsResult != null;
-  useEffect(() => {
-    if (dashboardDataReady) tracePerformanceEvent('faculty.dashboard.data.ready', { students: props.workspace.students.length, assessments: props.workspace.assessments.length });
-  }, [dashboardDataReady, props.workspace.assessments.length, props.workspace.students.length]);
   const overviewRecords = overviewRecordsResult ?? [];
   const filters = useAnalyticsFilters(overviewRecords, evaluationRiskOptions(evaluationDefinition, 'All risks'));
   const visibleIds = useMemo(() => new Set(filters.filtered.map((item) => item.id)), [filters.filtered]);

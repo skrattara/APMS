@@ -10,7 +10,6 @@ import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
 import * as DocumentPicker from 'expo-document-picker';
 import { getErrorMessage } from '@/services/errors';
-import { finishStartupTrace } from '@/services/performanceTrace';
 import { useAuth } from '@/auth/AuthProvider';
 import { Badge, Button, Field, PageState, SelectField } from '@/components/ui';
 import { AppIcon, type AppIconName } from '@/components/Icon';
@@ -506,9 +505,6 @@ const FullGradebookRow = memo(function FullGradebookRow(row: FullGradebookRowPro
 export function FullAssessmentView(props: FullAssessmentViewProps) {
   const { assessments, students, workspace, gradingSystem } = props;
   const { user } = useAuth();
-  useEffect(() => {
-    finishStartupTrace('gradebook.full-view.ready', { students: students.length, assessments: assessments.length });
-  }, []);
   const columnCssKeyCacheRef = useRef(new Map<string, string>());
   const columnCssKey = useCallback((key: string) => {
     const cached = columnCssKeyCacheRef.current.get(key);

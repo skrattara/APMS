@@ -3,7 +3,6 @@ import { useCallback, useEffect, useState } from "react";
 
 import { useAuth } from "@/auth/AuthProvider";
 import { supabase } from "./supabase";
-import { captureDatabasePlan, tracePerformanceSpan, tracePerformanceEvent } from "./performanceTrace";
 
 export type DashboardMetrics = {
   primaryLabel: string;
@@ -42,12 +41,7 @@ async function count(table: string, filters?: (query: any) => any) {
     .from(table)
     .select("*", { count: "exact", head: true });
   if (filters) query = filters(query);
-  captureDatabasePlan(`dashboard.${table}`, () => {
-    let explainQuery: any = supabase!.from(table).select("*", { count: "exact", head: true });
-    if (filters) explainQuery = filters(explainQuery);
-    return explainQuery;
-  });
-  const { count: value, error } = await tracePerformanceSpan<any>(`dashboard.query.${table}`, () => query);
+  const { count: value, error } = await query;
   if (error) throw error;
   return value ?? 0;
 }
@@ -114,9 +108,7 @@ export function useDashboardMetrics(role: Role) {
         active = false;
       };
     }
-    tracePerformanceEvent('dashboard.metrics.start', { role });
-    const loader = tracePerformanceSpan('dashboard.metrics.load', () => role === "system_admin" ? loadSystemAdmin() : loadAcademicStaff(), { role });
-    loader
+    (role === "system_admin" ? loadSystemAdmin() : loadAcademicStaff())
       .then((next) => {
         if (active) {
           setMetrics(next);

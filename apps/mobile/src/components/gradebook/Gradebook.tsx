@@ -45,13 +45,11 @@ import {
   valueMappingForType,
 } from './shared';
 import { componentLabel } from './model';
-import { tracePerformanceEvent } from '@/services/performanceTrace';
 export function Gradebook(props: GradebookProps) {
   type ScoreEdit = { key: string; before?: string; after?: string };
   type ScoreEditBatch = { view: 'assessment' | 'full'; changes: ScoreEdit[] };
   const activeGradingSystem = props.workspace.criteria?.gradingSystemDefinition ?? props.workspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
   const [gradebookView, setGradebookView] = useState<'assessment' | 'full'>('assessment');
-  useEffect(() => { tracePerformanceEvent('gradebook.assessment-view.ready', { students: props.workspace.students.length, assessments: props.workspace.assessments.length }); }, [props.workspace.students.length, props.workspace.assessments.length]);
   const [assessmentId, setAssessmentId] = useState(props.workspace.assessments[0]?.id ?? '');
   const [values, setValues] = useState<Record<string, string>>({});
   const [fullValues, setFullValues] = useState<Record<string, string>>({});
@@ -497,7 +495,7 @@ export function Gradebook(props: GradebookProps) {
       <ClassSelect {...props} />
       <View style={styles.gradebookTabs} {...({ dataSet: { gradebookScoreHistoryRevision: String(scoreHistoryRevision) } } as any)}>
         <Button label="Assessment View" variant={gradebookView === 'assessment' ? 'primary' : 'secondary'} onPress={() => { setGradebookView('assessment'); setPage(1); }} />
-        <Button label="Full View" variant={gradebookView === 'full' ? 'primary' : 'secondary'} onPress={() => { tracePerformanceEvent('gradebook.full-view.open'); setGradebookView('full'); setPage(1); }} />
+        <Button label="Full View" variant={gradebookView === 'full' ? 'primary' : 'secondary'} onPress={() => { setGradebookView('full'); setPage(1); }} />
         <Pressable accessibilityRole="switch" accessibilityState={{ checked: paginationEnabled }} onPress={() => { setPaginationByView((current) => ({ ...current, [gradebookView]: !current[gradebookView] })); setPage(1); }} style={styles.paginationToggle}>
           <Text style={styles.paginationToggleLabel}>Pagination</Text>
           <View style={[styles.paginationSwitch, paginationEnabled && styles.paginationSwitchOn]}><View style={[styles.paginationSwitchThumb, paginationEnabled && styles.paginationSwitchThumbOn]} /></View>

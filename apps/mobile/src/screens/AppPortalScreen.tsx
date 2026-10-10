@@ -57,7 +57,6 @@ import {
 import { useScreenRecords } from "@/services/records";
 import { FacultyLivePortalContent } from "@/screens/FacultyLivePortalContent";
 import { colors, radius, space } from "@/theme/tokens";
-import { tracePerformanceEvent } from "@/services/performanceTrace";
 import { useAnalyticsFilters } from "@/components/charts/AnalyticsFilters";
 import type { EvaluationRecord } from "@/services/analytics";
 
@@ -539,7 +538,6 @@ function Dashboard({ role }: { role: Role }) {
   const { metrics, error } = useDashboardMetrics(role);
   const { demoMode } = useAuth();
   const data = DASHBOARD_MOCKS[role];
-  useEffect(() => { tracePerformanceEvent('dashboard.screen.open', { role }); }, [role]);
   return (
     <>
       {demoMode ? (
