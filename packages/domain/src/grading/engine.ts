@@ -36,6 +36,16 @@ export function validateGradingSystem(value: unknown): { valid: boolean; errors:
     if (!groupTypes.has((group as any).typeId)) errors.push(`Group ${(group as any).id} references unknown group type ${(group as any).typeId}.`);
     if ((group as any).parentGroupId && !groups.has((group as any).parentGroupId)) errors.push(`Group ${(group as any).id} references an unknown parent group.`);
   }
+  const groupByIdForValidation = new Map((system.groups ?? []).map((group: any) => [group.id, group]));
+  for (const group of system.groups ?? []) {
+    const chain = new Set<string>();
+    let current: any = group;
+    while (current?.parentGroupId && groupByIdForValidation.has(current.parentGroupId)) {
+      if (chain.has(current.id)) { errors.push(`Group hierarchy contains a parent cycle involving ${current.id}.`); break; }
+      chain.add(current.id);
+      current = groupByIdForValidation.get(current.parentGroupId);
+    }
+  }
   for (const component of system.components) if (component.assessmentDefinition && !assessmentTypes.has(component.assessmentDefinition.typeId)) errors.push(`Component ${component.id} references unknown assessment type ${component.assessmentDefinition.typeId}.`);
   const visitWeights = (component: any) => {
     const calc = component.calculation;
@@ -73,17 +83,40 @@ export function calculateGradingSystem(definition: GradingDefinition, assessment
   const byId = new Map(definition.components.map((component) => [component.id, component]));
   const periodById = new Map((definition.periods ?? []).map((period: any) => [period.id, period]));
   const groupById = new Map((definition.groups ?? []).map((group: any) => [group.id, group]));
+  const descendantsByGroupId = new Map<string, Set<string>>();
+  const descendantsOf = (groupId: string) => {
+    const cached = descendantsByGroupId.get(groupId);
+    if (cached) return cached;
+    const descendants = new Set<string>([groupId]);
+    const pending = [groupId];
+    while (pending.length) {
+      const parentId = pending.pop()!;
+      for (const group of definition.groups ?? []) {
+        if ((group as any).parentGroupId === parentId && !descendants.has(group.id)) {
+          descendants.add(group.id);
+          pending.push(group.id);
+        }
+      }
+    }
+    descendantsByGroupId.set(groupId, descendants);
+    return descendants;
+  };
+  const groupIdsForPeriods = (periods: any[]) => new Set<string>(periods.flatMap((period: any) =>
+    (period.groupIds ?? []).flatMap((groupId: string) => [...descendantsOf(groupId)])));
   const groupsForPeriod = (periodId?: string, groupId?: string) => {
     if (!periodId) return null;
     const period: any = periodById.get(periodId);
     const cumulativeGroups = definition.periodCalculation?.mode === 'cumulative' && definition.periodCalculation.scope === 'groups';
     if (cumulativeGroups) {
-      const lastSequence = Math.max(0, ...(period?.groupIds ?? []).map((id: string) => (groupById.get(id) as any)?.sequence ?? 0));
-      return new Set<string>((definition.groups ?? []).filter((group: any) => group.typeId === definition.periodCalculation.groupTypeId && group.sequence <= lastSequence).map((group: any) => group.id));
+      const assigned = groupIdsForPeriods([period]);
+      const matchingAssigned = (definition.groups ?? []).filter((group: any) => assigned.has(group.id) && group.typeId === definition.periodCalculation.groupTypeId);
+      const lastSequence = Math.max(0, ...matchingAssigned.map((group: any) => group.sequence ?? 0));
+      const cumulative = (definition.groups ?? []).filter((group: any) => group.typeId === definition.periodCalculation.groupTypeId && group.sequence <= lastSequence).map((group: any) => group.id);
+      return new Set<string>(cumulative.flatMap((id: string) => [...descendantsOf(id)]));
     }
     const cumulativePeriods = definition.periodCalculation?.mode === 'cumulative' && definition.periodCalculation.scope === 'periods';
     const includedPeriods = (definition.periods ?? []).filter((item: any) => cumulativePeriods ? item.sequence <= period?.sequence : item.id === periodId);
-    return new Set<string>(includedPeriods.flatMap((item: any) => item.groupIds ?? []));
+    return groupIdsForPeriods(includedPeriods);
   };
   const periodIdsFor = (periodId?: string) => {
     if (!periodId) return null;
@@ -102,10 +135,11 @@ export function calculateGradingSystem(definition: GradingDefinition, assessment
     let result: number | null = null;
     if (component.assessmentDefinition) {
       const d = component.assessmentDefinition;
+      const groupScopeIds = groupId ? descendantsOf(groupId) : null;
       const rows = assessments.filter((row) => assessmentTypeMatches(row.typeId, d.typeId))
         .filter((row) => !nonPeriodOnly || (!row.periodId && !row.groupId))
         .filter((row) => !periodId || (row.periodId && periodIdsFor(periodId)?.has(row.periodId)) || (row.groupId && groupsForPeriod(periodId)?.has(row.groupId)) || (!row.periodId && !row.groupId))
-        .filter((row) => !groupId || row.groupId === groupId || (!row.groupId && !row.periodId));
+        .filter((row) => !groupScopeIds || (row.groupId != null && groupScopeIds.has(row.groupId)) || (!row.groupId && !row.periodId));
       countCache.set(key, rows.length);
       let values = rows.flatMap((row) => {
         const max = row.maximumScore ?? d.maxScore ?? 100;
@@ -133,14 +167,19 @@ export function calculateGradingSystem(definition: GradingDefinition, assessment
       const weightsPresent = d.aggregation?.mode !== 'weighted' || rows.filter((row) => row.score != null || row.missingScorePercentage != null).every((row) => row.weight != null);
       let countValid = true;
       const countScope = d.count?.scope?.type;
-      if (countScope === 'per_group' && !groupId) {
-        const requiredGroups = (definition.groups ?? []).filter((group: any) => group.typeId === d.count.scope.groupTypeId && (!periodId || groupsForPeriod(periodId)?.has(group.id)));
+      if (countScope === 'per_group') {
+        const requiredGroups = (definition.groups ?? []).filter((group: any) => group.typeId === d.count.scope.groupTypeId
+          && (!periodId || groupsForPeriod(periodId)?.has(group.id))
+          && (!groupScopeIds || groupScopeIds.has(group.id)));
         countValid = requiredGroups.every((group: any) => {
           const count = rows.filter((row) => row.groupId === group.id).length;
           return (d.count.min == null || count >= d.count.min) && (d.count.max == null || count <= d.count.max);
         });
-      } else if (countScope === 'per_period' && !periodId) {
-        countValid = (definition.periods ?? []).every((period: any) => {
+      } else if (countScope === 'per_period') {
+        const requiredPeriods = periodId
+          ? (definition.periods ?? []).filter((period: any) => periodIdsFor(periodId)?.has(period.id))
+          : definition.periods ?? [];
+        countValid = requiredPeriods.every((period: any) => {
           const count = rows.filter((row) => row.periodId === period.id).length;
           return (d.count.min == null || count >= d.count.min) && (d.count.max == null || count <= d.count.max);
         });
@@ -161,7 +200,8 @@ export function calculateGradingSystem(definition: GradingDefinition, assessment
         const condition = rule.when;
         if (condition?.type !== 'assessment_count') continue;
         const targetType = byId.get(condition.componentId)?.assessmentDefinition?.typeId;
-        const count = countCache.get(`${condition.componentId}|${periodId ?? ''}|${groupId ?? ''}|${nonPeriodOnly ? 'non-period' : 'all'}`) ?? assessments.filter((item) => targetType && assessmentTypeMatches(item.typeId, targetType)).filter((item) => !nonPeriodOnly || (!item.periodId && !item.groupId)).filter((item) => !periodId || (item.periodId && periodIdsFor(periodId)?.has(item.periodId)) || (item.groupId && groupsForPeriod(periodId)?.has(item.groupId)) || (!item.periodId && !item.groupId)).filter((item) => !groupId || item.groupId === groupId || (!item.groupId && !item.periodId)).length;
+        const groupScopeIds = groupId ? descendantsOf(groupId) : null;
+        const count = countCache.get(`${condition.componentId}|${periodId ?? ''}|${groupId ?? ''}|${nonPeriodOnly ? 'non-period' : 'all'}`) ?? assessments.filter((item) => targetType && assessmentTypeMatches(item.typeId, targetType)).filter((item) => !nonPeriodOnly || (!item.periodId && !item.groupId)).filter((item) => !periodId || (item.periodId && periodIdsFor(periodId)?.has(item.periodId)) || (item.groupId && groupsForPeriod(periodId)?.has(item.groupId)) || (!item.periodId && !item.groupId)).filter((item) => !groupScopeIds || (item.groupId != null && groupScopeIds.has(item.groupId)) || (!item.groupId && !item.periodId)).length;
         const expected = condition.value;
         const matches = condition.operator === 'eq' ? count === expected : condition.operator === 'ne' ? count !== expected : condition.operator === 'lt' ? count < expected : condition.operator === 'lte' ? count <= expected : condition.operator === 'gt' ? count > expected : count >= expected;
         if (matches) { refs = rule.override?.components ?? refs; weightMode = rule.override?.weightMode ?? weightMode; break; }

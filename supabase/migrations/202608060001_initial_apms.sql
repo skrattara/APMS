@@ -479,7 +479,7 @@ create table public.import_jobs (
 );
 
 create table public.audit_logs (
-  id bigint generated always as identity primary key,
+  id uuid primary key default gen_random_uuid(),
   actor_id uuid references public.profiles(id) on delete set null,
   action text not null,
   entity_type text not null,

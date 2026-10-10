@@ -10,6 +10,7 @@ export type AppIconName =
   | 'trend' | 'chart' | 'person' | 'error' | 'denied' | 'empty' | 'success'
   | 'metric' | 'chevronDown'
   | 'copy' | 'paste' | 'clear' | 'sortAscending' | 'sortDescending' | 'filter'
+  | 'format'
   | 'hide' | 'show' | 'expand' | 'collapse' | 'edit' | 'delete'
   | 'add' | 'save' | 'download' | 'upload' | 'cancel' | 'refresh' | 'apply';
 
@@ -58,6 +59,7 @@ const ICONS: Record<AppIconName, SymbolViewProps['name']> = {
   sortAscending: { ios: 'arrow.up', android: 'arrow_upward', web: 'arrow_upward' },
   sortDescending: { ios: 'arrow.down', android: 'arrow_downward', web: 'arrow_downward' },
   filter: { ios: 'line.3.horizontal.decrease', android: 'filter_alt', web: 'filter_alt' },
+  format: { ios: 'paintpalette.fill', android: 'format_color_fill', web: 'format_color_fill' },
   hide: { ios: 'eye.slash', android: 'visibility_off', web: 'visibility_off' },
   show: { ios: 'eye', android: 'visibility', web: 'visibility' },
   expand: { ios: 'arrow.down.right.and.arrow.up.left', android: 'unfold_more', web: 'unfold_more' },

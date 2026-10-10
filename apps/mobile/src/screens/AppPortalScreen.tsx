@@ -1,6 +1,6 @@
 import { getErrorMessage } from '@/services/errors';
 import type { Role } from "@apms/domain";
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { SvgXml } from "react-native-svg";
 
@@ -40,6 +40,7 @@ import {
 } from "@/data/mockDashboard";
 import {
   changePassword,
+  loadAutosavePreference,
   performScreenAction,
   saveSettings,
   type SettingsValues,
@@ -58,6 +59,7 @@ import { FacultyPortalContent } from "@/screens/FacultyPortalContent";
 import { FacultyLivePortalContent } from "@/screens/FacultyLivePortalContent";
 import { AcademicAdminPortalContent } from "@/screens/AcademicAdminPortalContent";
 import { SystemAdminPortalContent } from "@/screens/SystemAdminPortalContent";
+import { DataGeneratorDevScreen } from "@/screens/DataGeneratorDevScreen";
 import { colors, radius, space } from "@/theme/tokens";
 import { useAnalyticsFilters } from "@/components/charts/AnalyticsFilters";
 import { VisualizationPanel } from "@/components/charts/VisualizationPanel";
@@ -188,6 +190,11 @@ const SCREENS: Record<string, ScreenDefinition> = {
     subtitle: "Configure global system settings and preferences.",
     kind: "settings",
   },
+  "data-generator": {
+    title: "Synthetic Data Generator",
+    subtitle: "Create deterministic, grading-system-aware synthetic data.",
+    kind: "table",
+  },
   settings: {
     title: "Settings",
     subtitle: "Update your profile, notifications, and password.",
@@ -310,6 +317,8 @@ export function AppPortalScreen({
         demoMode ? <FacultyPortalContent screen={screen} /> : <FacultyLivePortalContent screen={screen} />
       ) : role === "academic_admin" && !demoMode ? (
         <AcademicAdminPortalContent screen={screen} />
+      ) : role === "system_admin" && screen === "data-generator" && __DEV__ && !demoMode ? (
+        <DataGeneratorDevScreen />
       ) : role === "system_admin" && !demoMode ? (
         <SystemAdminPortalContent screen={screen} />
       ) : (
@@ -856,6 +865,7 @@ export function Settings({
   const [first, setFirst] = useState(user?.firstName ?? "");
   const [last, setLast] = useState(user?.lastName ?? "");
   const [phone, setPhone] = useState("+63 917 555 0142");
+  const [gradebookAutosave, setGradebookAutosave] = useState(true);
   const [systemName, setSystemName] = useState(SYSTEM_DEFAULTS.systemName);
   const [institutionName, setInstitutionName] = useState(
     SYSTEM_DEFAULTS.institutionName,
@@ -884,6 +894,11 @@ export function Settings({
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void loadAutosavePreference(user?.id).then((enabled) => { if (active) setGradebookAutosave(enabled); }).catch(() => {});
+    return () => { active = false; };
+  }, [user?.id]);
   const [connection, setConnection] = useState(
     demoMode
       ? "Fictional validation mode; no external service connected"
@@ -894,6 +909,7 @@ export function Settings({
     first,
     last,
     phone,
+    autosaveEnabled: gradebookAutosave,
     sessionMinutes,
     systemName,
     institutionName,
@@ -963,6 +979,12 @@ export function Settings({
             />
             <Field label="Role" value={ROLE_LABELS[role]} editable={false} />
           </View>
+          <ToggleRow
+            title="Gradebook autosave"
+            detail="Save score edits automatically across your gradebooks. You can also turn autosave off for an individual gradebook page."
+            value={gradebookAutosave}
+            onChange={setGradebookAutosave}
+          />
           <SaveButton saving={saving} onPress={save} />
         </View>
       ) : null}

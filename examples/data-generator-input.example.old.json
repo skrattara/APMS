@@ -1,0 +1,43 @@
+{
+  "gradingSystemFile": "../packages/domain/src/grading/systems/it_global_grading_system.json",
+  "plan": {
+    "seed": "sample-class-2026-01",
+    "studentCount": 30,
+    "semester": {
+      "startsOn": "2026-08-01",
+      "endsOn": "2026-12-15",
+      "periods": {
+        "p1": { "startsOn": "2026-08-01", "endsOn": "2026-09-30" },
+        "p2": { "startsOn": "2026-10-01", "endsOn": "2026-11-15" },
+        "p3": { "startsOn": "2026-11-16", "endsOn": "2026-12-15" }
+      }
+    },
+    "asOf": "2026-10-09",
+    "countStrategy": "minimum",
+    "scoreDistribution": { "kind": "bell", "mean": 70, "deviation": 12 },
+    "profileMode": "consistent",
+    "profileTiers": { "low": 0.2, "medium": 0.6, "high": 0.2 },
+    "profileTargets": { "low": 40, "medium": 65, "high": 85 },
+    "mappedScorePolicy": "profile_target",
+    "dates": "evenly_spaced",
+    "naming": "test_labels",
+    "numericMappingPolicy": "exact",
+    "missing": { "enabled": false, "rate": 0.1 },
+    "completionRequirements": [
+      {
+        "id": "safety-check",
+        "name": "Lab safety check",
+        "scoring": {
+          "mode": "value_mapping",
+          "mapping": [
+            { "value": "complete", "percentage": 100 },
+            { "value": "incomplete", "percentage": 0 }
+          ]
+        },
+        "passing": { "minimumPercentage": 60 },
+        "failureRate": 0.05,
+        "missingRate": 0.02
+      }
+    ]
+  }
+}

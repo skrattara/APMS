@@ -9,6 +9,7 @@
   "scripts": {
     "dev": "npm --workspace @apms/mobile run web",
     "build": "npm run typecheck && npm --workspace @apms/mobile run export:web",
+    "generate:data": "tsx scripts/generate-gradebook-data.ts",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "test": "vitest run",
@@ -20,12 +21,13 @@
     "db:lint": "supabase db lint --local"
   },
   "devDependencies": {
-    "@types/react": "~19.2.2",
     "@playwright/test": "^1.55.0",
+    "@types/react": "~19.2.2",
     "expo-router": "~57.0.10",
     "react": "19.2.3",
     "react-dom": "19.2.3",
     "supabase": "^2.40.7",
+    "tsx": "4.23.15",
     "typescript": "~6.0.3",
     "vitest": "^3.2.4"
   }

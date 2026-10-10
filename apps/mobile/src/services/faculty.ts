@@ -17,6 +17,32 @@ import * as XLSX from 'xlsx';
 
 import { supabase } from './supabase';
 
+const CLASS_WORKSPACE_PAGE_SIZE = 1000;
+
+async function fetchAllPages<T>(fetchPage: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown | null }>) {
+  const rows: T[] = [];
+  for (let from = 0; ; from += CLASS_WORKSPACE_PAGE_SIZE) {
+    const { data, error } = await fetchPage(from, from + CLASS_WORKSPACE_PAGE_SIZE - 1);
+    if (error) throw error;
+    const page = data ?? [];
+    rows.push(...page);
+    if (page.length < CLASS_WORKSPACE_PAGE_SIZE) return { data: rows, error: null };
+  }
+}
+
+async function fetchAllForIds<T>(ids: string[], fetchPage: (ids: string[], from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown | null }>, batchSize = 50) {
+  const rows: T[] = [];
+  const batches = Array.from({ length: Math.ceil(ids.length / batchSize) }, (_, index) => ids.slice(index * batchSize, (index + 1) * batchSize));
+  const maxConcurrentBatches = 4;
+  for (let index = 0; index < batches.length; index += maxConcurrentBatches) {
+    const batchResults = await Promise.all(batches.slice(index, index + maxConcurrentBatches).map((batch) =>
+      fetchAllPages((from, to) => fetchPage(batch, from, to)),
+    ));
+    for (const result of batchResults) rows.push(...result.data);
+  }
+  return { data: rows, error: null };
+}
+
 export type FacultyClass = {
   id: string;
   subjectId: string;
@@ -68,6 +94,7 @@ export type FacultyAssessment = {
   gradingGroupId?: string | null;
   gradingPeriodId?: string | null;
   instanceWeight?: number | null;
+  optional?: boolean;
 };
 
 export type FacultyCriteria = {
@@ -108,6 +135,7 @@ export type ClassWorkspace = {
   categoricalScores: Record<string, string>;
   criteria: FacultyCriteria | null;
   defaultGradingSystem?: GradingDefinition;
+  semesterEndsOn?: string | null;
   evaluationSystem?: EvaluationDefinition;
   hasPrivateEvaluationSystem?: boolean;
   hasPersonalClassEvaluationSystem?: boolean;
@@ -430,37 +458,48 @@ export async function importRosterExcel(classId: string, programId: string, file
   return importRosterPreview(classId, programId, fileName, previewRosterExcel(fileData), 'xlsx');
 }
 
-export async function loadClassWorkspace(classId: string, departmentEvaluationSystem?: EvaluationDefinition, facultyUserId?: string, personalClassEvaluationSystem?: EvaluationDefinition): Promise<ClassWorkspace> {
+export async function loadClassWorkspace(classId: string, departmentEvaluationSystem?: EvaluationDefinition, facultyUserId?: string, personalClassEvaluationSystem?: EvaluationDefinition, options: { includeAttendance?: boolean; includeFeedback?: boolean } = {}): Promise<ClassWorkspace> {
   const client = connected();
-  const [enrollments, assessments, criteriaSets, sessions, defaultSystemSetting] = await Promise.all([
-    client.from('enrollments').select('id,student_id,students(program_id,institutional_id,email,first_name,last_name,year_level,section,programs(id,code))').eq('class_record_id', classId).eq('status', 'active').order('created_at'),
-    client.from('assessments').select('id,title,type,component_key,module_number,maximum_score,assessment_date,grading_period,source,grading_type_id,grading_group_id,grading_period_id,grading_instance_weight').eq('class_record_id', classId).neq('status', 'archived').order('assessment_date'),
+  const includeAttendance = options.includeAttendance ?? true;
+  const includeFeedback = options.includeFeedback ?? true;
+  const [enrollments, assessments, criteriaSets, sessions, defaultSystemSetting, classMetaResult] = await Promise.all([
+    fetchAllPages((from, to) => client.from('enrollments').select('id,student_id,students(program_id,institutional_id,email,first_name,last_name,year_level,section,programs(id,code))').eq('class_record_id', classId).eq('status', 'active').order('created_at').order('id').range(from, to)),
+    fetchAllPages((from, to) => client.from('assessments').select('id,title,type,component_key,module_number,maximum_score,assessment_date,grading_period,source,grading_type_id,grading_group_id,grading_period_id,grading_instance_weight,optional').eq('class_record_id', classId).neq('status', 'archived').order('assessment_date').order('id').range(from, to)),
     client.from('criteria_sets').select('id,name,version,passing_threshold,grading_system_id,grading_system_definition,criteria_nodes(id,label,weight)').eq('class_record_id', classId).eq('status', 'active').order('version', { ascending: false }).limit(1),
-    client.from('attendance_sessions').select('id,session_date,label').eq('class_record_id', classId).order('session_date', { ascending: false }),
+    includeAttendance
+      ? fetchAllPages((from, to) => client.from('attendance_sessions').select('id,session_date,label').eq('class_record_id', classId).order('session_date', { ascending: false }).order('id').range(from, to))
+      : Promise.resolve({ data: [], error: null }),
     client.from('system_settings').select('value').eq('key', 'grading.default_system_definition').maybeSingle(),
+    client.from('class_records').select('department_id,academic_terms(starts_on,ends_on)').eq('id', classId).single(),
   ]);
-  const firstError = enrollments.error ?? assessments.error ?? criteriaSets.error ?? sessions.error;
+  const firstError = enrollments.error ?? assessments.error ?? criteriaSets.error ?? sessions.error ?? classMetaResult.error;
   if (firstError) throw firstError;
+  const classMeta = classMetaResult.data as any;
   let evaluationRow: { definition?: unknown } | null = null;
   let hasPrivateEvaluationSystem = false;
   let hasClassEvaluationSystem = false;
   if (!departmentEvaluationSystem) {
-    const { data: classMeta, error: classMetaError } = await client.from('class_records').select('department_id').eq('id', classId).single();
-    if (classMetaError) throw classMetaError;
-    if (facultyUserId) {
-      const facultyResult = await client.from('faculty_class_evaluation_systems').select('definition').eq('class_record_id', classId).eq('faculty_user_id', facultyUserId).maybeSingle();
-      if (facultyResult.error) throw facultyResult.error;
-      if (facultyResult.data) { evaluationRow = facultyResult.data; hasPrivateEvaluationSystem = true; }
+    const [facultyEvaluationResult] = await Promise.all([
+      facultyUserId
+        ? client.from('faculty_class_evaluation_systems').select('definition').eq('class_record_id', classId).eq('faculty_user_id', facultyUserId).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+    ]);
+    if (facultyEvaluationResult.error) throw facultyEvaluationResult.error;
+    if (facultyEvaluationResult.data) {
+      evaluationRow = facultyEvaluationResult.data;
+      hasPrivateEvaluationSystem = true;
     }
     if (!evaluationRow) {
-      const assignment = await client.from('class_evaluation_criteria').select('evaluation_criteria_systems(definition)').eq('class_record_id', classId).maybeSingle();
-      if (assignment.error) throw assignment.error;
-      const related: any = (assignment.data as any)?.evaluation_criteria_systems;
+      const [assignmentResult, departmentResult] = await Promise.all([
+        client.from('class_evaluation_criteria').select('evaluation_criteria_systems(definition)').eq('class_record_id', classId).maybeSingle(),
+        client.from('evaluation_systems').select('definition').eq('department_id', classMeta.department_id).maybeSingle(),
+      ]);
+      if (assignmentResult.error) throw assignmentResult.error;
+      if (departmentResult.error) throw departmentResult.error;
+      const related: any = (assignmentResult.data as any)?.evaluation_criteria_systems;
       if (related?.definition) { evaluationRow = { definition: related.definition }; hasClassEvaluationSystem = true; }
+      else evaluationRow = departmentResult.data;
     }
-    const result = evaluationRow ? null : await client.from('evaluation_systems').select('definition').eq('department_id', classMeta.department_id).maybeSingle();
-    if (result?.error) throw result.error;
-    if (!evaluationRow && result) evaluationRow = result.data;
   }
   const students: RosterStudent[] = (enrollments.data ?? []).map((row: any, index: number) => ({
     classNumber: index + 1,
@@ -478,17 +517,17 @@ export async function loadClassWorkspace(classId: string, departmentEvaluationSy
     maximumScore: Number(row.maximum_score),
     assessmentDate: row.assessment_date,
     gradingPeriod: row.grading_period, source: row.source,
-    gradingTypeId: row.grading_type_id, gradingGroupId: row.grading_group_id, gradingPeriodId: row.grading_period_id, instanceWeight: row.grading_instance_weight == null ? null : Number(row.grading_instance_weight),
+    gradingTypeId: row.grading_type_id, gradingGroupId: row.grading_group_id, gradingPeriodId: row.grading_period_id, instanceWeight: row.grading_instance_weight == null ? null : Number(row.grading_instance_weight), optional: Boolean(row.optional),
   }));
   const enrollmentIds = students.map((row) => row.enrollmentId);
   const assessmentIds = assessmentRows.map((row) => row.id);
   const sessionIds = (sessions.data ?? []).map((row) => row.id);
   const [results, attendance, evaluations, predictions, feedback] = await Promise.all([
-    assessmentIds.length ? client.from('assessment_results').select('assessment_id,enrollment_id,score,categorical_value').in('assessment_id', assessmentIds).in('enrollment_id', enrollmentIds) : Promise.resolve({ data: [], error: null }),
-    sessionIds.length ? client.from('attendance_records').select('attendance_session_id,enrollment_id,status').in('attendance_session_id', sessionIds).in('enrollment_id', enrollmentIds) : Promise.resolve({ data: [], error: null }),
-    enrollmentIds.length ? client.from('performance_evaluations').select('enrollment_id,score,risk_level,explanation').in('enrollment_id', enrollmentIds) : Promise.resolve({ data: [], error: null }),
-    enrollmentIds.length ? client.from('performance_predictions').select('enrollment_id,predicted_score,risk_level,trend,confidence,explanation,created_at').in('enrollment_id', enrollmentIds).order('created_at', { ascending: false }) : Promise.resolve({ data: [], error: null }),
-    enrollmentIds.length ? client.from('feedback_records').select('id,enrollment_id,body,category,status,created_at').in('enrollment_id', enrollmentIds).order('created_at', { ascending: false }) : Promise.resolve({ data: [], error: null }),
+    assessmentIds.length ? fetchAllForIds(assessmentIds, (ids, from, to) => client.from('assessment_results').select('assessment_id,enrollment_id,score,categorical_value').in('assessment_id', ids).order('assessment_id').order('enrollment_id').range(from, to), 25) : Promise.resolve({ data: [], error: null }),
+    includeAttendance && sessionIds.length ? fetchAllForIds(sessionIds, (ids, from, to) => client.from('attendance_records').select('attendance_session_id,enrollment_id,status').in('attendance_session_id', ids).order('attendance_session_id').order('enrollment_id').range(from, to), 25) : Promise.resolve({ data: [], error: null }),
+    enrollmentIds.length ? fetchAllForIds(enrollmentIds, (ids, from, to) => client.from('performance_evaluations').select('enrollment_id,score,risk_level,explanation').in('enrollment_id', ids).order('enrollment_id').range(from, to)) : Promise.resolve({ data: [], error: null }),
+    enrollmentIds.length ? fetchAllForIds(enrollmentIds, (ids, from, to) => client.from('performance_predictions').select('enrollment_id,predicted_score,risk_level,trend,confidence,explanation,created_at').in('enrollment_id', ids).order('created_at', { ascending: false }).order('id', { ascending: false }).range(from, to)) : Promise.resolve({ data: [], error: null }),
+    includeFeedback && enrollmentIds.length ? fetchAllForIds(enrollmentIds, (ids, from, to) => client.from('feedback_records').select('id,enrollment_id,body,category,status,created_at').in('enrollment_id', ids).order('created_at', { ascending: false }).order('id', { ascending: false }).range(from, to)) : Promise.resolve({ data: [], error: null }),
   ]);
   const secondaryError = results.error ?? attendance.error ?? evaluations.error ?? predictions.error ?? feedback.error;
   if (secondaryError) throw secondaryError;
@@ -536,6 +575,7 @@ export async function loadClassWorkspace(classId: string, departmentEvaluationSy
     students, assessments: assessmentRows, scores: scoreMap, categoricalScores: categoricalScoreMap, attendance: attendanceMap, evaluations: evaluationMap,
     attendanceSessions: (sessions.data ?? []).map((row) => ({ id: row.id, date: row.session_date, label: row.label })),
     defaultGradingSystem,
+    semesterEndsOn: classMeta?.academic_terms?.ends_on ?? null,
     evaluationSystem,
     hasPrivateEvaluationSystem,
     hasPersonalClassEvaluationSystem: !!personalClassEvaluationSystem,
@@ -586,15 +626,163 @@ export async function updateAssessment(assessmentId: string, input: AssessmentIn
 }
 
 export async function saveScores(userId: string, assessmentId: string, scores: { enrollmentId: string; score?: number; categoricalValue?: string }[]) {
+  await saveScoreBatch(userId, scores.map((row) => ({ assessmentId, ...row })));
+}
+
+export async function saveScoreBatch(_userId: string, scores: { assessmentId: string; enrollmentId: string; score?: number; categoricalValue?: string }[]) {
+  if (!scores.length) return;
+  const { error } = await connected().rpc('save_gradebook_score_batch', {
+    score_changes: scores.map((row) => ({
+      assessment_id: row.assessmentId,
+      enrollment_id: row.enrollmentId,
+      score: row.categoricalValue == null ? row.score ?? null : null,
+      categorical_value: row.categoricalValue ?? null,
+    })),
+  });
+  if (error) throw error;
+}
+
+export async function loadAssessmentScoreHistory(assessmentId: string, enrollmentId: string) {
+  const { data, error } = await connected().from('gradebook_score_versions')
+    .select('id,actor_id,actor_name,action,before_data,after_data,created_at,restored_from_version_id,batch_id')
+    .eq('assessment_id', assessmentId)
+    .eq('enrollment_id', enrollmentId)
+    .order('created_at', { ascending: false })
+    .limit(250);
+  if (error) throw error;
+  return (data ?? []).map((row: any) => ({
+    id: String(row.id),
+    actorId: row.actor_id ? String(row.actor_id) : null,
+    actorName: row.actor_name ? String(row.actor_name) : null,
+    action: String(row.action ?? ''),
+    createdAt: String(row.created_at),
+    before: row.before_data ?? null,
+    after: row.after_data ?? null,
+    restoredFromVersionId: row.restored_from_version_id ? String(row.restored_from_version_id) : null,
+    batchId: row.batch_id ? String(row.batch_id) : null,
+  }));
+}
+
+export type GradebookHistoryCursor = { createdAt: string; id: string };
+export type GradebookHistoryPage = {
+  entries: {
+    id: string;
+    eventType: 'score' | 'assessment';
+    assessmentId: string;
+    enrollmentId: string;
+    actorId: string | null;
+    actorName: string | null;
+    action: string;
+    createdAt: string;
+    before: any;
+    after: any;
+    restoredFromVersionId: string | null;
+    versionName: string | null;
+    batchId: string | null;
+  }[];
+  nextCursor: GradebookHistoryCursor | null;
+  hasMore: boolean;
+};
+
+export async function loadGradebookScoreHistory(classId: string, cursor?: GradebookHistoryCursor | null, pageSize = 100): Promise<GradebookHistoryPage> {
   const client = connected();
-  const toDelete = scores.filter((row) => row.score == null && row.categoricalValue == null).map((row) => row.enrollmentId);
-  if (toDelete.length) {
-    const { error } = await client.from('assessment_results').delete().eq('assessment_id', assessmentId).in('enrollment_id', toDelete);
+  let query = client.from('gradebook_version_history')
+    .select('id,event_type,assessment_id,enrollment_id,actor_id,actor_name,action,before_data,after_data,created_at,restored_from_version_id,version_name,batch_id')
+    .eq('class_record_id', classId)
+    .order('created_at', { ascending: false })
+    .order('id', { ascending: false })
+    .limit(Math.min(200, Math.max(1, pageSize)) + 1);
+  if (cursor) query = query.or(`created_at.lt.${cursor.createdAt},and(created_at.eq.${cursor.createdAt},id.lt.${cursor.id})`);
+  const { data, error } = await query;
+  if (error) throw error;
+  const rows = (data ?? []).slice(0, Math.min(200, Math.max(1, pageSize)));
+  const entries = rows.map((row: any) => ({
+    id: String(row.id),
+    eventType: row.event_type === 'assessment' ? 'assessment' as const : 'score' as const,
+    assessmentId: String(row.assessment_id),
+    enrollmentId: row.enrollment_id ? String(row.enrollment_id) : '',
+    actorId: row.actor_id ? String(row.actor_id) : null,
+    actorName: row.actor_name ? String(row.actor_name) : null,
+    action: String(row.action ?? ''),
+    createdAt: String(row.created_at),
+    before: row.before_data ?? null,
+    after: row.after_data ?? null,
+    restoredFromVersionId: row.restored_from_version_id ? String(row.restored_from_version_id) : null,
+    versionName: row.version_name ? String(row.version_name) : null,
+    batchId: row.batch_id ? String(row.batch_id) : null,
+  }));
+  const last = rows.at(-1) as any;
+  return {
+    entries,
+    nextCursor: last ? { createdAt: String(last.created_at), id: String(last.id) } : null,
+    hasMore: (data ?? []).length > rows.length,
+  };
+}
+
+export async function restoreAssessmentScoreVersion(versionId: string, restoreBefore = false, restoreBatch = false) {
+  const { error } = await connected().rpc('restore_assessment_score_version', { target_version_id: versionId, restore_before: restoreBefore, restore_batch: restoreBatch });
+  if (error) throw error;
+}
+
+export async function restoreGradebookToVersion(versionId: string) {
+  const { data, error } = await connected().rpc('restore_gradebook_to_version', { target_version_id: versionId });
+  if (error) throw error;
+  return Number(data ?? 0);
+}
+
+export async function restoreAssessmentInstanceVersion(versionId: string) {
+  const client = connected();
+  const { data: history, error: historyError } = await client.from('gradebook_version_history')
+    .select('event_type,action,before_data,after_data')
+    .eq('id', versionId)
+    .eq('event_type', 'assessment')
+    .single();
+  if (historyError) throw historyError;
+
+  // A deletion's last saved assessment is its before snapshot; other events
+  // restore the state captured after that change.
+  const snapshot = history.action.endsWith('.delete') ? history.before_data : history.after_data ?? history.before_data;
+  if (!snapshot?.id || !snapshot?.class_record_id) throw new Error('The saved assessment version is incomplete.');
+  const fields = [
+    'id', 'class_record_id', 'criteria_node_id', 'title', 'type', 'maximum_score',
+    'due_at', 'status', 'created_by', 'created_at', 'component_key', 'module_number',
+    'assessment_date', 'grading_period', 'source', 'grading_type_id', 'grading_group_id',
+    'grading_period_id', 'grading_instance_weight', 'optional',
+  ];
+  const restored = Object.fromEntries(fields.filter((field) => field in snapshot).map((field) => [field, snapshot[field]]));
+  const { data: current, error: currentError } = await client.from('assessments').select('id').eq('id', snapshot.id).maybeSingle();
+  if (currentError) throw currentError;
+  if (current) {
+    const { id: _id, class_record_id: _classId, created_by: _createdBy, created_at: _createdAt, ...updates } = restored;
+    const { error } = await client.from('assessments').update({ ...updates, updated_at: new Date().toISOString() }).eq('id', snapshot.id);
+    if (error) throw error;
+  } else {
+    const { error } = await client.from('assessments').insert(restored);
     if (error) throw error;
   }
-  const toSave = scores.filter((row) => row.score != null || row.categoricalValue != null);
-  if (!toSave.length) return;
-  const { error } = await client.from('assessment_results').upsert(toSave.map((row) => ({ assessment_id: assessmentId, enrollment_id: row.enrollmentId, score: row.categoricalValue == null ? row.score : null, categorical_value: row.categoricalValue ?? null, source: 'manual', approval_status: 'approved', recorded_by: userId })), { onConflict: 'assessment_id,enrollment_id' });
+}
+
+export async function nameGradebookScoreVersion(versionId: string, name: string) {
+  const client = connected();
+  const { data: version, error: lookupError } = await client.from('gradebook_version_history')
+    .select('event_type,batch_id')
+    .eq('id', versionId)
+    .single();
+  if (lookupError) throw lookupError;
+  if (version.event_type === 'assessment') {
+    const { error } = await client.from('gradebook_assessment_version_names').upsert({
+      audit_log_id: versionId,
+      version_name: name.trim() || null,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'audit_log_id' });
+    if (error) throw error;
+    return;
+  }
+  let query = client.from('gradebook_score_versions')
+    .update({ version_name: name.trim() || null })
+    .select('id');
+  query = version.batch_id ? query.eq('batch_id', version.batch_id) : query.eq('id', versionId);
+  const { error } = await query;
   if (error) throw error;
 }
 

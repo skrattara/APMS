@@ -33,13 +33,21 @@ export type SettingsValues = {
   provider?: string;
   maintenanceMode?: boolean;
   mfaRequired?: boolean;
+  autosaveEnabled?: boolean;
 };
+
+export async function loadAutosavePreference(userId?: string): Promise<boolean> {
+  if (!userId || !supabase) return true;
+  const { data, error } = await supabase.from('profiles').select('gradebook_autosave').eq('id', userId).maybeSingle();
+  if (error) throw error;
+  return data?.gradebook_autosave ?? true;
+}
 
 export async function saveSettings(screen: string, user: AuthUser, demoMode: boolean, values: SettingsValues) {
   if (demoMode) return 'Settings simulated with fictional development data; no production record was written.';
   if (!supabase) throw new Error('APMS is not connected. No settings were changed.');
   if (screen === 'settings') {
-    const { error } = await supabase.from('profiles').update({ first_name: values.first.trim(), last_name: values.last.trim(), phone: values.phone.trim() || null }).eq('id', user.id);
+    const { error } = await supabase.from('profiles').update({ first_name: values.first.trim(), last_name: values.last.trim(), phone: values.phone.trim() || null, ...(values.autosaveEnabled === undefined ? {} : { gradebook_autosave: values.autosaveEnabled }) }).eq('id', user.id);
     if (error) throw error;
     return 'Profile settings saved.';
   }

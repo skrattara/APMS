@@ -1,0 +1,18 @@
+{
+  "generatedAt": "2026-10-09T22:58:46.490Z",
+  "seed": "sample-class-2026-01",
+  "batchId": "507e08ae-ff4d-4980-99e2-614601d3ba38",
+  "counts": {
+    "students": 30,
+    "assessments": 72,
+    "results": 2160,
+    "missingResults": 0,
+    "failedRequirements": 0,
+    "pass": 11,
+    "fail": 19,
+    "incomplete": 0
+  },
+  "gradingSystemId": "grading-system-it-global",
+  "gradingSystemName": "IT Global Grading System",
+  "evaluationSystemId": null
+}

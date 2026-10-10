@@ -12,6 +12,8 @@ build/
 coverage/
 playwright-report/
 test-results/
+playwright/.auth/
+playwright-live-report/
 
 # Local environments and secrets
 .env

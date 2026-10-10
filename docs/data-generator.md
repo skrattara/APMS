@@ -1,0 +1,44 @@
+# Synthetic assessment data generator
+
+The generator creates seeded, reproducible student rows, assessment instances, assessment results, and grade/status previews from the existing grading-system representation. An optional evaluation-system representation adds a risk preview from record-derived factors; it does not call an AI service. Generation policies live in the separate `plan` object and do not alter either grading schema.
+
+## Run it from the command line
+
+Start from [the example input](../examples/data-generator-input.example.json), edit the term dates, class size, seed, and any additional requirements, then run:
+
+```sh
+npm run generate:data -- examples/data-generator-input.example.json generated-data
+```
+
+The output directory contains `dataset.json`, a manifest, and separate CSV files for students, assessments, results, and calculated summaries. Student names and identifiers are synthetic by default. The same seed and plan produce the same generated rows and batch identifier.
+
+An input file must contain a `plan`, plus either `gradingSystem` or `gradingSystemFile`. It may also contain `evaluationSystem` or `evaluationSystemFile`. A relative schema file path is resolved from the input file's folder. Assessment and evaluation representations are validated before any output is written. If the grading engine cannot calculate a definition, or if a grading rule does not determine an assessment scope, generation stops with an explanation.
+
+## Policies the plan can set
+
+- `countStrategy`: `minimum` creates the schema's minimum assessment count in each applicable scope; `varied` draws between its configured minimum and maximum; `explicit` uses `countsByType` and rejects counts outside schema limits. The development screen exposes a count field per assessment type for explicit mode.
+- Assessment-instance weights required by weighted aggregation default to `1`; `weightsByType` can set a different positive weight for a type. Equal and points-based aggregation do not receive a weight.
+- Assessment scopes come from each assessment definition's `overall`, `per_period`, or `per_group` count scope, and period-to-group assignments in the grading representation. Nested groups inherit their ancestor's period assignment, and a parent group grade aggregates assessments assigned to descendants. Assessment instances are associated with one component at most. Standalone completion requirements are separate plan entries and do not contribute to grade calculations.
+- Linear raw scores support bell-curve, uniform, and triangular distributions. In consistent-profile mode, each distribution is shifted so its expected score targets that student's configured profile percentage (default low 40%, medium 65%, high 85%), while retaining its shape and clamping to the valid schema range.
+- Mapped numeric and categorical inputs default to equal probability over the explicitly mapped values in independent-score mode. In consistent-profile mode, `mappedScorePolicy` defaults to `profile_target`: category probabilities are tilted toward the profile target while every selected result remains one of the schema's mapped values. The target is the expected mapped percentage, not an interpolated result. `equal_probability` keeps equal category chances even in consistent-profile mode. Explicit `values` distributions supply the baseline category probabilities; their probabilities must total exactly 1. For a mapped type, a non-`values` distribution is not used by `profile_target`; use valid mapped values or choose `equal_probability` to retain numeric threshold sampling.
+- Numeric mappings default to exact mapped values. `numericMappingPolicy: "threshold"` normalizes a generated score to the greatest mapped raw value not above it, clamping values below or above the mapped range to the nearest endpoint before grade calculation and export. Categorical mappings remain strict.
+- `profileMode: "consistent"` keeps a seeded low, medium, or high performance profile across each student's assessments; `independent` samples each assessment independently and uses equal chances for mapped values by default. `profileTiers` configures the exact tier probabilities and must total 1. `profileTargets` configures each tier's expected assessment percentage (0–100); the defaults are 40, 65, and 85.
+- `dates: "evenly_spaced"` distributes instances through the semester or the selected period's configured date range. `random` selects seeded dates in that range. Explicit period ranges override automatic period ranges.
+- `assessmentNaming` defaults to `description`, preserving the full assessment type and period/group description. Set it to `short_code_sequence` to name instances with the assessment type's `shortCode` and a type-wide sequence number (for example, `Quiz 1`, `Quiz 2`). If a type has no `shortCode`, its type ID is used.
+- Missing results are off by default. Turn them on with `missing.enabled` and configure `rate` or `byType`. `optionalTypes` marks assessment types optional for completeness; a missing optional result is excluded from aggregation and does not create an incomplete status.
+- `completionRequirements` can define multiple standalone pass/fail assessments using categorical mapped values, numeric mapped values, or linear numeric scores and a passing category and/or percentage threshold. Every non-optional requirement must pass. A known failed check means `fail`; a missing required check means incomplete. For grade-contributing missing results, a student fails only if even the best possible scores cannot reach the grading system's passing threshold.
+- `semesterEnded` can explicitly set whether missing results should be labeled `incomplete_final`; otherwise the generator uses the semester end date and `asOf` (or the current date).
+
+The preview and summaries CSV include final-grade distribution statistics overall and by profile: mean, median, range, students at or above 70%, and students at or above the grading system's passing threshold. These are calculated from the grading engine's final grades, so schema weights and aggregation rules remain authoritative.
+
+## Development preview and database writes
+
+Apply the database migration and deploy the `synthetic-data` Edge Function before using writes. The function uses the existing Supabase service-role secret in its server environment; no service-role key is put in the app. Sign in as an active System Admin and open **Data Generator (Dev)** in an Expo development build. Production builds redirect this route away, and non-System Admin roles are rejected by the function.
+
+First select active classes in the central allowlist. The function loads each class's applied grading system and department-wide evaluation criteria. The screen generates from those snapshots, shows the preview, then asks before writing synthetic students, assessments, and non-missing results. Writes are limited to 20,000 student-result rows per batch. The function checks that the caller is an active System Admin, checks the class allowlist again, validates assessment types and mapped values, and stores the plan and grading/evaluation snapshots with the batch. Each new write replaces the class's previous generated batch, regardless of seed: old assessments are archived, its enrollments completed, and its students made inactive for historical integrity. Each write is staged before replacement; incomplete staged batches are removed when a write fails.
+
+The test-class cleanup migration marks older generator-created `TEST -` sections for the test-class picker. The **Delete all test classes and associated data** action is a separate permanent cleanup: it deletes marked test classes, their assessments and results, enrollments, and generated students. It requires confirmation and the System Admin-only Edge Function.
+
+Generated students and assessments are ordinary active class records marked with a synthetic batch ID. This means they appear in the gradebook like other class data. A deployment should use a dedicated test class from the allowlist. In **Data Generator (Dev)**, assign the generated test class to an active Faculty account in the same department. Sign in as that Faculty user, open **My Classes**, select the test class, then open its gradebook. System Admin accounts do not have a gradebook view, and an unassigned class does not appear in a Faculty user's classes. Only classes created by this generator are eligible for this assignment action. The generator does not create student authentication accounts or send email. Batch metadata is inaccessible to regular authenticated clients; the generated class rows continue to follow the existing class RLS policies.
+
+The CLI remains an offline preview/export path. It does not write to Supabase. The Expo development page uses the class's current applied definitions; it does not let the caller replace those schemas with arbitrary JSON.

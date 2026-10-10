@@ -208,9 +208,11 @@ export function SelectField({
   compact = false,
   accessibilityLabel,
   searchable = false,
+  deferModalUntilOpen = false,
   helpText,
   helpExample,
   controlRef,
+  controlDataSet,
   onKeyDown,
 }: {
   label: string;
@@ -226,9 +228,11 @@ export function SelectField({
   compact?: boolean;
   accessibilityLabel?: string;
   searchable?: boolean;
+  deferModalUntilOpen?: boolean;
   helpText?: string;
   helpExample?: string;
   controlRef?: (instance: any) => void;
+  controlDataSet?: Record<string, string>;
   onKeyDown?: (event: any) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -247,6 +251,7 @@ export function SelectField({
         accessibilityState={{ expanded: open, disabled }}
         disabled={disabled}
         onPress={() => { setQuery(''); setOpen(true); }}
+        {...(controlDataSet ? ({ dataSet: controlDataSet } as any) : {})}
         {...(onKeyDown ? ({ onKeyDown } as any) : {})}
         style={[styles.input, styles.selectInput, compact && styles.compactSelectInput, disabled && styles.disabled, controlStyle]}
       >
@@ -258,7 +263,7 @@ export function SelectField({
         <AppIcon name="chevronDown" size={14} color={colors.textMuted} />
       </Pressable>
       {error ? <Text style={styles.error}>{error}</Text> : null}
-      <Modal
+      {(!deferModalUntilOpen || open) ? <Modal
         visible={open}
         transparent
         animationType="fade"
@@ -316,7 +321,7 @@ export function SelectField({
             />
           </Card>
         </View>
-      </Modal>
+      </Modal> : null}
     </View>
   );
 }
