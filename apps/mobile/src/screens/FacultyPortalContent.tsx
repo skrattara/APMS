@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
 import { calculateAttendanceRate, type AttendanceStatus } from "@apms/domain";
 
@@ -15,6 +15,7 @@ import {
   useToast,
 } from "@/components/ui";
 import { VisualizationPanel } from "@/components/charts/VisualizationPanel";
+import { ReportComposer } from "@/components/reports/ReportComposer";
 import {
   FACULTY_EVENTS,
   FACULTY_FEEDBACK_TEMPLATES,
@@ -843,12 +844,13 @@ function FacultyAnalytics() {
   const [section, setSection] = useState("All");
   const [subject, setSubject] = useState("All");
   const [semester, setSemester] = useState("All");
-  const records = FACULTY_RECORDS.filter(
+  const records = useMemo(() => FACULTY_RECORDS.filter(
     (item) =>
       (section === "All" || item.section === section) &&
       (subject === "All" || item.subject === subject) &&
       (semester === "All" || item.semester === semester),
-  );
+  ), [section, semester, subject]);
+  const reportRows = useMemo(() => records.map((item) => ({ section: item.section, subject: item.subject, semester: item.semester, students: item.students, average: item.average, passed: item.passed, failed: item.failed, date: item.date })), [records]);
   const average = Math.round(
     records.reduce((sum, item) => sum + item.average, 0) /
       Math.max(records.length, 1),
@@ -963,6 +965,7 @@ function FacultyAnalytics() {
           ))}
         </Card>
       </View>
+      <ReportComposer title="Faculty Class Monitoring Report" scopeLabel="Assigned class" description="Fictional class performance summaries for product validation." rows={reportRows} />
     </View>
   );
 }

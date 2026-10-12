@@ -41,6 +41,7 @@ insert into public.permissions (key, description) values
   ('imports.manage.assigned','Import files for assigned classes'),
   ('analytics.read.assigned','Read assigned analytics'),('analytics.read.department','Read department analytics'),
   ('reports.export.assigned','Export assigned reports'),('reports.export.department','Export department reports'),
+  ('reports.export.system','Export operational system reports'),
   ('users.manage','Manage user accounts'),
   ('roles.manage','Manage roles and permissions'),('system.configure','Configure system and authentication limits'),
   ('integrations.manage','Manage integrations'),('logs.read','Read technical logs'),('logs.export','Export technical logs'),
@@ -50,7 +51,7 @@ on conflict (key) do update set description = excluded.description;
 with mapping(role_key, permission_key) as (values
   ('faculty','dashboard.read'),('faculty','students.read.assigned'),('faculty','students.manage.assigned'),('faculty','class_records.manage.assigned'),('faculty','criteria.manage.assigned'),('faculty','assessment_results.manage.assigned'),('faculty','evaluations.run.assigned'),('faculty','predictions.run.assigned'),('faculty','feedback.send.assigned'),('faculty','attendance.manage.assigned'),('faculty','imports.manage.assigned'),('faculty','analytics.read.assigned'),('faculty','reports.export.assigned'),
   ('academic_admin','dashboard.read'),('academic_admin','students.read.department'),('academic_admin','faculty.read.department'),('academic_admin','class_records.read.department'),('academic_admin','criteria.manage.department'),('academic_admin','attendance.read.department'),('academic_admin','analytics.read.department'),('academic_admin','reports.export.department'),
-  ('system_admin','dashboard.read'),('system_admin','users.manage'),('system_admin','roles.manage'),('system_admin','system.configure'),('system_admin','integrations.manage'),('system_admin','logs.read'),('system_admin','logs.export'),('system_admin','backups.manage'),('system_admin','admin_accounts.manage')
+  ('system_admin','dashboard.read'),('system_admin','users.manage'),('system_admin','roles.manage'),('system_admin','system.configure'),('system_admin','integrations.manage'),('system_admin','logs.read'),('system_admin','logs.export'),('system_admin','backups.manage'),('system_admin','admin_accounts.manage'),('system_admin','reports.export.system')
 )
 insert into public.role_permissions(role_id, permission_id)
 select r.id, p.id from mapping m join public.roles r on r.key = m.role_key join public.permissions p on p.key = m.permission_key

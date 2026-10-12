@@ -22,6 +22,7 @@ export const permissionKeys = [
   'analytics.read.department',
   'reports.export.assigned',
   'reports.export.department',
+  'reports.export.system',
   'users.manage',
   'roles.manage',
   'system.configure',
@@ -53,6 +54,7 @@ export const rolePermissions: Record<RoleKey, readonly PermissionKey[]> = {
     'dashboard.read', 'users.manage', 'roles.manage', 'system.configure',
     'integrations.manage', 'logs.read', 'logs.export', 'backups.manage',
     'admin_accounts.manage',
+    'reports.export.system',
   ],
 };
 

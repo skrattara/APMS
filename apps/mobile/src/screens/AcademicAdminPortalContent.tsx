@@ -1,17 +1,18 @@
 import { getErrorMessage } from '@/services/errors';
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Modal, Platform, Pressable, Share, StyleSheet, Text, View } from 'react-native';
 
 import { useAuth } from '@/auth/AuthProvider';
 import { supabase } from '@/services/supabase';
 import { Badge, Button, Card, ConfirmDialog, DataTable, Field, HelpTooltip, MetricCard, PageState, RefreshIndicator, SelectField, useToast } from '@/components/ui';
 import { useAnalyticsFilters } from '@/components/charts/AnalyticsFilters';
+import { ReportComposer, type ReportRecord } from '@/components/reports/ReportComposer';
 import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
 import {
   academicReportCsv, loadAcademicWorkspace, loadDepartmentSubjects, loadSubjectRequests,
   applyDepartmentEvaluationCriteriaToClasses, applyPersonalEvaluationCriteriaToClasses, deleteDepartmentEvaluationCriteria, deletePersonalEvaluationCriteria, manageSubject, reviewSubjectRequest, saveDepartmentEvaluationCriteria, savePersonalEvaluationSystem, type AcademicSubject, type AcademicSubjectRequest, type AcademicWorkspace, type SavedEvaluationSystem,
 } from '@/services/academic';
-import { applyGradingSystemToClasses, deleteGradingSystem, saveGradingSystem, summarizeEnrollmentStanding, type ClassWorkspace } from '@/services/faculty';
+import { applyGradingSystemToClasses, calculateEnrollmentGrade, deleteGradingSystem, saveGradingSystem, summarizeEnrollmentStanding, type ClassWorkspace } from '@/services/faculty';
 import { calculateGradingSystem, calculateTrend, IT_GLOBAL_GRADING_SYSTEM, validateGradingSystem, type GradingDefinition } from '@apms/domain';
 import { createGradingDefinitionId, GradingSystemBuilderForm } from '@/components/GradingSystemBuilderForm';
 import { EvaluationSystemBuilderForm } from '@/components/EvaluationSystemBuilderForm';
@@ -70,9 +71,9 @@ function gradeFactorValues(workspace: ClassWorkspace, enrollmentId: string) {
   return values;
 }
 
-function riskResult(workspace: ClassWorkspace, enrollmentId: string, definition: EvaluationDefinition = DEFAULT_EVALUATION_SYSTEM) {
+function riskResult(workspace: ClassWorkspace, enrollmentId: string, definition: EvaluationDefinition = DEFAULT_EVALUATION_SYSTEM, standingSummary = summarizeEnrollmentStanding(workspace, enrollmentId)) {
   const saved = workspace.evaluations[enrollmentId];
-  const summary = summarizeEnrollmentStanding(workspace, enrollmentId);
+  const summary = standingSummary;
   const grading = workspace.criteria?.gradingSystemDefinition ?? workspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
   const scoreHistory = workspace.assessments.flatMap((assessment) => {
     const key = `${enrollmentId}:${assessment.id}`;
@@ -152,9 +153,10 @@ type Props = { data: AcademicWorkspace; refresh: () => void; userId: string; toa
 function Heading({ title, subtitle, action }: { title: string; subtitle: string; action?: React.ReactNode }) { return <View style={styles.heading}><View style={styles.flex}><Text accessibilityRole="header" style={styles.title}>{title}</Text><Text style={styles.subtitle}>{subtitle}</Text></View>{action}</View>; }
 function allStudents(data: AcademicWorkspace) { return data.classes.flatMap((item) => item.workspace.students.map((student) => {
   const definition = item.workspace.evaluationSystem ?? data.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
-  const evaluation = riskResult(item.workspace, student.enrollmentId, definition);
+  const summary = summarizeEnrollmentStanding(item.workspace, student.enrollmentId);
+  const evaluation = riskResult(item.workspace, student.enrollmentId, definition, summary);
   const level = definition.levels.find((candidate) => candidate.id === evaluation.matchedLevelId);
-  return { item, student, score: standing(item.workspace, student.enrollmentId), rate: attendance(item.workspace, student.enrollmentId), risk: evaluation.severity, riskValue: evaluationRiskValue(definition, evaluation), riskLevelName: level?.name ?? (evaluation.severity === 'unavailable' ? 'Unavailable' : 'No matching level'), riskLevelColor: level?.color, riskDefinition: definition };
+  return { item, student, summary, score: summary.finalGrade ?? summary.p3 ?? summary.effortfulLearning ?? summary.mastery, rate: attendance(item.workspace, student.enrollmentId), risk: evaluation.severity, riskValue: evaluationRiskValue(definition, evaluation), riskLevelName: level?.name ?? (evaluation.severity === 'unavailable' ? 'Unavailable' : 'No matching level'), riskLevelColor: level?.color, riskDefinition: definition, evaluationResult: evaluation };
 })); }
 
 function Overview({ data }: Props) {
@@ -501,16 +503,54 @@ function copyWithFreshIds(source: GradingDefinition): GradingDefinition {
 }
 
 function Analytics({ data, toast }: Props) {
-  const rows = allStudents(data);
+  const rows = useMemo(() => allStudents(data), [data]);
   const riskDefinitions = [...new Map(data.classes.map((item) => { const definition = item.workspace.evaluationSystem ?? data.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM; return [definition.id, definition] as const; })).values()];
   const riskOptions = evaluationRiskOptions(riskDefinitions, 'All risks');
-  const records = rows.flatMap((row) => {
-    const summary = summarizeEnrollmentStanding(row.item.workspace, row.student.enrollmentId);
+  const records = useMemo(() => rows.flatMap((row) => {
+    const summary = row.summary;
     const score = row.score;
-    return score == null ? [] : [{ id: row.student.enrollmentId, label: row.student.name, score, risk: row.riskValue, classification: summary.remarks, category: `${row.item.code} · ${row.item.section}`, timestamp: row.item.workspace.assessments.at(-1)?.assessmentDate }];
-  });
+    if (score == null) return [];
+    const workspace = row.item.workspace;
+    const enrollmentId = row.student.enrollmentId;
+    const gradingSystem = workspace.criteria?.gradingSystemDefinition ?? workspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
+    const evaluationDefinition = workspace.evaluationSystem ?? data.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
+    const calculated = calculateEnrollmentGrade(workspace, enrollmentId);
+    const prediction = workspace.evaluations[enrollmentId] ?? null;
+    const assessmentResults = workspace.assessments.map((assessment) => {
+      const typeId = assessment.gradingTypeId ?? assessment.component;
+      const rawScore = workspace.scores[`${enrollmentId}:${assessment.id}`] ?? workspace.categoricalScores[`${enrollmentId}:${assessment.id}`] ?? null;
+      const scoring = gradingSystem.components.find((component: any) => component.assessmentDefinition?.typeId === typeId)?.assessmentDefinition?.scoring;
+      let mappedPercentage: number | null = null;
+      if (rawScore != null && scoring?.mode === 'value_mapping') mappedPercentage = scoring.mapping.find((entry: any) => String(entry.value) === String(rawScore))?.percentage ?? null;
+      else if (rawScore != null && assessment.maximumScore > 0) {
+        const numeric = Number(rawScore);
+        if (Number.isFinite(numeric)) {
+          mappedPercentage = numeric / assessment.maximumScore * 100;
+          if (scoring?.mode === 'numeric_mapping') {
+            const mapped = [...scoring.mapping].sort((left: any, right: any) => left.value - right.value).filter((entry: any) => numeric >= entry.value).at(-1);
+            if (mapped) mappedPercentage = mapped.percentage;
+          }
+        }
+      }
+      return { id: assessment.id, name: assessment.title, date: assessment.assessmentDate, gradingTypeId: typeId, gradingPeriodId: assessment.gradingPeriodId ?? null, gradingGroupId: assessment.gradingGroupId ?? null, rawScore, maximumScore: assessment.maximumScore, mappedPercentage };
+    });
+    const classLabel = `${row.item.code} · ${row.item.section}`;
+    return [{ id: enrollmentId, label: row.student.name, student: row.student.name, studentId: row.student.institutionalId, score: calculated.finalGrade ?? score, currentStanding: calculated.finalGrade ?? score, finalGrade: calculated.finalGrade, pointGrade: calculated.pointGrade, risk: row.riskValue, riskLevel: row.riskLevelName, classification: summary.remarks, category: classLabel, class: classLabel, classId: row.item.id, subject: row.item.title, term: row.item.term, yearLevel: row.student.yearLevel, program: row.student.program, timestamp: workspace.assessments.at(-1)?.assessmentDate, gradingSystemSchema: gradingSystem, appliedGradingSystem: workspace.criteria ?? null, assessmentResults, calculatedGrade: calculated, evaluationCriteriaSchema: evaluationDefinition, evaluationResult: row.evaluationResult, performancePrediction: prediction, predictedStanding: prediction?.predictedStanding ?? null, riskProbability: prediction?.riskProbability ?? null, ...Object.fromEntries(Object.entries(calculated.periods ?? {}).map(([key, value]) => [`gradingPeriod_${key}`, value])), ...Object.fromEntries(Object.entries(calculated.components ?? {}).map(([key, value]) => [`gradingComponent_${key}`, value])), ...Object.fromEntries(Object.entries(calculated.groups ?? {}).map(([key, value]) => [`gradingGroup_${key}`, value])) }];
+  }), [data, rows]);
   const filters = useAnalyticsFilters(records, riskOptions);
   const visible = filters.filtered;
+  const reportRowsForItems = useCallback((items: ReportRecord[]) => {
+    const sources = new Map(rows.map((row) => [row.student.enrollmentId, row] as const));
+    return items.map((item) => {
+    const source = sources.get(item.id);
+    const workspace = source?.item.workspace;
+    const enrollmentId = source?.student.enrollmentId;
+    const missingAssessments = workspace && enrollmentId ? workspace.assessments.filter((assessment) => workspace.scores[`${enrollmentId}:${assessment.id}`] == null && workspace.categoricalScores[`${enrollmentId}:${assessment.id}`] == null).length : null;
+    const riskLevel = source?.riskLevelName ?? 'Unavailable';
+    return { ...item, student: item.label, risk: riskLevel, riskLevel, attendanceRate: source?.rate ?? null, missingAssessments };
+    });
+  }, [rows]);
+  const reportRecords = useMemo(() => reportRowsForItems(records), [records, reportRowsForItems]);
   const exportCsv = async () => { const csv = academicReportCsv(data); if (Platform.OS === 'web') { const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'apms-academic-monitoring-report.csv'; anchor.click(); URL.revokeObjectURL(url); } else await Share.share({ message: csv }); toast.show('Department monitoring report exported.'); };
   const medium = visible.filter((row) => row.risk === 'medium').length;
   const high = visible.filter((row) => row.risk === 'high').length;
@@ -524,7 +564,7 @@ function Analytics({ data, toast }: Props) {
   }).filter((item): item is { label: string; value: number } => item !== null);
   const passFail = [{ label: 'Meets rule', value: passing }, { label: 'Below or incomplete', value: visible.length - passing }];
   const scoreDistribution = visible.map((item) => ({ label: item.label, value: item.score, kind: 'continuous' as const }));
-  return <><Heading title="Analytics & Reports" subtitle="Department-level analytics and provisional SWUNEXT passing-rule comparisons from authorized APMS data." action={<Button label="Export CSV" onPress={() => void exportCsv()} />} />{filters.controls}<View style={styles.metrics}><MetricCard label="Passing rule met" value={String(passing)} tone="success" /><MetricCard label="Below rule" value={String(failing)} tone="warning" /><MetricCard label="Medium risk" value={String(medium)} tone="warning" /><MetricCard label="High risk" value={String(high)} tone="danger" /></View><View style={styles.analyticsCharts}><VisualizationPanel title="Average score by class" description="Mean current SWUNEXT standing by class for records matching these filters." data={scoreByClass} type="bar" suffix="%" /><VisualizationPanel title="Student score histogram" description="Filtered continuous scores grouped into score bands." data={scoreDistribution} type="histogram" suffix="%" /><VisualizationPanel title="Risk distribution" description="Configured risk levels from the criteria applied to each class." data={riskDistribution} type="pie" /><VisualizationPanel title="Passing rule status" description="Binary pass and not yet passing classification." data={passFail} type="pie" /></View><Card><Text style={styles.cardTitle}>Class and subject comparison</Text>{data.classes.length ? <DataTable columns={['Subject / class', 'Recorded standings', 'Passing rule met', 'Below rule', 'Risk alerts']} rows={data.classes.map((item) => { const classRows = allStudents({ ...data, classes: [item] }); const classSummaries = classRows.map((row) => summarizeEnrollmentStanding(row.item.workspace, row.student.enrollmentId)); const classRecorded = classSummaries.filter((summary) => summary.finalGrade != null || summary.p3 != null || summary.mastery != null); return [`${item.code} · ${item.section}`, String(classRecorded.length), String(classSummaries.filter((summary) => summary.remarks === 'passing').length), String(classSummaries.filter((summary) => summary.remarks === 'failing').length), String(classRows.filter((row) => row.risk !== 'low').length)]; })} /> : <PageState kind="empty" title="No comparison data" message="Class comparisons appear after monitoring classes are created." />}<Text style={styles.help}>Passing requires both 80% final grade and 80% mastery. P1/P2 remain running views. These are provisional APMS indicators, not official SIS pass/fail grades. Filters apply to KPI and chart summaries; the CSV includes all authorized department rows.</Text></Card></>;
+  return <><Heading title="Analytics & Reports" subtitle="Department-level analytics and provisional SWUNEXT passing-rule comparisons from authorized APMS data." action={<Button label="Export CSV" onPress={() => void exportCsv()} />} />{filters.controls}<View style={styles.metrics}><MetricCard label="Passing rule met" value={String(passing)} tone="success" /><MetricCard label="Below rule" value={String(failing)} tone="warning" /><MetricCard label="Medium risk" value={String(medium)} tone="warning" /><MetricCard label="High risk" value={String(high)} tone="danger" /></View><View style={styles.analyticsCharts}><VisualizationPanel title="Average score by class" description="Mean current SWUNEXT standing by class for records matching these filters." data={scoreByClass} type="bar" suffix="%" /><VisualizationPanel title="Student score histogram" description="Filtered continuous scores grouped into score bands." data={scoreDistribution} type="histogram" suffix="%" /><VisualizationPanel title="Risk distribution" description="Configured risk levels from the criteria applied to each class." data={riskDistribution} type="pie" /><VisualizationPanel title="Passing rule status" description="Binary pass and not yet passing classification." data={passFail} type="pie" /></View><Card><Text style={styles.cardTitle}>Class and subject comparison</Text>{data.classes.length ? <DataTable columns={['Subject / class', 'Recorded standings', 'Passing rule met', 'Below rule', 'Risk alerts']} rows={data.classes.map((item) => { const classRows = allStudents({ ...data, classes: [item] }); const classSummaries = classRows.map((row) => summarizeEnrollmentStanding(row.item.workspace, row.student.enrollmentId)); const classRecorded = classSummaries.filter((summary) => summary.finalGrade != null || summary.p3 != null || summary.mastery != null); return [`${item.code} · ${item.section}`, String(classRecorded.length), String(classSummaries.filter((summary) => summary.remarks === 'passing').length), String(classSummaries.filter((summary) => summary.remarks === 'failing').length), String(classRows.filter((row) => row.risk !== 'low').length)]; })} /> : <PageState kind="empty" title="No comparison data" message="Class comparisons appear after monitoring classes are created." />}<Text style={styles.help}>Passing requires both 80% final grade and 80% mastery. P1/P2 remain running views. These are provisional APMS indicators, not official SIS pass/fail grades. Filters apply to KPI and chart summaries; the CSV includes all authorized department rows.</Text></Card><ReportComposer title="Academic Department Monitoring Report" scopeLabel="Authorized department" description="Department-level provisional standing, passing-rule, and configured risk summaries. These are monitoring indicators, not official SIS grades." rows={reportRecords} /></>;
 }
 function Subjects({ data, toast, refresh }: Props) {
   const [subjects, setSubjects] = useState<AcademicSubject[]>([]);

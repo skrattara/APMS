@@ -1,11 +1,12 @@
 import { getErrorMessage } from '@/services/errors';
-import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useAuth } from '@/auth/AuthProvider';
 import { supabase } from '@/services/supabase';
 import { Button, Card, ConfirmDialog, DataTable, DateField, Field, MetricCard, PageState, RefreshIndicator, SelectField, useToast } from '@/components/ui';
 import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
+import { ReportComposer } from '@/components/reports/ReportComposer';
 import { Settings as AccountSettings } from '@/screens/AppPortalScreen';
 import { createManagedUser, deleteProgram, loadAdminWorkspace, queueBackup, saveAcademicTerm, saveDepartment, saveProgram, saveSystemSetting, updateManagedUser, type AcademicTermRecord, type AdminWorkspace, type DepartmentRecord, type ManagedUser, type ProgramRecord } from '@/services/admin';
 import { IT_GLOBAL_GRADING_SYSTEM, type GradingDefinition } from '@apms/domain';
@@ -50,6 +51,7 @@ export function SystemAdminPortalContent({ screen }: { screen: string }) {
     {screen === 'roles' ? <Roles {...props} /> : null}
     {screen === 'backup' ? <Backups {...props} /> : null}
     {screen === 'logs' ? <Logs {...props} /> : null}
+    {screen === 'reports' ? <SystemReports {...props} /> : null}
     {screen === 'system' ? <SystemSettings {...props} /> : null}
     {screen === 'settings' ? <Info onMessage={toast.show} /> : null}
   </View>;
@@ -118,6 +120,14 @@ function AcademicSetup({ data, refresh, toast }: Props) {
 function Roles({ data }: Props) { return <><Heading title="Roles & Permissions" subtitle="The revised APMS role model contains exactly System Admin, Academic Admin, and Faculty; Super Admin is merged and Grader is removed." /><Card><DataTable columns={['Role', 'Key', 'Assigned users', 'Permissions', 'Scope']} rows={data.roles.filter((role) => ['system_admin', 'academic_admin', 'faculty'].includes(role.key)).map((role) => [role.name, role.key, String(role.users), String(role.permissions), role.key === 'system_admin' ? 'Global' : 'Department / assigned classes'])} /></Card></>; }
 function Backups({ data, refresh, userId, toast }: Props) { const [saving, setSaving] = useState(false); const queue = async () => { setSaving(true); try { await queueBackup(userId); toast.show('Backup request queued. Completion requires the configured protected backup worker.'); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Backup could not be queued.')); } finally { setSaving(false); } }; return <><Heading title="System & Backup Status" subtitle="Queue and monitor protected backup requests without exposing database credentials." action={<Button label="Queue full backup" loading={saving} onPress={() => void queue()} />} /><Card>{data.backups.length ? <DataTable columns={['Created', 'Scope', 'Completed', 'Status']} rows={data.backups.map((row) => [date(row.createdAt), row.scope, date(row.completedAt), `${row.status[0].toUpperCase()}${row.status.slice(1)}`])} /> : <PageState kind="empty" title="No backup requests" message="Queue a backup after an institutional backup worker and protected destination are configured." />}</Card></>; }
 function Logs({ data }: Props) { return <><Heading title="Access & System Logs" subtitle="Immutable audit trail for account, data, criteria, and administrative operations." /><Card>{data.logs.length ? <DataTable columns={['ID', 'Timestamp', 'Action', 'Entity', 'Actor', 'Status']} rows={data.logs.map((row) => [String(row.id), date(row.createdAt), row.action, row.entityType, row.actorId ?? 'System', 'Recorded'])} /> : <PageState kind="empty" title="No logs" message="No audit records are visible." />}</Card></>; }
+function SystemReports({ data }: Props) {
+  const rows = useMemo(() => [
+    ...data.users.map((user) => ({ recordType: 'User', status: user.status, role: user.roleName ?? user.role ?? 'Unassigned', scope: user.scopeType ?? 'Global', date: user.lastLoginAt ?? 'No sign-in', identifier: user.id })),
+    ...data.logs.map((log) => ({ recordType: 'Audit event', status: 'Recorded', role: log.action, scope: log.entityType, date: log.createdAt, identifier: String(log.id) })),
+    ...data.backups.map((backup) => ({ recordType: 'Backup', status: backup.status, role: backup.scope, scope: backup.completedAt ? 'Completed' : 'Pending', date: backup.createdAt, identifier: backup.id })),
+  ], [data.users, data.logs, data.backups]);
+  return <><Heading title="System Reports" subtitle="Formatted operational reports for account, audit, and backup administration. Academic records are outside the System Admin reporting scope." /><ReportComposer title="System Operations Report" scopeLabel="System administration" description="Operational account status, role assignment, audit activity, and backup status. Report data is drawn from the System Admin workspace." rows={rows} /></>;
+}
 function SystemSettings({ data, refresh, userId, toast }: Props) {
   const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(data.settings.map((row) => [row.key, typeof row.value === 'string' ? row.value : JSON.stringify(row.value)])));
   const storedFeedbackFromEmail = data.settings.find((row) => row.key === 'FEEDBACK_FROM_EMAIL')?.value;
@@ -172,6 +182,8 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
         <Text style={styles.sectionTitle}>Core services</Text>
         <Text style={styles.sectionHelp}>Control optional services and their availability.</Text>
         <View style={styles.settingRow}><View style={styles.settingCopy}><Text style={styles.settingLabel}>AI assistant</Text><Text style={styles.help}>Allow approved decision-support features to run.</Text></View><Pressable accessibilityRole="switch" accessibilityState={{ checked: boolValue('ai.enabled') }} onPress={() => update('ai.enabled', String(!boolValue('ai.enabled')))} style={[styles.switch, boolValue('ai.enabled') && styles.switchOn]}><View style={[styles.switchThumb, boolValue('ai.enabled') && styles.switchThumbOn]} /></Pressable></View>
+        <View style={styles.settingRow}><View style={styles.settingCopy}><Text style={styles.settingLabel}>Share anonymous assessment data with AI</Text><Text style={styles.help}>Off by default. When enabled, AI may receive numeric scores and derived grades with assessment titles and student identifiers removed.</Text></View><Pressable accessibilityRole="switch" accessibilityState={{ checked: boolValue('ai.assessment_data.enabled') }} onPress={() => update('ai.assessment_data.enabled', String(!boolValue('ai.assessment_data.enabled')))} style={[styles.switch, boolValue('ai.assessment_data.enabled') && styles.switchOn]}><View style={[styles.switchThumb, boolValue('ai.assessment_data.enabled') && styles.switchThumbOn]} /></Pressable></View>
+        <View style={styles.settingRow}><View style={styles.settingCopy}><Text style={styles.settingLabel}>Share anonymous attendance data with AI</Text><Text style={styles.help}>Off by default. When enabled, AI may receive numeric attendance rates without student or class identifiers.</Text></View><Pressable accessibilityRole="switch" accessibilityState={{ checked: boolValue('ai.attendance_data.enabled') }} onPress={() => update('ai.attendance_data.enabled', String(!boolValue('ai.attendance_data.enabled')))} style={[styles.switch, boolValue('ai.attendance_data.enabled') && styles.switchOn]}><View style={[styles.switchThumb, boolValue('ai.attendance_data.enabled') && styles.switchThumbOn]} /></Pressable></View>
       </Card>
       <Card style={styles.settingsCard}>
         <Text style={styles.sectionTitle}>Feedback email</Text>

@@ -64,11 +64,11 @@
         },
         "inputFeatures": {
           "type": "array", "uniqueItems": true,
-          "items": { "enum": ["current_standing", "recent_scores", "attendance_rate", "missing_assessment_count"] }
+          "items": { "enum": ["current_standing", "recent_scores", "attendance_rate", "missing_assessment_count", "assessment_results", "assessment_instance_details"] }
         },
         "outputFields": {
           "type": "array", "uniqueItems": true,
-          "items": { "enum": ["predicted_standing", "risk_probability", "risk_level", "trend", "factors", "model_version", "data_basis", "generated_at"] }
+          "items": { "enum": ["predicted_standing", "risk_probability", "risk_level", "trend", "factors", "model_version", "data_basis", "generated_at", "assessment_score_predictions", "evaluation_scores"] }
         },
         "riskProbabilityMeaning": { "enum": ["heuristic", "calibrated"] },
         "minimumConfidence": { "type": "number", "minimum": 0, "maximum": 1 },

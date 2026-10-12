@@ -58,6 +58,7 @@ import { useScreenRecords } from "@/services/records";
 import { FacultyLivePortalContent } from "@/screens/FacultyLivePortalContent";
 import { colors, radius, space } from "@/theme/tokens";
 import { useAnalyticsFilters } from "@/components/charts/AnalyticsFilters";
+import { ReportComposer } from "@/components/reports/ReportComposer";
 import type { EvaluationRecord } from "@/services/analytics";
 
 const LazyFacultyPortalContent = lazy(() => import("@/screens/FacultyPortalContent").then((module) => ({ default: module.FacultyPortalContent })));
@@ -195,6 +196,11 @@ const SCREENS: Record<string, ScreenDefinition> = {
     title: "System Settings",
     subtitle: "Configure global system settings and preferences.",
     kind: "settings",
+  },
+  reports: {
+    title: "System Reports",
+    subtitle: "Export operational account, role, audit, and backup summaries.",
+    kind: "analytics",
   },
   "data-generator": {
     title: "Synthetic Data Generator",
@@ -337,8 +343,9 @@ export function AppPortalScreen({
               appendedRows={screen === "events" ? createdEventRows : []}
             />
           ) : null}
-          {definition.kind === "analytics" ? (
-            <Analytics screen={screen} />
+          {role === "system_admin" && screen === "reports" ? <DemoSystemReports /> : null}
+          {definition.kind === "analytics" && !(role === "system_admin" && screen === "reports") ? (
+            <Analytics screen={screen} role={role} />
           ) : null}
           {definition.kind === "settings" ? (
             <Settings role={role} screen={screen} onMessage={toast.show} />
@@ -702,20 +709,21 @@ function Records({
   );
 }
 
-function Analytics({ screen }: { screen: string }) {
+function Analytics({ screen, role }: { screen: string; role: Role }) {
   const { demoMode } = useAuth();
   const live = useLiveAnalytics();
   const [tab, setTab] = useState("Overview");
   const series = ANALYTICS_SERIES[tab];
-  const demoRecords: EvaluationRecord[] = series.map((item, index) => ({
+  const demoRecords: EvaluationRecord[] = useMemo(() => series.map((item, index) => ({
     label: item.label,
     score: item.value,
     risk: index % 3 === 0 ? "high" : index % 2 === 0 ? "medium" : "low",
     classification: "Fictional validation data",
     category: tab,
     timestamp: new Date(Date.now() - index * 7 * 86_400_000).toISOString(),
-  }));
+  })), [series]);
   const demoFilters = useAnalyticsFilters(demoRecords);
+  const demoReportRows = useMemo(() => demoFilters.filtered.map((record) => ({ student: record.label, category: record.category, score: record.score, risk: record.risk, classification: record.classification, date: record.timestamp ?? "—" })), [demoFilters.filtered]);
   const filteredSeries = demoFilters.filtered.map((record) => ({ label: record.label, value: record.score }));
   const filteredHistogram = demoFilters.filtered.map((record) => ({ label: record.label, value: record.score, kind: "continuous" as const }));
   if (!demoMode) {
@@ -747,6 +755,7 @@ function Analytics({ screen }: { screen: string }) {
     return (
       <LiveAnalyticsContent
         screen={screen}
+        role={role}
         metrics={live.metrics}
         records={live.records}
         truncated={live.truncated}
@@ -785,17 +794,20 @@ function Analytics({ screen }: { screen: string }) {
         <DashboardChart title={`${tab} validation analysis`} description="Fictional validation series; this chart is not an AI output." data={filteredSeries} type={tab === "Risk Factors" ? "pie" : "line"} suffix="%" height={230} />
         {tab !== "Risk Factors" ? <DashboardChart title="Score histogram" description="Filtered fictional scores grouped into percentage bands." data={filteredHistogram} type="histogram" suffix="%" height={230} /> : null}
       </View>
+      <ReportComposer title="Academic Monitoring Report" scopeLabel={role === "academic_admin" ? "Authorized department" : "Assigned class"} description="Fictional validation analytics for report preview." rows={demoReportRows} />
     </>
   );
 }
 
 function LiveAnalyticsContent({
   screen,
+  role,
   metrics,
   records,
   truncated,
 }: {
   screen: string;
+  role: Role;
   metrics: LiveAnalytics["metrics"];
   records: EvaluationRecord[];
   truncated: boolean;
@@ -805,6 +817,7 @@ function LiveAnalyticsContent({
       ? "Rule-based performance evaluation"
       : "Persisted performance analytics";
   const filters = useAnalyticsFilters(records);
+  const reportRows = useMemo(() => filters.filtered.map((record) => ({ student: record.label, category: record.category, score: record.score, risk: record.risk, classification: record.classification, date: record.timestamp ?? "—" })), [filters.filtered]);
   const scoreByDay = new Map<string, { total: number; count: number }>();
   for (const record of filters.filtered) {
     if (!record.timestamp) continue;
@@ -846,8 +859,19 @@ function LiveAnalyticsContent({
         <DashboardChart title="Score histogram" description="Filtered continuous evaluation scores grouped into percentage bands." data={filteredScoreDistribution} type="histogram" suffix="%" height={230} />
         <DashboardChart title="Risk Distribution" description="Persisted low, medium, high, and unclassified risk levels." data={filteredRiskSeries} type="pie" height={230} />
       </View>
+      <ReportComposer title="Academic Monitoring Report" scopeLabel={role === "academic_admin" ? "Authorized department" : "Assigned class"} description="Persisted APMS performance analytics for your authorized scope." rows={reportRows} />
     </>
   );
+}
+
+function DemoSystemReports() {
+  const rows = useMemo(() => [
+    { recordType: "User", status: "Active", role: "System Admin", scope: "Global", identifier: "DEMO-001" },
+    { recordType: "User", status: "Active", role: "Academic Admin", scope: "Department", identifier: "DEMO-002" },
+    { recordType: "Audit event", status: "Recorded", role: "Sign in", scope: "Authentication", identifier: "DEMO-101" },
+    { recordType: "Backup", status: "Completed", role: "Full", scope: "Protected storage", identifier: "DEMO-201" },
+  ], []);
+  return <ReportComposer title="System Operations Report" scopeLabel="System administration demo" description="Fictional operational account, audit, and backup data for report preview." rows={rows} />;
 }
 
 export function Settings({

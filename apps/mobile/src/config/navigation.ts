@@ -33,7 +33,7 @@ export const NAVIGATION: Record<Role, NavItem[]> = {
     { key: 'overview', label: 'Dashboard', icon: 'home' }, { key: 'admins', label: 'User Management', icon: 'admins' },
     { key: 'setup', label: 'Academic Setup', icon: 'records' },
     { key: 'roles', label: 'Roles & Permissions', icon: 'roles' }, { key: 'backup', label: 'System & Backup Status', icon: 'backup' },
-    { key: 'logs', label: 'Access & System Logs', icon: 'logs' }, { key: 'system', label: 'System Settings', icon: 'system' },
+    { key: 'logs', label: 'Access & System Logs', icon: 'logs' }, { key: 'reports', label: 'System Reports', icon: 'analytics' }, { key: 'system', label: 'System Settings', icon: 'system' },
     { key: 'data-generator', label: 'Data Generator (Dev)', icon: 'records', hidden: !__DEV__ },
     { key: 'settings', label: 'Settings', icon: 'settings' },
   ],

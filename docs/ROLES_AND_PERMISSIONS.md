@@ -50,9 +50,12 @@ system_admin: [
   logs.read,
   logs.export,
   backups.manage,
-  admin_accounts.manage
+  admin_accounts.manage,
+  reports.export.system
 ]
 ```
+
+System Admin reports are limited to operational administration data (accounts, role assignments, audit activity, and backup status). Academic performance reports remain faculty class-scoped or academic-admin department-scoped.
 
 ## 3. Database Security Enforcement
 

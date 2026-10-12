@@ -7,6 +7,10 @@ import {
   calculateTrend,
   IT_GLOBAL_GRADING_SYSTEM,
   validateGradingSystem,
+  validateAiStandingPrediction,
+  validateAiEvaluationScores,
+  validateAiAssessmentScorePrediction,
+  type AiAssessmentConstraint,
   type GradingDefinition,
   validateCsvRows,
   type SwunextAssessmentComponent,
@@ -115,6 +119,8 @@ export type EvaluationRow = {
   riskProbability?: number | null;
   predictionGeneratedAt?: string | null;
   dataBasis?: string | null;
+  modelProvider?: string | null;
+  modelName?: string | null;
   trend: 'improving' | 'stable' | 'declining' | 'unknown';
   factors: string[];
 };
@@ -636,7 +642,7 @@ async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSy
       : Promise.resolve({ data: [], error: null }),
     includeAttendance && sessionIds.length ? fetchAllForIds(sessionIds, (ids, from, to) => client.from('attendance_records').select('attendance_session_id,enrollment_id,status').in('attendance_session_id', ids).order('attendance_session_id').order('enrollment_id').range(from, to), 25) : Promise.resolve({ data: [], error: null }),
     includeEvaluations && enrollmentIds.length ? fetchAllForIds(enrollmentIds, (ids, from, to) => client.from('performance_evaluations').select('enrollment_id,score,risk_level,explanation').in('enrollment_id', ids).order('enrollment_id').range(from, to)) : Promise.resolve({ data: [], error: null }),
-    includeEvaluations && enrollmentIds.length ? fetchAllForIds(enrollmentIds, (ids, from, to) => client.from('performance_predictions').select('enrollment_id,predicted_score,risk_level,trend,confidence,explanation,created_at').in('enrollment_id', ids).order('created_at', { ascending: false }).order('id', { ascending: false }).range(from, to)) : Promise.resolve({ data: [], error: null }),
+    includeEvaluations && enrollmentIds.length ? fetchAllForIds(enrollmentIds, (ids, from, to) => client.from('performance_predictions').select('enrollment_id,predicted_score,risk_level,trend,confidence,explanation,created_at,prediction_run:prediction_runs(model_version:model_versions(provider,name,version))').in('enrollment_id', ids).order('created_at', { ascending: false }).order('id', { ascending: false }).range(from, to)) : Promise.resolve({ data: [], error: null }),
     includeFeedback && enrollmentIds.length ? fetchAllForIds(enrollmentIds, (ids, from, to) => client.from('feedback_records').select('id,enrollment_id,body,category,status,created_at').in('enrollment_id', ids).order('created_at', { ascending: false }).order('id', { ascending: false }).range(from, to)) : Promise.resolve({ data: [], error: null }),
   ]);
   const secondaryError = results.error ?? attendance.error ?? evaluations.error ?? predictions.error ?? feedback.error;
@@ -658,7 +664,9 @@ async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSy
   for (const row of predictions.data ?? []) {
     const current = evaluationMap[row.enrollment_id] ?? { enrollmentId: row.enrollment_id, currentStanding: null, riskLevel: 'unknown', predictedStanding: null, trend: 'unknown', factors: [] };
     if (current.predictedStanding == null) {
-      current.predictedStanding = Number(row.predicted_score); current.riskLevel = row.risk_level; current.trend = row.trend; current.riskProbability = row.confidence == null ? null : Number(row.confidence); current.predictionGeneratedAt = row.created_at; current.dataBasis = (row.explanation as any)?.data_basis ?? null;
+      const predictionRun = Array.isArray(row.prediction_run) ? row.prediction_run[0] : row.prediction_run;
+      const modelVersion = Array.isArray(predictionRun?.model_version) ? predictionRun.model_version[0] : predictionRun?.model_version;
+      current.predictedStanding = Number(row.predicted_score); current.riskLevel = row.risk_level; current.trend = row.trend; current.riskProbability = row.confidence == null ? null : Number(row.confidence); current.predictionGeneratedAt = row.created_at; current.dataBasis = (row.explanation as any)?.data_basis ?? null; current.modelProvider = modelVersion?.provider ?? null; current.modelName = typeof modelVersion?.name === 'string' ? modelVersion.name.split(':').slice(1).join(':') : null;
       current.factors = Array.isArray((row.explanation as any)?.factors) ? (row.explanation as any).factors : current.factors;
       evaluationMap[row.enrollment_id] = current;
     }
@@ -1059,46 +1067,20 @@ export type PredictionResult = {
   trend: 'improving' | 'stable' | 'declining';
   factors: string[];
   modelVersion: string;
+  provider: string;
+  model: string;
+  evaluationScores?: EvaluationValue;
+  assessmentPredictions?: Array<{ assessmentId: string; result: { kind: 'numeric'; value: number; maximum: number } | { kind: 'categorical'; value: string }; confidence?: number | null; evidence?: string[] }>;
   dataBasis: string;
 };
 
-function aiServiceUrl() {
-  return process.env.EXPO_PUBLIC_APMS_AI_SERVICE_URL ?? process.env.APMS_AI_SERVICE_URL ?? '';
-}
-
-export async function runAiPredictions(classId: string, gradingSystem: GradingDefinition, evaluationCriteria: EvaluationDefinition, inputs: PredictionInput[]) {
-  const endpoint = aiServiceUrl();
+export async function runAiPredictions(classId: string, gradingSystem: GradingDefinition, evaluationCriteria: EvaluationDefinition, inputs: PredictionInput[], assessmentInstances: AiAssessmentConstraint[] = []) {
   if (!inputs.length) throw new Error('At least one student needs scores before prediction can run.');
   if (!validateGradingSystem(gradingSystem).valid) throw new Error('The applied grading system is invalid. Fix it before running predictions.');
   if (!validateEvaluationSystem(evaluationCriteria).valid) throw new Error('The applied evaluation criteria are invalid. Fix them before running predictions.');
-  const rawPredictions: { input: PredictionInput; predictedStanding: number; riskProbability: number | null; aiRiskLevel: string | null; trend: PredictionResult['trend']; factors: string[]; modelVersion: string; dataBasis: string }[] = [];
-  if (endpoint) {
-    for (const input of inputs) {
-      const response = await fetch(`${endpoint.replace(/\/$/, '')}/v1/predictions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          enrollment_id: input.enrollmentId,
-          grading_system: gradingSystem,
-          evaluation_criteria: evaluationCriteria,
-          evaluation_values: input.evaluationValues,
-          student_records: input.recordContext,
-        }),
-      });
-      if (!response.ok) throw new Error(`AI prediction failed (${response.status}). Student records remain available.`);
-      const payload = await response.json();
-      rawPredictions.push({
-        input,
-        predictedStanding: Number(payload.predicted_standing),
-        riskProbability: payload.risk_probability == null || !Number.isFinite(Number(payload.risk_probability)) ? null : Number(payload.risk_probability),
-        aiRiskLevel: typeof payload.ai_risk_level === 'string' ? payload.ai_risk_level : typeof payload.risk_level === 'string' ? payload.risk_level : null,
-        trend: ['improving', 'stable', 'declining'].includes(payload.trend) ? payload.trend : 'stable',
-        factors: Array.isArray(payload.factors) ? payload.factors : [],
-        modelVersion: String(payload.model_version ?? 'external-ai-service'),
-        dataBasis: String(payload.data_basis ?? 'applied_schema_context'),
-      });
-    }
-  } else {
+  const rawPredictions: { input: PredictionInput; predictedStanding: number; riskProbability: number | null; aiRiskLevel: string | null; trend: PredictionResult['trend']; factors: string[]; provider: string; model: string; modelVersion: string; evaluationScores?: EvaluationValue; assessmentPredictions?: PredictionResult['assessmentPredictions']; dataBasis: string }[] = [];
+  let savedRunId = '';
+  {
     const { data, error } = await connected().functions.invoke('apms-predictions', {
       body: {
         class_id: classId,
@@ -1107,6 +1089,7 @@ export async function runAiPredictions(classId: string, gradingSystem: GradingDe
         inputs: inputs.map((input) => ({
           enrollment_id: input.enrollmentId,
           evaluation_values: input.evaluationValues,
+          evaluated_risk_level: evaluateStudentPerformanceDetailed(evaluationCriteria, input.evaluationValues).severity,
           records: input.recordContext,
         })),
       },
@@ -1122,28 +1105,57 @@ export async function runAiPredictions(classId: string, gradingSystem: GradingDe
       }
       throw new Error(detail || error.message || 'AI prediction could not run. Student records remain available.');
     }
-    const payload = data as { predictions?: any[]; model_version?: string; data_basis?: string };
-    const resultByEnrollment = new Map((payload.predictions ?? []).map((result) => [result.enrollment_id, result]));
+    const payload = data as { run_id?: string; predictions?: any[]; provider?: string; model?: string; model_version?: string; data_basis?: string };
+    if (!payload.run_id || !['custom', 'gemini', 'openai'].includes(payload.provider ?? '') || !payload.model || !payload.model_version) throw new Error('Prediction response is missing saved-run or AI provider provenance.');
+    savedRunId = payload.run_id;
+    if (!Array.isArray(payload.predictions) || payload.predictions.length !== inputs.length) throw new Error('Prediction response did not include exactly one result per student.');
+    const resultByEnrollment = new Map<string, any>();
+    for (const result of payload.predictions) {
+      if (!result || typeof result.enrollment_id !== 'string' || resultByEnrollment.has(result.enrollment_id)) throw new Error('Prediction response contains a missing or duplicate student result.');
+      resultByEnrollment.set(result.enrollment_id, result);
+    }
     for (const input of inputs) {
       const result = resultByEnrollment.get(input.enrollmentId);
       if (!result) throw new Error('Prediction response did not include every requested student.');
+      const outputValidation = validateAiStandingPrediction(gradingSystem, evaluationCriteria, {
+        predictedStanding: result.predicted_standing,
+        riskProbability: result.risk_probability ?? null,
+        aiRiskLevel: result.ai_risk_level ?? result.risk_level ?? null,
+        trend: result.trend,
+        factors: result.factors,
+      });
+      if (!outputValidation.valid) throw new Error(`The AI provider returned values that do not match the active schemas: ${outputValidation.errors.join(' ')}`);
+      const configuredOutputs = new Set(evaluationCriteria.ai?.outputFields ?? []);
+      const rawEvaluationScores = result.evaluation_scores ?? {};
+      if (!rawEvaluationScores || typeof rawEvaluationScores !== 'object' || Array.isArray(rawEvaluationScores) || (configuredOutputs.has('evaluation_scores') && !result.evaluation_scores) || (!configuredOutputs.has('evaluation_scores') && Object.keys(rawEvaluationScores).length)) throw new Error('The AI provider returned evaluation scores outside the active output contract.');
+      const rawAssessmentPredictions = result.assessment_predictions ?? [];
+      if (!Array.isArray(rawAssessmentPredictions) || (configuredOutputs.has('assessment_score_predictions') && !result.assessment_predictions) || (!configuredOutputs.has('assessment_score_predictions') && rawAssessmentPredictions.length)) throw new Error('The AI provider returned assessment predictions outside the active output contract.');
+      if (configuredOutputs.has('assessment_score_predictions')) {
+        const assessmentValidation = validateAiAssessmentScorePrediction(gradingSystem, assessmentInstances, {
+          predictions: rawAssessmentPredictions.map((item: any) => ({ assessmentRef: item.assessment_id, result: item.result, confidence: item.confidence, evidence: item.evidence })),
+        });
+        if (!assessmentValidation.valid) throw new Error(`AI assessment results do not match the active grading system or assessment instances: ${assessmentValidation.errors.join(' ')}`);
+      }
       rawPredictions.push({
         input,
-        predictedStanding: Number(result.predicted_standing),
-        riskProbability: result.risk_probability == null || !Number.isFinite(Number(result.risk_probability)) ? null : Number(result.risk_probability),
+        predictedStanding: result.predicted_standing,
+        riskProbability: result.risk_probability ?? null,
         aiRiskLevel: typeof result.ai_risk_level === 'string' ? result.ai_risk_level : typeof result.risk_level === 'string' ? result.risk_level : null,
         trend: ['improving', 'stable', 'declining'].includes(result.trend) ? result.trend : 'stable',
         factors: Array.isArray(result.factors) ? result.factors : [],
-        modelVersion: payload.model_version ?? 'unversioned',
+        provider: payload.provider ?? 'unknown',
+        model: payload.model,
+        modelVersion: payload.model_version,
+        evaluationScores: rawEvaluationScores,
+        assessmentPredictions: rawAssessmentPredictions.map((item: any) => ({ assessmentId: item.assessment_id, result: item.result, confidence: item.confidence ?? null, evidence: item.evidence ?? [] })),
         dataBasis: payload.data_basis ?? 'applied_schema_context',
       });
     }
   }
   const predictions: PredictionResult[] = rawPredictions.map((prediction) => {
-    const predictedStanding = Math.min(100, Math.max(0, prediction.predictedStanding));
-    const riskProbability = prediction.riskProbability == null ? null : Math.min(1, Math.max(0, prediction.riskProbability));
-    const values: EvaluationValue = {
-      ...prediction.input.evaluationValues,
+    const predictedStanding = prediction.predictedStanding;
+    const riskProbability = prediction.riskProbability;
+    const modelValues: Record<string, unknown> = {
       predicted_standing: predictedStanding,
       risk_probability: riskProbability,
       model_confidence: riskProbability,
@@ -1152,7 +1164,14 @@ export async function runAiPredictions(classId: string, gradingSystem: GradingDe
       recent_trend: prediction.trend,
       ai_risk_level: prediction.aiRiskLevel,
       prediction_age_hours: 0,
+      ai_factor_count: prediction.factors.length,
+      data_basis: prediction.dataBasis,
+      ...(prediction.evaluationScores ?? {}),
     };
+    const configuredModelValues = Object.fromEntries(Object.entries(modelValues).filter(([key]) => evaluationCriteria.factors.some((factor) => factor.source === key || factor.id === key)));
+    const evaluationValidation = validateAiEvaluationScores(evaluationCriteria, configuredModelValues);
+    if (!evaluationValidation.valid) throw new Error(`AI evaluation values do not match the active evaluation criteria: ${evaluationValidation.errors.join(' ')}`);
+    const values: EvaluationValue = { ...prediction.input.evaluationValues, ...evaluationValidation.values };
     const evaluation = evaluateStudentPerformanceDetailed(evaluationCriteria, values);
     return {
       enrollmentId: prediction.input.enrollmentId,
@@ -1161,27 +1180,15 @@ export async function runAiPredictions(classId: string, gradingSystem: GradingDe
       riskLevel: evaluation.severity,
       trend: prediction.trend,
       factors: prediction.factors,
+      provider: prediction.provider,
+      model: prediction.model,
       modelVersion: prediction.modelVersion,
+      evaluationScores: prediction.evaluationScores,
+      assessmentPredictions: prediction.assessmentPredictions,
       dataBasis: prediction.dataBasis,
     };
   });
-  const { data, error } = await connected().rpc('faculty_save_prediction_run', {
-    p_class_record_id: classId,
-    p_model_name: 'APMS AI Service',
-    p_model_version: predictions[0]?.modelVersion ?? 'unversioned',
-    p_input_snapshot: { grading_system: gradingSystem, evaluation_criteria: evaluationCriteria, inputs, advisory_only: true },
-    p_predictions: predictions.map((prediction) => ({
-      enrollment_id: prediction.enrollmentId,
-      predicted_score: prediction.predictedStanding,
-      trend: prediction.trend,
-      risk_level: prediction.riskLevel,
-      confidence: prediction.riskProbability,
-      factors: prediction.factors,
-      data_basis: prediction.dataBasis,
-    })),
-  });
-  if (error) throw error;
-  return { runId: data as string, predictions };
+  return { runId: savedRunId, predictions };
 }
 
 export async function saveFacultyFeedback(enrollmentId: string, body: string, category: string, status: 'draft' | 'published', feedbackId?: string) {
@@ -1218,9 +1225,9 @@ export async function sendFacultyFeedbackEmail(enrollmentId: string, body: strin
   return result;
 }
 
-export async function generateFacultyFeedbackDraft(classId: string, enrollmentId: string, studentName: string, records: Record<string, unknown>) {
+export async function generateFacultyFeedbackDraft(classId: string, enrollmentId: string, records: Record<string, unknown>) {
   const { data, error } = await connected().functions.invoke('apms-feedback-draft', {
-    body: { class_id: classId, enrollment_id: enrollmentId, student_name: studentName, records },
+    body: { class_id: classId, enrollment_id: enrollmentId, records },
   });
   if (error) {
     let detail = '';
