@@ -6,11 +6,26 @@ dependencies = [
   "fastapi>=0.116,<1",
   "pydantic>=2.11,<3",
   "uvicorn[standard]>=0.35,<1",
+  "jsonschema>=4.23,<5",
 ]
 
+[build-system]
+requires = ["setuptools>=75,<81"]
+build-backend = "setuptools.build_meta"
+
+[project.scripts]
+apms-ai = "apms_ai.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+apms_ai = ["schema_data/grading/*.json", "schema_data/grading/systems/*.json", "schema_data/evaluation/*.json"]
+
 [project.optional-dependencies]
-ml = ["torch>=2.7,<3", "shap>=0.48,<1"]
-test = ["httpx>=0.28,<1", "pytest>=8.4,<9"]
+ml = ["torch>=2.7,<3", "lightning-fabric>=2.5,<3", "numpy>=2,<3", "optuna>=4,<6", "shap>=0.48,<1", "onnx>=1.18,<2", "onnxruntime>=1.22,<2"]
+export = ["torch>=2.7,<3", "onnx>=1.18,<2", "onnxruntime>=1.22,<2"]
+test = ["httpx>=0.28,<1", "pytest>=8.4,<10"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

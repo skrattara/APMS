@@ -1,42 +1,42 @@
+from apms_ai.main import app, registry
 from fastapi.testclient import TestClient
-
-from apms_ai.main import app
-
 
 client = TestClient(app)
 
 
-def test_health_discloses_synthetic_prototype_limitations():
+def test_import_does_not_train_or_enable_model():
+    assert registry.state is None
     response = client.get("/health")
-    assert response.status_code == 200
-    assert response.json()["model_available"] is True
-    assert response.json()["institutionally_validated"] is False
-    assert response.json()["data_basis"] == "controlled_synthetic_demonstration"
+    assert response.status_code == 200 and response.json()["model_available"] is False
+    assert client.get("/ready").status_code == 503
 
 
-def test_prediction_returns_traceable_advisory_output():
-    response = client.post("/v1/predictions", json={
-        "enrollment_id": "fictional-enrollment",
-        "current_standing": 68,
-        "recent_scores": [78, 70, 62],
-        "attendance_rate": 72,
-        "missing_assessment_count": 2,
-    })
-    assert response.status_code == 200
-    result = response.json()
-    assert result["advisory_only"] is True
-    assert result["institutionally_validated"] is False
-    assert result["risk_level"] in {"medium", "high"}
-    assert result["trend"] == "declining"
-    assert result["factors"]
+def test_authentication_and_fail_closed_artifact():
+    payload = {
+        "record_id": "fresh-opaque-ref",
+        "grading_system": {},
+        "evaluation_criteria": {},
+    }
+    assert client.post("/v1/predictions", json=payload).status_code == 401
+    import os
 
-
-def test_invalid_prediction_request_is_rejected():
-    response = client.post("/v1/predictions", json={
-        "enrollment_id": "fictional-enrollment",
-        "current_standing": 120,
-        "recent_scores": [],
-        "attendance_rate": 95,
-        "missing_assessment_count": 0,
-    })
-    assert response.status_code == 422
+    os.environ["APMS_AI_SERVICE_API_KEY"] = "test-secret"
+    response = client.post(
+        "/v1/predictions", json=payload, headers={"Authorization": "Bearer test-secret"}
+    )
+    assert response.status_code == 503
+    assert (
+        client.post(
+            "/v1/predictions", json=payload, headers={"Authorization": "test-secret"}
+        ).status_code
+        == 401
+    )
+    assert (
+        client.post(
+            "/v1/predictions",
+            json={**payload, "unexpected": "ignored"},
+            headers={"Authorization": "Bearer test-secret"},
+        ).status_code
+        == 422
+    )
+    del os.environ["APMS_AI_SERVICE_API_KEY"]

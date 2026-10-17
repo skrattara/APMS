@@ -14,6 +14,7 @@ import {
 } from "react-native";
 
 import { useAuth } from "@/auth/AuthProvider";
+import { getRememberedPortalPath } from "@/auth/routeMemory";
 import { AppIcon } from "@/components/Icon";
 import { colors } from "@/theme/tokens";
 
@@ -29,11 +30,15 @@ export default function LoginPage() {
   const {
     user,
     loading,
+    passwordRecovery,
+    passwordRecoveryError,
     signIn,
     mfaFactorId,
     verifyMfa,
     signOut,
     signInWithGoogle,
+    authError,
+    clearAuthError,
     requestPasswordReset,
     configured,
     demoMode,
@@ -44,6 +49,7 @@ export default function LoginPage() {
   const [password, setPassword] = useState("");
   const [passwordVisible, setPasswordVisible] = useState(false);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [mfaCode, setMfaCode] = useState("");
   const [mfaError, setMfaError] = useState("");
@@ -52,6 +58,8 @@ export default function LoginPage() {
   );
   const submit = async () => {
     setError("");
+    clearAuthError();
+    setNotice("");
     if (!email.trim() || !password) {
       setError("Email and password are required.");
       return;
@@ -74,6 +82,8 @@ export default function LoginPage() {
   };
   const googleSignIn = async () => {
     setError("");
+    clearAuthError();
+    setNotice("");
     setSubmitting(true);
     const result = await signInWithGoogle();
     setSubmitting(false);
@@ -86,13 +96,23 @@ export default function LoginPage() {
     if (!result.ok) { setMfaError(result.message); return; }
     setMfaCode("");
   };
+  const sendPasswordReset = async () => {
+    setError("");
+    setNotice("");
+    setSubmitting(true);
+    const result = await requestPasswordReset(email);
+    setSubmitting(false);
+    if (result.ok) setNotice(result.message);
+    else setError(result.message);
+  };
   if (loading)
     return (
       <View style={styles.loading}>
         <Text style={styles.loadingText}>Loading APMS…</Text>
       </View>
     );
-  if (user) return <Redirect href={homePath(user.role)} />;
+  if (passwordRecovery || passwordRecoveryError) return <Redirect href="/reset-password" />;
+  if (user) return <Redirect href={getRememberedPortalPath(user.role) ?? homePath(user.role)} />;
   if (mfaFactorId) return (
     <View style={styles.challengePage}>
       <View style={styles.challengeCard}>
@@ -182,20 +202,18 @@ export default function LoginPage() {
               </Pressable>
               <Pressable
                 accessibilityRole="button"
-                onPress={() =>
-                  void requestPasswordReset(email).then((result) =>
-                    setError(result.message),
-                  )
-                }
+                disabled={submitting}
+                onPress={() => void sendPasswordReset()}
               >
                 <Text style={styles.forgot}>Forgot password?</Text>
               </Pressable>
             </View>
-            {error ? (
+            {error || authError ? (
               <Text accessibilityRole="alert" style={styles.error}>
-                {error}
+                {error || authError}
               </Text>
             ) : null}
+            {notice ? <Text accessibilityRole="alert" style={styles.notice}>{notice}</Text> : null}
             <Pressable
               accessibilityRole="button"
               disabled={submitting}
@@ -388,6 +406,7 @@ const styles = StyleSheet.create({
   remember: { color: "#6A7282", fontSize: 11, fontWeight: "500" },
   forgot: { color: colors.brand, fontSize: 11 },
   error: { color: colors.danger, fontSize: 10, marginBottom: 5 },
+  notice: { color: colors.success, fontSize: 10, lineHeight: 15, marginBottom: 5 },
   signIn: {
     height: 36,
     backgroundColor: colors.brand,

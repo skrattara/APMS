@@ -1,0 +1,5 @@
+# Model/data artifacts are local, versioned by their bundle manifests.
+artifacts/
+runs/
+tmp-model*/
+tmp-synthetic.jsonl

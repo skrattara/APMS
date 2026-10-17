@@ -1,0 +1,17 @@
+{
+  "seed": 42,
+  "epochs": 16,
+  "batch_size": 32,
+  "width": 32,
+  "layers": 1,
+  "heads": 4,
+  "patience": 4,
+  "learning_rate": 0.001,
+  "accelerator": "cpu",
+  "numeric_residual": false,
+  "input_dropout": 0.0,
+  "numeric_center_loss_weight": 0.0,
+  "dropout": 0.1,
+  "weight_decay": 0.01,
+  "min_delta": 0.0
+}

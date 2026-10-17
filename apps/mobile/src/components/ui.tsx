@@ -19,20 +19,49 @@ import {
 import { colors, radius, shadow, space } from "@/theme/tokens";
 import { AppIcon } from "@/components/Icon";
 import type { AppIconName } from "@/components/Icon";
+import { formatStudentId, formatStudentIdInput } from "@/utils/studentId";
 
 function buttonIcon(label: string): AppIconName {
   const action = label.trim().toLowerCase();
-  if (/delete|remove|deactivate|reject|clear/.test(action)) return "delete";
-  if (/edit|manage|update|review/.test(action)) return "edit";
+  if (/undo/.test(action)) return "undo";
+  if (/redo/.test(action)) return "redo";
+  if (/restore|reinstate/.test(action)) return "restore";
+  if (/history|changes/.test(action)) return "history";
+  if (/archive/.test(action)) return "archive";
+  if (/^↑$|move up|make top level|promote/.test(action)) return "moveUp";
+  if (/^↓$|move down|demote/.test(action)) return "moveDown";
+  if (/previous|back/.test(action)) return "previous";
+  if (/next|forward/.test(action)) return "next";
+  if (/continue/.test(action)) return "next";
+  if (/try again|retry|refresh/.test(action)) return "refresh";
+  if (/test connection/.test(action)) return "connection";
+  if (/enable mfa|security/.test(action)) return "security";
+  if (/mark .* read|done|all present/.test(action)) return "apply";
+  if (/all absent/.test(action)) return "absent";
+  if (/select all/.test(action)) return "select";
+  if (/^send|send question/.test(action)) return "send";
+  if (/run ai|generate|draft with ai|draft with gemini|prepare with another ai/.test(action)) return "assistant";
+  if (/validate|grading criteria/.test(action)) return "criteria";
+  if (/performance evaluation|evaluation criteria|prediction/.test(action)) return "evaluation";
+  if (/grading systems/.test(action)) return "grades";
+  if (/clear|reset/.test(action)) return "clear";
+  if (/delete|remove|deactivate|reject/.test(action)) return "delete";
+  if (/manage/.test(action)) return "settings";
+  if (/edit|update|review/.test(action)) return "edit";
   if (/save|submit/.test(action)) return "save";
   if (/confirm|approve|record/.test(action)) return "apply";
   if (/export|download|report/.test(action)) return "download";
-  if (/import|upload|browse|choose file/.test(action)) return "upload";
+  if (/import|upload|browse|choose|photo/.test(action)) return "upload";
+  if (/write batch/.test(action)) return "save";
+  if (/request subject/.test(action)) return "add";
   if (/search|filter/.test(action)) return "search";
-  if (/retry|refresh/.test(action)) return "refresh";
   if (/close|cancel|back/.test(action)) return "cancel";
   if (/show|view|open|details/.test(action)) return "show";
   if (/hide/.test(action)) return "hide";
+  if (/expand/.test(action)) return "expand";
+  if (/collapse/.test(action)) return "collapse";
+  if (/duplicate|copy/.test(action)) return "copy";
+  if (/paste/.test(action)) return "paste";
   if (/apply|assign/.test(action)) return "apply";
   if (/create|add|new/.test(action)) return "add";
   if (/log ?out|sign ?out/.test(action)) return "logout";
@@ -62,6 +91,7 @@ export function Button({
   description?: string;
 }) {
   const hint = description ?? buttonDescription(label);
+  const compactControls = useContext(CompactControlsContext);
   return (
     <Pressable
       accessibilityRole="button"
@@ -73,6 +103,7 @@ export function Button({
       onPress={onPress}
       style={({ pressed }) => [
         styles.button,
+        compactControls && styles.buttonDense,
         styles[`button_${variant}`],
         pressed && styles.pressed,
         (disabled || loading) && styles.disabled,
@@ -93,6 +124,7 @@ export function Button({
           <Text
             style={[
               styles.buttonText,
+              compactControls && styles.buttonTextDense,
               variant !== "primary" &&
                 variant !== "danger" &&
                 styles.buttonTextDark,
@@ -129,20 +161,24 @@ export function Field({
   helpExample?: string;
 }) {
   const [secureVisible, setSecureVisible] = useState(false);
+  const compactControls = useContext(CompactControlsContext);
   const isSecure = Boolean(props.secureTextEntry);
+  const isStudentId = /student\s*(?:id|number)\b/i.test(label);
   return (
-    <View style={[styles.field, compact && styles.compactField, containerStyle]}>
+    <View style={[styles.field, compactControls && !props.multiline && styles.fieldDense, compact && styles.compactField, containerStyle]}>
       <View style={styles.labelRow}><Text style={[styles.label, compact && styles.compactLabel]}>{label}</Text>{helpText ? <HelpTooltip title={label} text={helpText} example={helpExample} /> : null}</View>
       <View>
         <TextInput
           {...props}
+          value={isStudentId && typeof props.value === "string" ? formatStudentId(props.value) : props.value}
+          onChangeText={isStudentId && props.onChangeText ? (value) => props.onChangeText?.(formatStudentIdInput(value)) : props.onChangeText}
           ref={inputRef}
           {...(onKeyDown ? ({ onKeyDown } as any) : {})}
           {...(Platform.OS === "web" && inputType ? ({ type: inputType } as never) : {})}
           secureTextEntry={isSecure ? !secureVisible : props.secureTextEntry}
           accessibilityLabel={props.accessibilityLabel ?? label}
           placeholderTextColor="#99A1AF"
-          style={[styles.input, compact && styles.compactInput, isSecure && styles.secureInput, error && styles.inputError, props.style]}
+          style={[styles.input, compactControls && !props.multiline && styles.inputDense, compact && styles.compactInput, isSecure && styles.secureInput, error && styles.inputError, props.style]}
         />
         {isSecure ? (
           <Pressable
@@ -173,19 +209,20 @@ export function DateField({
   error?: string;
   containerStyle?: StyleProp<ViewStyle>;
 }) {
+  const compactControls = useContext(CompactControlsContext);
   if (Platform.OS !== "web") {
     return <Field label={label} value={value} onChangeText={onChange} placeholder="YYYY-MM-DD" error={error} containerStyle={containerStyle} />;
   }
 
   return (
-    <View style={[styles.field, containerStyle]}>
+    <View style={[styles.field, compactControls && styles.fieldDense, containerStyle]}>
       <Text style={styles.label}>{label}</Text>
       {createElement("input", {
         type: "date",
         value,
         onChange: (event: ChangeEvent<HTMLInputElement>) => onChange(event.currentTarget.value),
         "aria-label": label,
-        style: styles.webDateInput,
+        style: compactControls ? styles.webDateInputDense : styles.webDateInput,
       })}
       {error ? <Text style={styles.error}>{error}</Text> : null}
     </View>
@@ -237,12 +274,13 @@ export function SelectField({
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
+  const compactControls = useContext(CompactControlsContext);
   const selected = options.find((option) => option.value === value);
   const filteredOptions = searchable
     ? options.filter((option) => option.label.toLowerCase().includes(query.trim().toLowerCase()))
     : options;
   return (
-    <View style={[styles.field, compact && styles.compactField, containerStyle]}>
+    <View style={[styles.field, compactControls && styles.fieldDense, compact && styles.compactField, containerStyle]}>
       <View style={styles.labelRow}><Text style={[styles.label, compact && styles.compactLabel]}>{label}</Text>{helpText ? <HelpTooltip title={label} text={helpText} example={helpExample} /> : null}</View>
       <Pressable
         ref={controlRef as any}
@@ -253,7 +291,7 @@ export function SelectField({
         onPress={() => { setQuery(''); setOpen(true); }}
         {...(controlDataSet ? ({ dataSet: controlDataSet } as any) : {})}
         {...(onKeyDown ? ({ onKeyDown } as any) : {})}
-        style={[styles.input, styles.selectInput, compact && styles.compactSelectInput, disabled && styles.disabled, controlStyle]}
+        style={[styles.input, compactControls && styles.inputDense, styles.selectInput, compact && styles.compactSelectInput, disabled && styles.disabled, controlStyle]}
       >
         <Text
           style={[styles.selectValue, compact && styles.compactSelectValue, !selected && styles.selectPlaceholder, valueStyle]}
@@ -444,6 +482,7 @@ export function DataTable<Row extends DataTableCell[]>({
   columnWidths?: number[];
   compact?: boolean;
 }) {
+  const studentIdColumns = columns.map((column) => /student\s*(?:id|number)\b/i.test(column));
   return (
     <ScrollView
       horizontal
@@ -453,7 +492,7 @@ export function DataTable<Row extends DataTableCell[]>({
       <View style={styles.table}>
         <View style={[styles.tableRow, styles.tableHead, compact && styles.compactTableRow]}>
           {columns.map((column, index) => (
-            <Text key={column} style={[styles.cell, styles.headCell, compact && styles.compactCell, columnWidths?.[index] ? { width: columnWidths[index], flexGrow: 0, flexShrink: 0 } : null]}>
+            <Text key={column} style={[styles.cell, styles.headCell, compact && styles.compactCell, columnWidths?.[index] ? { width: columnWidths[index], flexBasis: columnWidths[index], flexGrow: 0, flexShrink: 0 } : null]}>
               {column}
             </Text>
           ))}
@@ -474,7 +513,7 @@ export function DataTable<Row extends DataTableCell[]>({
             ]}
           >
               {row.map((cell, cellIndex) => (
-                <View key={`${cell}-${cellIndex}`} style={[styles.cell, compact && styles.compactCell, columnWidths?.[cellIndex] ? { width: columnWidths[cellIndex], flexGrow: 0, flexShrink: 0 } : null]}>
+                <View key={`${cell}-${cellIndex}`} style={[styles.cell, compact && styles.compactCell, columnWidths?.[cellIndex] ? { width: columnWidths[cellIndex], flexBasis: columnWidths[cellIndex], flexGrow: 0, flexShrink: 0 } : null]}>
                   {cellIndex === row.length - 1 && isTextCell(cell) && isStatusCell(cell) ? (
                     <Badge
                       tone={
@@ -488,7 +527,7 @@ export function DataTable<Row extends DataTableCell[]>({
                       {cell}
                     </Badge>
                   ) : (
-                    isTextCell(cell) ? <Text style={styles.cellText}>{cell}</Text> : cell
+                    isTextCell(cell) ? <Text style={styles.cellText}>{studentIdColumns[cellIndex] ? formatStudentId(cell) : cell}</Text> : cell
                   )}
                 </View>
               ))}
@@ -648,8 +687,9 @@ export function SearchFilter({
   placeholder?: string;
   accessibilityLabel?: string;
 }) {
+  const compactControls = useContext(CompactControlsContext);
   return (
-    <View style={styles.search}>
+    <View style={[styles.search, compactControls && styles.searchDense]}>
       <AppIcon name="search" size={18} color={colors.textMuted} />
       <TextInput
         accessibilityLabel={accessibilityLabel}
@@ -657,7 +697,7 @@ export function SearchFilter({
         onChangeText={onChange}
         placeholder={placeholder}
         placeholderTextColor="#99A1AF"
-        style={styles.searchInput}
+        style={[styles.searchInput, compactControls && styles.searchInputDense]}
       />
     </View>
   );
@@ -665,6 +705,12 @@ export function SearchFilter({
 
 type ToastState = { message: string; show: (message: string) => void; clear: () => void };
 const ToastContext = createContext<ToastState | null>(null);
+const CompactControlsContext = createContext(false);
+
+export function CompactControlsProvider({ children }: PropsWithChildren) {
+  return <CompactControlsContext.Provider value={true}>{children}</CompactControlsContext.Provider>;
+}
+const unavailableToast: ToastState = { message: '', show: () => undefined, clear: () => undefined };
 
 export function ToastProvider({ children }: PropsWithChildren) {
   const [message, setMessage] = useState("");
@@ -696,11 +742,64 @@ export function ToastProvider({ children }: PropsWithChildren) {
   );
 }
 
+export function RangeSlider({
+  label,
+  value,
+  onChange,
+  minimum = 0,
+  maximum = 12,
+}: {
+  label: string;
+  value: number;
+  onChange: (value: number) => void;
+  minimum?: number;
+  maximum?: number;
+}) {
+  const [trackWidth, setTrackWidth] = useState(0);
+  const range = Math.max(1, maximum - minimum);
+  const ratio = Math.max(0, Math.min(1, (value - minimum) / range));
+  const setFromPosition = (event: any) => {
+    if (!trackWidth) return;
+    const x = Number(event.nativeEvent.locationX);
+    if (!Number.isFinite(x)) return;
+    const position = Math.max(0, Math.min(1, x / trackWidth));
+    onChange(minimum + Math.round(position * range));
+  };
+  const adjust = (direction: number) => onChange(Math.max(minimum, Math.min(maximum, value + direction)));
+  return (
+    <View style={styles.rangeSlider}>
+      <View style={styles.rangeSliderLabelRow}>
+        <Text style={styles.label}>{label}</Text>
+        <Text accessibilityLiveRegion="polite" style={styles.rangeSliderValue}>{value} {value === 1 ? 'unit' : 'units'}</Text>
+      </View>
+      <View
+        accessibilityRole="adjustable"
+        accessibilityLabel={label}
+        accessibilityValue={{ min: minimum, max: maximum, now: value }}
+        accessibilityActions={[{ name: 'increment' }, { name: 'decrement' }]}
+        onAccessibilityAction={(event) => adjust(event.nativeEvent.actionName === 'increment' ? 1 : -1)}
+        onLayout={(event) => setTrackWidth(event.nativeEvent.layout.width)}
+        onStartShouldSetResponder={() => true}
+        onMoveShouldSetResponder={() => true}
+        onResponderGrant={setFromPosition}
+        onResponderMove={setFromPosition}
+        style={styles.rangeSliderTouchArea}
+      >
+        <View pointerEvents="none" style={styles.rangeSliderTrack}>
+          <View style={[styles.rangeSliderProgress, { width: `${ratio * 100}%` }]} />
+          <View style={[styles.rangeSliderThumb, { left: `${ratio * 100}%` }]} />
+        </View>
+      </View>
+      <View style={styles.rangeSliderEndpoints}><Text style={styles.rangeSliderEndpoint}>{minimum}</Text><Text style={styles.rangeSliderEndpoint}>{maximum}</Text></View>
+    </View>
+  );
+}
+
 export function RefreshIndicator({ visible, label = "Updating records…" }: { visible: boolean; label?: string }) {
   if (!visible) return null;
   return (
     <View pointerEvents="none" accessibilityRole="progressbar" accessibilityLabel={label} accessibilityLiveRegion="polite" style={styles.refreshIndicator}>
-      <ActivityIndicator size="small" color={colors.brand} />
+      <ActivityIndicator size="small" color="#FFF" />
       <Text style={styles.refreshIndicatorText}>{label}</Text>
     </View>
   );
@@ -766,8 +865,9 @@ export function HelpTooltip({ title, text, example }: { title: string; text: str
 
 export function useToast() {
   const toast = useContext(ToastContext);
-  if (!toast) throw new Error("useToast must be used inside ToastProvider.");
-  return toast;
+  // The app root wraps every route in ToastProvider. Keep transient renders
+  // during Fast Refresh or isolated route previews from crashing the screen.
+  return toast ?? unavailableToast;
 }
 
 const styles = StyleSheet.create({
@@ -779,6 +879,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
     backgroundColor: colors.brand,
   },
+  buttonDense: { minHeight: 36, paddingHorizontal: 15 },
   button_primary: { backgroundColor: colors.brand },
   button_secondary: {
     backgroundColor: colors.surface,
@@ -790,11 +891,13 @@ const styles = StyleSheet.create({
   pressed: { opacity: 0.78, transform: [{ scale: 0.96 }] },
   disabled: { opacity: 0.5 },
   buttonText: { color: "#FFF", fontSize: 13, fontWeight: "600" },
+  buttonTextDense: { fontSize: 12 },
   buttonTextDark: { color: colors.text },
   buttonContent: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 7 },
-  refreshIndicator: { position: "absolute", top: 0, right: 0, zIndex: 10, flexDirection: "row", alignItems: "center", gap: 7, minHeight: 24 },
-  refreshIndicatorText: { color: colors.textMuted, fontSize: 11 },
+  refreshIndicator: { position: "absolute", top: 24, right: 24, zIndex: 10, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 16, paddingVertical: 12, borderRadius: radius.medium, backgroundColor: "rgba(16, 42, 34, 0.86)", ...shadow },
+  refreshIndicatorText: { color: "#FFF", fontSize: 13 },
   field: { gap: 6 },
+  fieldDense: { gap: 4 },
   label: { color: colors.text, fontSize: 13, fontWeight: "600" },
   compactField: { gap: 2 },
   compactLabel: { fontSize: 9, lineHeight: 10 },
@@ -802,6 +905,7 @@ const styles = StyleSheet.create({
   compactSelectInput: { minHeight: 24, height: 25, paddingHorizontal: 5, borderRadius: 4 },
   compactSelectValue: { fontSize: 11 },
   labelRow: { flexDirection: "row", alignItems: "center", gap: 6 },
+  studentIdValidation: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", gap: 6 },
   helpTooltipOverlay: { flex: 1, position: "relative", backgroundColor: "transparent" },
   helpTooltipButton: { width: 20, height: 20, borderRadius: 10, borderWidth: 1, borderColor: "#AAB4C3", backgroundColor: "#FFF", alignItems: "center", justifyContent: "center" },
   helpTooltipButtonText: { color: colors.brand, fontSize: 12, fontWeight: "800", lineHeight: 16 },
@@ -837,6 +941,8 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontFamily: "inherit",
   } as never,
+  webDateInputDense: { boxSizing: "border-box", width: "100%", height: 40, border: "1px solid #D1D5DB", borderRadius: radius.small, paddingHorizontal: 10, paddingVertical: 0, backgroundColor: "#FFF", color: colors.text, fontSize: 13, fontFamily: "inherit" } as never,
+  inputDense: { minHeight: 40, height: 40, paddingHorizontal: 9, paddingVertical: 0, fontSize: Platform.OS === "web" ? 13 : 15, borderRadius: radius.small },
   inputError: { borderColor: colors.danger },
   secureInput: { paddingRight: 48 },
   visibilityToggle: {
@@ -1032,4 +1138,15 @@ const styles = StyleSheet.create({
     color: colors.text,
     fontSize: Platform.OS === "web" ? 13 : 16,
   },
+  searchDense: { paddingVertical: 4, paddingHorizontal: 8, gap: 6 },
+  searchInputDense: { paddingHorizontal: 5, fontSize: Platform.OS === "web" ? 12 : 15 },
+  rangeSlider: { marginBottom: 14 },
+  rangeSliderLabelRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 4 },
+  rangeSliderValue: { color: colors.brand, fontSize: 13, fontWeight: "700" },
+  rangeSliderTouchArea: { height: 34, justifyContent: "center", paddingHorizontal: 8, cursor: "pointer" as any },
+  rangeSliderTrack: { height: 6, borderRadius: 4, backgroundColor: colors.border, justifyContent: "center" },
+  rangeSliderProgress: { height: 6, borderRadius: 4, backgroundColor: colors.brand },
+  rangeSliderThumb: { position: "absolute", marginLeft: -9, width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: colors.brand, backgroundColor: "#FFF", shadowColor: "#000", shadowOpacity: 0.16, shadowRadius: 2, elevation: 2 },
+  rangeSliderEndpoints: { flexDirection: "row", justifyContent: "space-between", marginTop: -2 },
+  rangeSliderEndpoint: { color: colors.textMuted, fontSize: 11 },
 });

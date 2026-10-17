@@ -6,13 +6,15 @@ export type AppIconName =
   | 'analytics' | 'assistant' | 'faculty' | 'criteria' | 'evaluation' | 'events'
   | 'roles' | 'logs' | 'system' | 'backup' | 'admins' | 'security'
   | 'notifications' | 'info' | 'logout' | 'menu' | 'search' | 'email'
-  | 'password' | 'visibility' | 'visibilityOff' | 'checkbox' | 'brand'
+  | 'password' | 'visibility' | 'visibilityOff' | 'checkbox' | 'checkboxChecked' | 'brand'
   | 'trend' | 'chart' | 'person' | 'error' | 'denied' | 'empty' | 'success'
   | 'metric' | 'chevronDown'
   | 'copy' | 'paste' | 'clear' | 'sortAscending' | 'sortDescending' | 'filter'
   | 'format'
   | 'hide' | 'show' | 'expand' | 'collapse' | 'edit' | 'delete'
-  | 'add' | 'save' | 'download' | 'upload' | 'cancel' | 'refresh' | 'apply';
+  | 'add' | 'save' | 'download' | 'upload' | 'cancel' | 'refresh' | 'apply'
+  | 'undo' | 'redo' | 'previous' | 'next' | 'history' | 'restore' | 'archive'
+  | 'moveUp' | 'moveDown' | 'send' | 'connection' | 'select' | 'absent';
 
 const ICONS: Record<AppIconName, SymbolViewProps['name']> = {
   home: { ios: 'house.fill', android: 'home', web: 'home' },
@@ -43,6 +45,7 @@ const ICONS: Record<AppIconName, SymbolViewProps['name']> = {
   visibility: { ios: 'eye.fill', android: 'visibility', web: 'visibility' },
   visibilityOff: { ios: 'eye.slash.fill', android: 'visibility_off', web: 'visibility_off' },
   checkbox: { ios: 'square', android: 'check_box_outline_blank', web: 'check_box_outline_blank' },
+  checkboxChecked: { ios: 'checkmark.square.fill', android: 'check_box', web: 'check_box' },
   brand: { ios: 'chart.line.uptrend.xyaxis', android: 'trending_up', web: 'trending_up' },
   trend: { ios: 'chart.line.uptrend.xyaxis', android: 'trending_up', web: 'trending_up' },
   chart: { ios: 'chart.bar.fill', android: 'bar_chart', web: 'bar_chart' },
@@ -73,6 +76,19 @@ const ICONS: Record<AppIconName, SymbolViewProps['name']> = {
   cancel: { ios: 'xmark', android: 'close', web: 'close' },
   refresh: { ios: 'arrow.clockwise', android: 'refresh', web: 'refresh' },
   apply: { ios: 'checkmark', android: 'done', web: 'done' },
+  undo: { ios: 'arrow.uturn.backward', android: 'undo', web: 'undo' },
+  redo: { ios: 'arrow.uturn.forward', android: 'redo', web: 'redo' },
+  previous: { ios: 'chevron.left', android: 'arrow_back', web: 'arrow_back' },
+  next: { ios: 'chevron.right', android: 'arrow_forward', web: 'arrow_forward' },
+  history: { ios: 'clock.arrow.circlepath', android: 'history', web: 'history' },
+  restore: { ios: 'arrow.uturn.backward', android: 'restore', web: 'restore' },
+  archive: { ios: 'archivebox.fill', android: 'archive', web: 'archive' },
+  moveUp: { ios: 'arrow.up', android: 'arrow_upward', web: 'arrow_upward' },
+  moveDown: { ios: 'arrow.down', android: 'arrow_downward', web: 'arrow_downward' },
+  send: { ios: 'paperplane.fill', android: 'send', web: 'send' },
+  connection: { ios: 'cable.connector', android: 'lan', web: 'lan' },
+  select: { ios: 'checkmark.square.fill', android: 'select_check_box', web: 'select_check_box' },
+  absent: { ios: 'person.crop.circle.badge.xmark', android: 'person_off', web: 'person_off' },
 };
 
 export function AppIcon({ name, size = 18, color, style }: { name: AppIconName; size?: number; color: string; style?: StyleProp<ViewStyle> }) {

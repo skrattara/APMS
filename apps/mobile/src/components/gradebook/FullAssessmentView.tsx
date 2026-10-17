@@ -12,6 +12,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { getErrorMessage } from '@/services/errors';
 import { useAuth } from '@/auth/AuthProvider';
 import { Badge, Button, Field, PageState, SelectField } from '@/components/ui';
+import { formatStudentId, normalizeStudentId } from '@/utils/studentId';
 import { AppIcon, type AppIconName } from '@/components/Icon';
 import { colors } from '@/theme/tokens';
 import type { ClassWorkspace, FacultyAssessment, GradebookHistoryCursor, GradebookHistoryPage, RosterStudent } from '@/services/faculty';
@@ -416,7 +417,7 @@ const FullGradebookRow = memo(function FullGradebookRow(row: FullGradebookRowPro
     <View style={styles.fullTableRow}>
       {row.showClassNumber ? <View {...({ dataSet: { gradebookCol: row.columnCssKey('student_class_number'), gradebookColumnId: 'student_class_number', gradebookStudent: student.enrollmentId, gradebookHoverCell: 'true' } } as any)} {...row.columnHoverProps(['student_class_number'])} style={[styles.fullClassNumberColumn, { width: row.classNumberWidth }, Platform.OS === 'web' ? { position: 'sticky', left: row.studentColumnOffsets.classNumber, zIndex: 63, backgroundColor: colors.surface } as any : null, containerFormatStyle(rowConditionalStyle), hoverFormatStyle(rowConditionalStyle?.backgroundColor)]}><Text style={[styles.fullStudentMeta, textFormatStyle(rowConditionalStyle)]}>{student.classNumber}</Text></View> : null}
       {row.showStudentName ? <View {...({ dataSet: { gradebookCol: row.columnCssKey('student_name'), gradebookColumnId: 'student_name', gradebookStudent: student.enrollmentId, gradebookHoverCell: 'true' } } as any)} {...row.columnHoverProps(['student_name'])} style={[styles.fullStudentNameColumn, { width: row.studentNameWidth, position: 'relative' }, Platform.OS === 'web' ? { position: 'sticky', left: row.studentColumnOffsets.name, zIndex: 62, backgroundColor: colors.surface } as any : null, containerFormatStyle(rowConditionalStyle), hoverFormatStyle(rowConditionalStyle?.backgroundColor)]}><Text style={[styles.fullStudentName, textFormatStyle(rowConditionalStyle)]}>{student.name}</Text></View> : null}
-      {row.showStudentId ? <View {...({ dataSet: { gradebookCol: row.columnCssKey('student_id'), gradebookColumnId: 'student_id', gradebookStudent: student.enrollmentId, gradebookHoverCell: 'true' } } as any)} {...row.columnHoverProps(['student_id'])} style={[styles.fullStudentIdColumn, { width: row.studentIdWidth }, Platform.OS === 'web' ? { position: 'sticky', left: row.studentColumnOffsets.id, zIndex: 61, backgroundColor: colors.surface } as any : null, containerFormatStyle(rowConditionalStyle), hoverFormatStyle(rowConditionalStyle?.backgroundColor)]}><Text style={[styles.fullStudentMeta, textFormatStyle(rowConditionalStyle)]}>{student.institutionalId}</Text></View> : null}
+      {row.showStudentId ? <View {...({ dataSet: { gradebookCol: row.columnCssKey('student_id'), gradebookColumnId: 'student_id', gradebookStudent: student.enrollmentId, gradebookHoverCell: 'true' } } as any)} {...row.columnHoverProps(['student_id'])} style={[styles.fullStudentIdColumn, { width: row.studentIdWidth }, Platform.OS === 'web' ? { position: 'sticky', left: row.studentColumnOffsets.id, zIndex: 61, backgroundColor: colors.surface } as any : null, containerFormatStyle(rowConditionalStyle), hoverFormatStyle(rowConditionalStyle?.backgroundColor)]}><Text style={[styles.fullStudentMeta, textFormatStyle(rowConditionalStyle)]}>{formatStudentId(student.institutionalId)}</Text></View> : null}
       {row.showAnonymousId ? <View {...({ dataSet: { gradebookCol: row.columnCssKey('student_anonymous_id'), gradebookColumnId: 'student_anonymous_id', gradebookStudent: student.enrollmentId, gradebookHoverCell: 'true' } } as any)} {...row.columnHoverProps(['student_anonymous_id'])} style={[styles.fullStudentIdColumn, { width: row.anonymousIdWidth }, Platform.OS === 'web' ? { position: 'sticky', left: row.studentColumnOffsets.anonymous, zIndex: 60, backgroundColor: colors.surface } as any : null, containerFormatStyle(rowConditionalStyle), hoverFormatStyle(rowConditionalStyle?.backgroundColor)]}><Text style={[styles.fullStudentMeta, textFormatStyle(rowConditionalStyle)]}>{row.anonymousId}</Text></View> : null}
       <View pointerEvents="none" style={{ width: row.leftSpacerWidth, flexShrink: 0 }} />
       {columns.map((column) => {
@@ -1125,7 +1126,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
   const rowValue = useCallback((student: RosterStudent, key: string) => {
     if (key === 'student_class_number') return student.classNumber ?? '';
     if (key === 'student_name') return student.name ?? '';
-    if (key === 'student_id') return student.institutionalId ?? '';
+    if (key === 'student_id') return formatStudentId(student.institutionalId ?? '');
     const column = columnsById.get(key);
     if (!column) return '';
     return displayedFullViewColumnValue(column, student.enrollmentId, gradeResults.get(student.enrollmentId) ?? calculateFullViewGrades(workspace, student.enrollmentId, gradingSystem, props.values, missingScoreHandling), workspace, props.values, gradingSystem, calculatedCellDisplay);
@@ -1143,8 +1144,8 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
   };
   const filteredStudents = useMemo(() => Object.keys(rowFilters).length ? props.allStudents.filter((student) => Object.entries(rowFilters).every(([key, filter]) => {
     const raw = String(activeRowValue(student, key) ?? '').trim();
-    const actual = raw.toLocaleLowerCase();
-    const expected = filter.value.trim().toLocaleLowerCase();
+    const actual = key === 'student_id' ? normalizeStudentId(raw) : raw.toLocaleLowerCase();
+    const expected = key === 'student_id' ? normalizeStudentId(filter.value) : filter.value.trim().toLocaleLowerCase();
     switch (filter.operator) {
       case 'not_equals': case 'is_not': return actual !== expected;
       case 'contains': return actual.includes(expected);
@@ -1353,7 +1354,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
   const downloadScoreImportTemplate = async () => {
     const sheetRows = [
       ['Student ID', 'Student name', ...importAssessmentColumns.map((item) => item.header)],
-      ...workspace.students.map((student) => [student.institutionalId, student.name, ...importAssessmentColumns.map(() => '')]),
+      ...workspace.students.map((student) => [formatStudentId(student.institutionalId), student.name, ...importAssessmentColumns.map(() => '')]),
     ];
     const workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, XLSX.utils.aoa_to_sheet(sheetRows), 'Scores');
@@ -1387,13 +1388,13 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
         if (match) assessmentIndexByColumn.set(index, match);
       });
       if (!assessmentIndexByColumn.size) throw new Error('No assessment columns matched. Use the template for this class and keep its assessment headers unchanged.');
-      const studentById = new Map(workspace.students.map((student) => [student.institutionalId.trim().toLocaleLowerCase(), student]));
+      const studentById = new Map(workspace.students.map((student) => [normalizeStudentId(student.institutionalId), student]));
       const seenStudentIds = new Set<string>();
       const previewRows = rows.slice(1).flatMap((cells) => {
         const values = cells as unknown[];
         const rawId = String(values[studentIdIndex] ?? '').trim();
         if (!rawId) return [];
-        const normalizedId = rawId.toLocaleLowerCase();
+        const normalizedId = normalizeStudentId(rawId);
         const student = studentById.get(normalizedId);
         const errors: string[] = [];
         if (!student) errors.push(`Student ID “${rawId}” is not in this class.`);
@@ -1435,7 +1436,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
       const identityColumns: { label: string; width: number; value: (student: RosterStudent) => string }[] = [
         ...(showClassNumber ? [{ label: 'Class #', width: 10, value: (student: RosterStudent) => String(student.classNumber ?? '') }] : []),
         ...(showStudentName ? [{ label: 'Student', width: 24, value: (student: RosterStudent) => student.name ?? '' }] : []),
-        ...(showStudentId ? [{ label: 'Student ID', width: 16, value: (student: RosterStudent) => student.institutionalId ?? '' }] : []),
+        ...(showStudentId ? [{ label: 'Student ID', width: 16, value: (student: RosterStudent) => formatStudentId(student.institutionalId ?? '') }] : []),
         ...(showAnonymousId ? [{ label: 'Anonymous ID', width: 16, value: (student: RosterStudent) => anonymizedIds.get(student.enrollmentId) ?? '' }] : []),
       ];
       const exportColumns = columns;
@@ -2070,7 +2071,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
     } else if (columnId === 'student_name') {
       actions = [{ label: 'Copy student name', onSelect: () => void copyText(student.name) }, { label: 'Filter to this student', onSelect: () => props.onStudentQuery(student.name) }];
     } else if (columnId === 'student_id') {
-      actions = [{ label: 'Copy student ID', onSelect: () => void copyText(student.institutionalId) }];
+      actions = [{ label: 'Copy student ID', onSelect: () => void copyText(formatStudentId(student.institutionalId)) }];
     } else if (columnId === 'student_anonymous_id') {
       actions = [{ label: 'Copy anonymized identifier', onSelect: () => void copyText(anonymizedIds.get(student.enrollmentId) ?? '') }];
     } else {
@@ -2251,7 +2252,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
                   const nextRow = hierarchyRows[rowIndex + 1];
                   const continuesVertically = cell.label === '' && !!nextRow && nextRow.cells
                     .filter((nextCell) => nextCell.columnStart <= cell.columnEnd && nextCell.columnEnd >= cell.columnStart)
-                    .every((nextCell) => nextCell.label === '');
+                    .every((nextCell) => nextCell.label === '' || nextRow.level === 'ASSESSMENT / RESULT');
                   let blankRowsAbove = 0;
                   if (row.level === 'ASSESSMENT / RESULT') {
                     for (let previousRowIndex = rowIndex - 1; previousRowIndex >= 0; previousRowIndex -= 1) {
@@ -2273,7 +2274,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
                   const headerColumnIds = range.map((column) => column.id);
                   const mergedHoverKeys = headerColumnIds.map(columnCssKey).join(' ');
                   const assessmentHeader = row.level === 'ASSESSMENT / RESULT' && range.length === 1 ? range[0].assessment : undefined;
-                  return <View key={`${row.level}-${index}-${cell.label}`} accessible accessibilityRole="button" accessibilityLabel={`${row.level}: ${headingPath || cell.label || 'empty merged header'}. Header actions available.`} {...({ dataSet: { gradebookCols: mergedHoverKeys } } as any)} {...columnHoverProps(headerColumnIds)} {...clickContextProps(headerActions)} style={[styles.fullMergedHeader, { width: cell.width, height: headerRowHeights[rowIndex] ?? 20, minHeight: 20, paddingVertical: 0 }, noHeaderSelection, continuesVertically ? styles.fullMergedHeaderVerticalContinue : null, verticalMergeStyle, verticalMergeClip]}>{assessmentHeader ? <><Text style={[styles.fullMergedHeaderText, columnHeaderTextStyle]}>{assessmentHeader.title}</Text><Text style={[styles.fullAssessmentMaximumText, columnHeaderTextStyle]}>{assessmentHeader.maximumScore}</Text></> : <Text style={[styles.fullMergedHeaderText, columnHeaderTextStyle]}>{cell.label}</Text>}{sortableColumnTarget ? renderHeaderIndicators(sortableColumnTarget) : null}</View>;
+                  return <View key={`${row.level}-${index}-${cell.label}`} accessible accessibilityRole="button" accessibilityLabel={`${row.level}: ${headingPath || cell.label || 'empty merged header'}. Header actions available.`} {...({ dataSet: { gradebookCols: mergedHoverKeys } } as any)} {...columnHoverProps(headerColumnIds)} {...clickContextProps(headerActions)} style={[styles.fullMergedHeader, { width: cell.width, height: headerRowHeights[rowIndex] ?? 20, minHeight: 20, paddingVertical: 0 }, noHeaderSelection, continuesVertically ? styles.fullMergedHeaderVerticalContinue : null, verticalMergeStyle, verticalMergeClip]}>{assessmentHeader ? <><Text style={[styles.fullMergedHeaderText, columnHeaderTextStyle, { width: '100%', minWidth: 0, flexShrink: 1 }, Platform.OS === 'web' ? { overflowWrap: 'anywhere', wordBreak: 'break-word' } as any : null]}>{assessmentHeader.title}</Text><Text style={[styles.fullAssessmentMaximumText, columnHeaderTextStyle]}>{assessmentHeader.maximumScore}</Text></> : <Text style={[styles.fullMergedHeaderText, columnHeaderTextStyle]}>{cell.label}</Text>}{sortableColumnTarget ? renderHeaderIndicators(sortableColumnTarget) : null}</View>;
                 })}
               </View>
             })}
@@ -2572,7 +2573,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
                       </View>
                       <Badge tone={entry.eventType === 'score' && entry.action === 'deleted' ? 'warning' : 'neutral'}>{entry.eventType === 'assessment' ? 'Assessment change' : isBulk ? 'Atomic bulk change' : entry.action === 'deleted' ? 'Cleared' : 'Saved version'}</Badge>
                     </View>
-                    {entry.eventType === 'score' && !isBulk ? <Text style={styles.help}>{student?.name ?? 'Student'}{student?.institutionalId ? ` · ${student.institutionalId}` : ''} · {periodName || 'No period'} · {groupName}</Text> : null}
+                    {entry.eventType === 'score' && !isBulk ? <Text style={styles.help}>{student?.name ?? 'Student'}{student?.institutionalId ? ` · ${formatStudentId(student.institutionalId)}` : ''} · {periodName || 'No period'} · {groupName}</Text> : null}
                     {isBulk ? <Pressable accessibilityRole="button" accessibilityState={{ expanded: expandedBulkHistoryIds.has(entry.batchId ?? '') }} onPress={() => setExpandedBulkHistoryIds((current) => { const next = new Set(current); const key = entry.batchId ?? ''; if (next.has(key)) next.delete(key); else next.add(key); return next; })} style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 6, paddingHorizontal: 8, borderRadius: 6, backgroundColor: colors.surfaceMuted }}><Text style={styles.help}>{new Set(batchEntries.map((item) => item.entry.enrollmentId)).size} students · {new Set(batchEntries.map((item) => item.assessmentTitle)).size} assessment instances · {batchEntries.length} changes</Text><Text style={styles.help}>{expandedBulkHistoryIds.has(entry.batchId ?? '') ? 'Hide details ▲' : 'Show details ▼'}</Text></Pressable> : null}
                     {entry.eventType === 'score' && !isBulk && componentPath ? <Text style={styles.help}>{componentPath}</Text> : null}
                     {entry.eventType === 'score' && !isBulk ? <Text style={styles.gradebookContextActionText}>{oldValue}  →  {newValue}</Text> : isBulk && expandedBulkHistoryIds.has(entry.batchId ?? '') ? <ScrollView nestedScrollEnabled style={{ maxHeight: 190 }} contentContainerStyle={{ gap: 4, padding: 8 }}>{batchEntries.map((item) => <Text key={item.entry.id} style={styles.help}>{item.student?.name ?? 'Student'} · {item.assessmentTitle}: {item.oldValue} → {item.newValue}</Text>)}</ScrollView> : !isBulk && assessmentChanges.length === 1 ? <Text style={styles.gradebookContextActionText}>{assessmentChanges[0].label}: {assessmentChanges[0].before}  →  {assessmentChanges[0].after}</Text> : !isBulk && assessmentChanges.length > 1 ? <View style={{ gap: 3 }}>{assessmentChanges.map((change) => <Text key={change.label} style={styles.help}>{change.label}: {change.before}  →  {change.after}</Text>)}</View> : null}

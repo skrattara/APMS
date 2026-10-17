@@ -9,7 +9,7 @@ APMS is not SWU SIS, an enrollment system, an LMS, or an official-grade submissi
 - `apps/mobile`: Expo SDK 57 / React Native / Expo Router application
 - `packages/domain`: typed RBAC, validation, standing, attendance, trend, report, and CSV logic
 - `supabase`: preserved Supabase configuration, RLS schema, safe migrations, and fictional seed
-- `services/ai`: isolated FastAPI service with a controlled-synthetic logistic prototype
+- `services/ai`: isolated FastAPI service and schema-conditioned PyTorch Transformer pipeline
 - `tests`: Playwright role/access and workflow coverage
 
 Core authenticated roles are exactly `system_admin`, `academic_admin`, and `faculty`. Students are monitored records, not a primary APMS portal role.
@@ -55,13 +55,18 @@ The implemented Global Modules grading model uses the revised SWUNEXT weights:
 
 ## AI service
 
-```powershell
-python -m pip install -e "services/ai[test]"
-python -m uvicorn apms_ai.main:app --app-dir services/ai/src --reload
-python -m pytest services/ai
+```cmd
+python -m venv .venv
+.venv\Scripts\python.exe -m pip install -e "services/ai[ml,test]"
+.venv\Scripts\python.exe -m uvicorn apms_ai.main:app --app-dir services/ai/src
+.venv\Scripts\python.exe -m pytest services/ai
 ```
 
-The included logistic classifier is trained on controlled synthetic demonstration data at startup. It is advisory, explainable, and not institutionally validated. Production use requires authorized de-identified SWU data and institutional approval. Normal records and deterministic calculations remain usable when AI is unavailable.
+The Transformer forecasts typed assessment sequences, trends, and failure probability using supplied grading and evaluation schemas. Training is explicit; the server requires a configured artifact and server-only authentication. Synthetic training and evaluation are development evidence only. Real-world accuracy requires representative, authorized de-identified records and independent validation. Normal records and deterministic calculations remain usable when AI is unavailable.
+
+See the [AI service guide](services/ai/README.md), [usage and deployment instructions](docs/AI_MODEL_USAGE_DEPLOYMENT.md), [model architecture](docs/AI_MODEL_ARCHITECTURE.md), [implementation plan](docs/AI_MODEL_IMPLEMENTATION_PLAN.md), and [measured validation report](docs/AI_MODEL_VALIDATION.md) for data contracts, lifecycle commands, playground, deployment, and validation boundaries.
+
+Start with [how training works](docs/AI_MODEL_TRAINING_EXPLAINED.md) for a plain-language explanation of the model and its accuracy reports. Read [files and safe cleanup](docs/AI_MODEL_FILES_AND_CLEANUP.md) before removing generated data, checkpoints, exports, or temporary experiment folders.
 
 ## Validation
 

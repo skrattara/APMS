@@ -19,6 +19,26 @@ export type AdminWorkspace = {
 export type DepartmentRecord = { id: string; code: string; name: string; status: 'active' | 'inactive' };
 export type ProgramRecord = { id: string; departmentId: string; code: string; name: string; status: 'active' | 'inactive' };
 export type AcademicTermRecord = { id: string; academicYear: string; semester: string; startsOn: string; endsOn: string; status: 'planned' | 'active' | 'closed' | 'archived' };
+export type YearLevelRecord = { level: number; label: string; sortOrder: number };
+
+export async function loadYearLevels(programId: string): Promise<YearLevelRecord[]> {
+  if (!supabase) throw new Error('APMS is not connected to Supabase.');
+  const { data, error } = await supabase.from('year_levels').select('program_id,level,label,sort_order').eq('program_id', programId).order('sort_order').order('level');
+  if (error) throw error;
+  return (data ?? []).map((row) => ({ level: row.level, label: row.label, sortOrder: row.sort_order }));
+}
+
+export async function saveYearLevel(input: YearLevelRecord & { programId: string }) {
+  if (!supabase) throw new Error('APMS is not connected to Supabase.');
+  const { error } = await supabase.from('year_levels').upsert({ program_id: input.programId, level: input.level, label: input.label.trim(), sort_order: input.sortOrder }, { onConflict: 'program_id,level' });
+  if (error) throw error;
+}
+
+export async function deleteYearLevel(programId: string, level: number) {
+  if (!supabase) throw new Error('APMS is not connected to Supabase.');
+  const { error } = await supabase.from('year_levels').delete().eq('program_id', programId).eq('level', level);
+  if (error) throw error;
+}
 
 async function invoke<T>(body: Record<string, unknown>): Promise<T> {
   if (!supabase) throw new Error('APMS is not connected to Supabase.');

@@ -5,6 +5,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Modal, Platform, Pressable, ScrollView, StyleSheet, Text, View } from 'react-native';
 import { Badge, Button, Card, Field, PageState, SelectField, Tabs } from '@/components/ui';
+import { formatStudentId, normalizeStudentId } from '@/utils/studentId';
 import { useAuth } from '@/auth/AuthProvider';
 import { getErrorMessage } from '@/services/errors';
 import { loadAutosavePreference } from '@/services/actions';
@@ -252,7 +253,7 @@ export function Gradebook(props: GradebookProps) {
   const visibleStudents = useMemo(() => {
     const normalizedQuery = studentQuery.trim().toLowerCase();
     const filtered = props.workspace.students.filter((student) => {
-      const matchesQuery = !normalizedQuery || `${student.name} ${student.institutionalId}`.toLowerCase().includes(normalizedQuery);
+      const matchesQuery = !normalizedQuery || student.name.toLowerCase().includes(normalizedQuery) || normalizeStudentId(student.institutionalId).includes(normalizeStudentId(studentQuery));
       if (!matchesQuery) return false;
       if (studentFilter === 'missing') return gradebookView === 'assessment'
         ? effectiveScore(student.enrollmentId).trim() === ''
@@ -506,8 +507,8 @@ export function Gradebook(props: GradebookProps) {
           <View style={[styles.paginationSwitch, autosaveEnabled && styles.paginationSwitchOn]}><View style={[styles.paginationSwitchThumb, autosaveEnabled && styles.paginationSwitchThumbOn]} /></View>
           <Text style={styles.paginationToggleState}>{accountAutosaveEnabled ? autosaveEnabled ? 'On' : 'Off' : 'Account off'}</Text>
         </Pressable>
-        <Button label={savedHistoryBusy ? 'Undoing…' : 'Undo'} description={`Unsaved edits first, then saved score changes. Assessment instance edits stay in version history. ${scoreUndoRef.current.length} unsaved and ${savedUndoRef.current.length}${savedHistoryHasMoreRef.current ? '+' : ''} saved score steps loaded.`} variant="secondary" disabled={savedHistoryBusy || (!scoreUndoRef.current.length && savedHistoryLoadedRef.current && !savedUndoRef.current.length && !savedHistoryHasMoreRef.current)} onPress={undoScoreEdit} />
-        <Button label={savedHistoryBusy ? 'Working…' : 'Redo'} description={`Unsaved edits first, then saved score changes. Assessment instance edits stay in version history. ${scoreRedoRef.current.length} unsaved and ${savedRedoRef.current.length} saved score steps available.`} variant="secondary" disabled={savedHistoryBusy || (!scoreRedoRef.current.length && !savedRedoRef.current.length)} onPress={redoScoreEdit} />
+        <Button label={savedHistoryBusy ? 'Undoing…' : 'Undo'} icon="undo" description={`Unsaved edits first, then saved score changes. Assessment instance edits stay in version history. ${scoreUndoRef.current.length} unsaved and ${savedUndoRef.current.length}${savedHistoryHasMoreRef.current ? '+' : ''} saved score steps loaded.`} variant="secondary" disabled={savedHistoryBusy || (!scoreUndoRef.current.length && savedHistoryLoadedRef.current && !savedUndoRef.current.length && !savedHistoryHasMoreRef.current)} onPress={undoScoreEdit} />
+        <Button label={savedHistoryBusy ? 'Working…' : 'Redo'} icon="redo" description={`Unsaved edits first, then saved score changes. Assessment instance edits stay in version history. ${scoreRedoRef.current.length} unsaved and ${savedRedoRef.current.length} saved score steps available.`} variant="secondary" disabled={savedHistoryBusy || (!scoreRedoRef.current.length && !savedRedoRef.current.length)} onPress={redoScoreEdit} />
       </View>
       {gradebookView === 'assessment' ? <SelectField
         label="Assessment"
@@ -623,7 +624,7 @@ export function Gradebook(props: GradebookProps) {
                   </Pressable>
                   <View style={[styles.flex, styles.gradeStudentColumn]}>
                     <Text style={styles.rowTitle}>{student.name}</Text>
-                    <Text style={styles.help}>{student.institutionalId}</Text>
+                    <Text style={styles.help}>{formatStudentId(student.institutionalId)}</Text>
                   </View>
                   <View style={[styles.summaryCell, styles.gradeSummaryColumn]}>
                     <View style={styles.badgeRow}>

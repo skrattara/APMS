@@ -1,0 +1,39 @@
+# Run from the repository root with the explicit --env-file and -f options
+# documented in docs/AI_MODEL_USAGE_DEPLOYMENT.md. No model is trained at boot.
+services:
+  ai:
+    build:
+      context: ../..
+      dockerfile: services/ai/Dockerfile
+    image: apms-ai:local
+    restart: unless-stopped
+    environment:
+      APMS_MODEL_ARTIFACT_PATH: /models/active
+      APMS_AI_SERVICE_API_KEY: ${APMS_AI_SERVICE_API_KEY:?Set a server-only service token}
+      APMS_AI_ENABLE_SYNTHETIC_DEMO: ${APMS_AI_ENABLE_SYNTHETIC_DEMO:-false}
+      APMS_AI_DEVICE: cpu
+      APMS_AI_MAX_REQUEST_BYTES: ${APMS_AI_MAX_REQUEST_BYTES:-1048576}
+      APMS_AI_MAX_CONCURRENT_REQUESTS: ${APMS_AI_MAX_CONCURRENT_REQUESTS:-2}
+      OMP_NUM_THREADS: ${APMS_AI_THREADS:-2}
+      MKL_NUM_THREADS: ${APMS_AI_THREADS:-2}
+    ports:
+      - "127.0.0.1:${APMS_AI_HOST_PORT:-8080}:8080"
+    volumes:
+      - type: bind
+        source: ${APMS_MODEL_HOST_PATH:?Set the absolute path to a calibrated artifact bundle}
+        target: /models/active
+        read_only: true
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      start_period: 30s
+      retries: 3
+    stop_grace_period: 30s

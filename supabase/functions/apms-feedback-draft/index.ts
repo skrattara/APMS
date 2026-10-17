@@ -9,7 +9,7 @@ const corsHeaders = {
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
   status,
-  headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store' },
 })
 
 function readGeminiText(payload: any): string {
@@ -85,9 +85,12 @@ Deno.serve(async (request) => {
   const recordsJson = JSON.stringify(safeProviderData)
   if (recordsJson.length > 24000) return json({ error: 'Student context is too large to generate a draft' }, 413)
 
-  const geminiKey = Deno.env.get('GEMINI_API_KEY')
-  if (!geminiKey) return json({ error: 'Gemini API key is not configured' }, 503)
-  const model = Deno.env.get('GEMINI_MODEL') ?? 'gemini-3.5-flash-lite'
+  const { data: resolvedCredentials, error: credentialError } = await adminClient.rpc('ai_provider_resolve_key', { p_class_record_id: body.class_id, p_provider: 'gemini' })
+  if (credentialError) return json({ error: 'Gemini credentials could not be securely resolved' }, 503)
+  const credential = Array.isArray(resolvedCredentials) ? resolvedCredentials[0] : resolvedCredentials
+  const geminiKey = credential?.api_key || Deno.env.get('GEMINI_API_KEY')
+  if (!geminiKey) return json({ error: 'Gemini has no configured system or department API key' }, 503)
+  const model = credential?.model || Deno.env.get('GEMINI_MODEL') || 'gemini-3.5-flash-lite'
   const prompt = [
     'Write a concise, supportive draft of academic feedback using only the supplied anonymous numeric evidence and schema structure. Do not ask for or infer a student name or identifying details.',
     'Use the applied grading-system and evaluation-criteria schema representations to explain how the reported results and risk factors should be understood. Follow the grading formula, scoring mappings, aggregation and period strategy from the grading definition. Explain evaluation factors and rule matches according to the evaluation definition.',
@@ -96,6 +99,28 @@ Deno.serve(async (request) => {
     'Do not make a disciplinary decision or claim this is an official SIS grade. The instructor will review and edit this draft before publishing.',
     recordsJson,
   ].join('\n\n')
+  const usageScope = credential?.scope_type ?? 'system'
+  const usageScopeId = credential?.scope_id ?? null
+  let requestLimit = credential?.monthly_request_limit ?? null
+  let tokenLimit = credential?.monthly_token_limit ?? null
+  if (usageScope === 'system') {
+    const { data: limits, error: limitError } = await adminClient.from('system_settings').select('key,value').in('key', ['ai.usage.monthly_request_limit', 'ai.usage.monthly_token_limit'])
+    if (limitError) return json({ error: 'System AI usage limits could not be loaded' }, 503)
+    const limitMap = new Map((limits ?? []).map((row: any) => [row.key, row.value]))
+    const parseLimit = (value: unknown) => { const parsed = Number(value); return value == null || value === '' || !Number.isFinite(parsed) || parsed < 0 ? null : parsed }
+    requestLimit = parseLimit(limitMap.get('ai.usage.monthly_request_limit'))
+    tokenLimit = parseLimit(limitMap.get('ai.usage.monthly_token_limit'))
+  }
+  const reservedTokens = Math.ceil(prompt.length / 4) + 1024
+  const { data: usageReservation, error: reservationError } = await adminClient.rpc('ai_provider_reserve_usage', {
+    p_actor_id: caller.user.id, p_class_record_id: body.class_id, p_scope_type: usageScope, p_scope_id: usageScopeId,
+    p_provider: 'gemini', p_model: model, p_feature: 'feedback_draft',
+    p_monthly_request_limit: requestLimit, p_monthly_token_limit: tokenLimit, p_reserved_tokens: reservedTokens,
+  })
+  if (reservationError) return json({ error: 'AI usage limits could not be checked; the provider request was not sent' }, 503)
+  if (!usageReservation) return json({ error: 'This Gemini key has reached a monthly request or token limit.' }, 429)
+  // This draft is a one-shot request for this authorized caller. No provider
+  // conversation, prompt cache, or context identifier is reused across users.
   const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
     method: 'POST',
     headers: { 'x-goog-api-key': geminiKey, 'Content-Type': 'application/json' },
@@ -109,6 +134,16 @@ Deno.serve(async (request) => {
       },
     }),
   })
+  let usagePayload: any = null
+  try { usagePayload = await response.clone().json() } catch { /* Error responses can be non-JSON. */ }
+  const inputTokens = Number(usagePayload?.usageMetadata?.promptTokenCount ?? 0)
+  const outputTokens = Number(usagePayload?.usageMetadata?.candidatesTokenCount ?? 0)
+  const { error: usageError } = await adminClient.from('ai_model_usage').update({
+    input_tokens: Number.isSafeInteger(inputTokens) && inputTokens > 0 ? inputTokens : reservedTokens,
+    output_tokens: Number.isSafeInteger(outputTokens) && outputTokens >= 0 ? outputTokens : 0,
+    succeeded: response.ok,
+  }).eq('id', usageReservation)
+  if (usageError) return json({ error: 'Gemini ran, but usage could not be recorded. Contact an administrator before retrying.' }, 503)
   if (!response.ok) {
     await response.text()
     console.error('Gemini feedback draft failed', response.status)

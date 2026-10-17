@@ -1,0 +1,13 @@
+{
+  "example": {
+    "fields": [{ "name": "score", "kind": "float", "minimum": 0, "maximum": 100 }],
+    "history": [{ "score": 60 }],
+    "queries": [{ "field": "score", "horizon": 1 }]
+  },
+  "metadata": {
+    "fields": ["score"],
+    "model_config": { "categories": 16, "max_history": 512, "max_queries": 128, "max_fields": 512 },
+    "preprocessing": { "score": [50, 10] },
+    "schema_symbols": {}
+  }
+}

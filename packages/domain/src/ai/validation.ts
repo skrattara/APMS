@@ -13,6 +13,8 @@ export type AiAssessmentConstraint = {
   groupId?: string | null;
   weight?: number | null;
   optional?: boolean;
+  /** True when this learner already has a result for this assessment instance. */
+  hasResult?: boolean;
 };
 
 function assessmentDefinitionFor(grading: GradingDefinition, typeId: string) {
@@ -85,6 +87,7 @@ export function validateAiAssessmentScorePrediction(
     const assessment = typeof ref === 'string' ? byRef.get(ref) : undefined;
     if (!assessment || seen.has(ref)) { errors.push('A prediction references an unknown or repeated assessment instance.'); continue; }
     seen.add(ref);
+    if (assessment.hasResult) errors.push(`Assessment ${ref} already has a recorded result and cannot receive an AI forecast overlay.`);
     if (typeof assessment.maximumScore !== 'number' || !Number.isFinite(assessment.maximumScore) || assessment.maximumScore <= 0) {
       errors.push(`Assessment ${ref} has an invalid maximum score.`); continue;
     }
@@ -109,7 +112,7 @@ export function validateAiAssessmentScorePrediction(
     if (prediction.confidence != null && (typeof prediction.confidence !== 'number' || !Number.isFinite(prediction.confidence) || prediction.confidence < 0 || prediction.confidence > 1)) errors.push(`Assessment ${ref} confidence must be from 0 to 1.`);
     if (prediction.evidence != null && (!Array.isArray(prediction.evidence) || prediction.evidence.length > 8 || prediction.evidence.some((item) => typeof item !== 'string' || item.length > 500))) errors.push(`Assessment ${ref} evidence is invalid.`);
   }
-  for (const assessment of assessments) if (!assessment.optional && !seen.has(assessment.assessmentRef)) errors.push(`A required assessment result prediction is missing for ${assessment.assessmentRef}.`);
+  for (const assessment of assessments) if (!assessment.optional && !assessment.hasResult && !seen.has(assessment.assessmentRef)) errors.push(`A required assessment result prediction is missing for ${assessment.assessmentRef}.`);
   for (const component of grading.components as any[]) {
     const definition = component.assessmentDefinition;
     if (!definition?.count) continue;

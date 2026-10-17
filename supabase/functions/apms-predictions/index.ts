@@ -27,7 +27,7 @@ type RequestBody = {
 
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
   status,
-  headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+  headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store' },
 })
 
 function readGeminiText(payload: any): string {
@@ -58,7 +58,7 @@ function factorFor(definition: Record<string, any>, source: string) {
   return (definition.factors as any[]).find((factor) => factor.source === source)
 }
 
-function validatePrediction(result: any, evaluation: Record<string, any>, dataBasis: string, outputFields: Set<string>, privacyMap: { ids: Map<string, string>; categories: Map<string, string }) {
+function validatePrediction(result: any, evaluation: Record<string, any>, dataBasis: string, outputFields: Set<string>, privacyMap: { ids: Map<string, string>; categories: Map<string, string> }) {
   if (result?.assessment_score_predictions != null) return 'Assessment score predictions must use the assessment_predictions output field.'
   const allowedKeys = new Set(['record_ref', 'record_id', 'predicted_standing', 'trend', ...(outputFields.has('risk_probability') ? ['risk_probability'] : []), ...(outputFields.has('risk_level') ? ['ai_risk_level', 'risk_level'] : []), ...(outputFields.has('factors') ? ['factors'] : []), ...(outputFields.has('evaluation_scores') ? ['evaluation_scores'] : []), ...(outputFields.has('assessment_score_predictions') ? ['assessment_predictions'] : [])])
   if (Object.keys(result ?? {}).some((key) => !allowedKeys.has(key))) return 'The provider returned fields outside the active output contract.'
@@ -115,7 +115,7 @@ function validatePrediction(result: any, evaluation: Record<string, any>, dataBa
   return null
 }
 
-function decodeAndValidateEvaluationScores(raw: unknown, evaluation: Record<string, any>, result: any, outputFields: Set<string>, privacyMap: { ids: Map<string, string>; categories: Map<string, string }) {
+function decodeAndValidateEvaluationScores(raw: unknown, evaluation: Record<string, any>, result: any, outputFields: Set<string>, privacyMap: { ids: Map<string, string>; categories: Map<string, string> }) {
   const empty = { values: {} as Record<string, unknown>, error: null as string | null }
   if (!outputFields.has('evaluation_scores')) return raw == null ? empty : { ...empty, error: 'Evaluation scores are not an allowed output for the applied evaluation criteria.' }
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return { ...empty, error: 'Evaluation scores must be an object keyed by applied factor reference.' }
@@ -128,6 +128,10 @@ function decodeAndValidateEvaluationScores(raw: unknown, evaluation: Record<stri
     const factor = (evaluation.factors as any[]).find((item) => item.id === factorId)
     if (!factor || (factor.aiGenerated !== true && factor.origin !== 'ai_prediction')) return { ...empty, error: 'Evaluation scores may only contain active AI-generated factor references.' }
     if (sourcesWithBuiltInOutput.has(factor.source)) return { ...empty, error: `The factor ${factor.source} is already provided by the prediction fields and cannot be overridden.` }
+    if (encoded === null) {
+      if (factor.required || factor.missingValuePolicy === 'unavailable') return { ...empty, error: `The required evaluation score for ${factor.source} is missing.` }
+      continue
+    }
     let value = encoded
     if (typeof value === 'string') value = restoreSchemaCategory(value, privacyMap)
     const valueType = factor.valueType ?? (['trend', 'recent_trend', 'ai_risk_level', 'data_basis'].includes(factor.source) ? 'category' : 'number')
@@ -149,7 +153,7 @@ function decodeAndValidateEvaluationScores(raw: unknown, evaluation: Record<stri
   return { values: accepted, error: null }
 }
 
-function validateAssessmentPredictions(raw: unknown, instances: Record<string, any>[], outputFields: Set<string>, privacyMap: { ids: Map<string, string>; categories: Map<string, string }) {
+function validateAssessmentPredictions(raw: unknown, instances: Record<string, any>[], outputFields: Set<string>, privacyMap: { ids: Map<string, string>; categories: Map<string, string> }, existingAssessmentRefs = new Set<string>()) {
   const empty = { values: [] as Record<string, unknown>[], error: null as string | null }
   if (!outputFields.has('assessment_score_predictions')) return raw == null ? empty : { ...empty, error: 'Assessment predictions are not allowed by the applied evaluation criteria.' }
   if (!Array.isArray(raw)) return { ...empty, error: 'Assessment predictions must be a list.' }
@@ -161,6 +165,7 @@ function validateAssessmentPredictions(raw: unknown, instances: Record<string, a
     const ref = prediction?.assessment_ref
     const instance = typeof ref === 'string' ? byRef.get(ref) : undefined
     if (!instance || seen.has(ref)) return { ...empty, error: 'An assessment prediction references an unknown or repeated assessment instance.' }
+    if (existingAssessmentRefs.has(ref)) return { ...empty, error: 'The provider predicted a score for an assessment that already has a recorded result.' }
     seen.add(ref)
     const scoring = instance.scoring
     const result = prediction.result ?? (prediction.kind === 'numeric'
@@ -191,7 +196,7 @@ function validateAssessmentPredictions(raw: unknown, instances: Record<string, a
     if (prediction.evidence != null && (!Array.isArray(prediction.evidence) || prediction.evidence.length > 8 || prediction.evidence.some((item: unknown) => typeof item !== 'string' || item.length > 500))) return { ...empty, error: `Assessment ${ref} evidence is invalid.` }
     values.push(prediction)
   }
-  for (const instance of instances) if (!instance.optional && !seen.has(instance.assessment_ref)) return { ...empty, error: `A result prediction is missing for required assessment ${instance.assessment_ref}.` }
+  for (const instance of instances) if (!instance.optional && !existingAssessmentRefs.has(instance.assessment_ref) && !seen.has(instance.assessment_ref)) return { ...empty, error: `A result prediction is missing for required assessment ${instance.assessment_ref}.` }
   return { values, error: null }
 }
 
@@ -215,6 +220,27 @@ function validateAssessmentInstanceCounts(grading: Record<string, any>, instance
     }
   }
   return null
+}
+
+function openAiStrictSchema(geminiSchema: Record<string, any>) {
+  const convert = (value: Record<string, any>): Record<string, any> => {
+    const typeMap: Record<string, string> = { STRING: 'string', NUMBER: 'number', BOOLEAN: 'boolean', ARRAY: 'array', OBJECT: 'object' }
+    if (value.type === 'OBJECT') {
+      const properties = Object.fromEntries(Object.entries(value.properties ?? {}).map(([key, child]) => [key, convert(child as Record<string, any>)]))
+      const required = Object.keys(properties)
+      const originallyRequired = new Set<string>(value.required ?? [])
+      for (const key of required) if (!originallyRequired.has(key)) properties[key] = { anyOf: [properties[key], { type: 'null' }] }
+      return { type: 'object', properties, required, additionalProperties: false }
+    }
+    if (value.type === 'ARRAY') return { type: 'array', items: convert(value.items) }
+    return { type: typeMap[value.type] ?? value.type?.toLowerCase(), ...(value.enum ? { enum: value.enum } : {}), ...(value.description ? { description: value.description } : {}) }
+  }
+  return {
+    type: 'object',
+    properties: { predictions: { type: 'array', items: convert(geminiSchema.items) } },
+    required: ['predictions'],
+    additionalProperties: false,
+  }
 }
 
 async function loadAppliedDefinitions(adminClient: any, userClient: any, classId: string, facultyId: string) {
@@ -309,6 +335,7 @@ Deno.serve(async (request) => {
   const outputFields = new Set(aiConfig.outputFields ?? [])
   if (!inputFeatures.size || !outputFields.has('predicted_standing') || !outputFields.has('trend')) return json({ error: 'The applied evaluation criteria do not define the inputs and outputs required for this prediction task' }, 409)
   if (inputFeatures.has('assessment_results') && !inputFeatures.has('assessment_instance_details')) return json({ error: 'The applied evaluation criteria must include assessment instance details whenever assessment results are shared' }, 409)
+  if (outputFields.has('assessment_score_predictions') && (!inputFeatures.has('assessment_results') || !inputFeatures.has('assessment_instance_details'))) return json({ error: 'Assessment score predictions require the applied criteria to include both existing assessment results and assessment instance details as AI inputs.' }, 409)
   const { data: settingRows, error: settingsError } = await adminClient.from('system_settings').select('key,value').in('key', ['ai.enabled', 'ai.assessment_data.enabled', 'ai.attendance_data.enabled'])
   if (settingsError) return json({ error: 'AI privacy controls are unavailable' }, 503)
   const settings = new Map((settingRows ?? []).map((row: any) => [row.key, row.value]))
@@ -321,10 +348,9 @@ Deno.serve(async (request) => {
   const saveRun = async (provider: string, model: string, modelVersion: string, dataBasis: string, predictions: any[]) => {
     const modelName = `${provider}:${model}`
     const inputSnapshot = {
-      grading_system: gradingSystem,
-      evaluation_criteria: evaluationCriteria,
-      inputs: body.inputs,
       advisory_only: true,
+      record_count: body.inputs.length,
+      data_basis: dataBasis,
       ai_provenance: { provider, model, model_version: modelVersion, data_basis: dataBasis, recorded_at: new Date().toISOString() },
     }
     const { data: runId, error: saveError } = await userClient.rpc('faculty_save_prediction_run', {
@@ -372,7 +398,7 @@ Deno.serve(async (request) => {
     const resolveType = (value: unknown) => typeof value === 'string' ? value : ''
     const resolveDefinition = (row: any) => {
       const candidates = [row.grading_type_id, row.component_key, row.type].map(resolveType)
-      return gradingSystem.components.find((component: any) => candidates.some((candidate) => candidate && (component.assessmentDefinition?.typeId === candidate || (builtinAliases[candidate.toLowerCase()] ?? candidate.toLowerCase()) === (builtinAliases[component.assessmentDefinition?.typeId?.toLowerCase()] ?? component.assessmentDefinition?.typeId?.toLowerCase())))
+      return gradingSystem.components.find((component: any) => candidates.some((candidate) => candidate && (component.assessmentDefinition?.typeId === candidate || (builtinAliases[candidate.toLowerCase()] ?? candidate.toLowerCase()) === (builtinAliases[component.assessmentDefinition?.typeId?.toLowerCase()] ?? component.assessmentDefinition?.typeId?.toLowerCase()))))
     }
     for (const row of assessmentRows ?? []) {
       const component = resolveDefinition(row)
@@ -436,7 +462,6 @@ Deno.serve(async (request) => {
   })))
   const providerInput: Record<string, unknown> = { grading_system: safeGrading, evaluation_criteria: safeEvaluation, inputs: safeInputs.map(({ record_ref, factor_values, records }) => ({ record_ref, factor_values, records })) }
   if (inputFeatures.has('assessment_instance_details')) providerInput.assessment_instances = safeAssessmentInstances
-  if (outputFields.has('assessment_score_predictions') && !inputFeatures.has('assessment_instance_details')) return json({ error: 'Assessment score predictions require the applied criteria to include assessment instance details as an AI input.' }, 409)
   if (outputFields.has('assessment_score_predictions') && !allowAssessmentData) return json({ error: 'Assessment score predictions require System Admin approval to share anonymous assessment data.' }, 403)
   if (outputFields.has('assessment_score_predictions') && safeAssessmentInstances.length === 0) return json({ error: 'Assessment score predictions require at least one active assessment instance.' }, 409)
   if (outputFields.has('assessment_score_predictions')) {
@@ -446,8 +471,10 @@ Deno.serve(async (request) => {
   const serializedInput = JSON.stringify(providerInput)
   if (serializedInput.length > 700_000) return json({ error: 'The applied schemas and student data exceed the prediction request limit' }, 413)
 
+  const configuredProvider = String(aiConfig.provider ?? 'Gemini').trim().toLowerCase()
   const customModelUrl = Deno.env.get('APMS_AI_SERVICE_URL')
-  if (customModelUrl) {
+  if (['custom', 'custom model', 'apms custom'].includes(configuredProvider)) {
+    if (!customModelUrl) return json({ error: 'The applied evaluation criteria select the custom model, but its server-side endpoint is not configured' }, 503)
     const customKey = Deno.env.get('APMS_AI_SERVICE_API_KEY')
     if (!customKey) return json({ error: 'The configured prediction provider is missing its server-side API key' }, 503)
     const predictions = []
@@ -462,7 +489,7 @@ Deno.serve(async (request) => {
           task_contract: {
             allowed_outputs: [...outputFields],
             assessment_predictions: outputFields.has('assessment_score_predictions')
-              ? 'Return assessment_predictions using only request assessment_ref values. Use numeric_value with exact maximum for numeric scoring, or categorical_value from the anonymized allowed mapping for categorical scoring.'
+              ? 'Return assessment_predictions using only request assessment_ref values that have no recorded result for this student. Never forecast a scored instance. Include every required unscored instance. Use numeric_value with exact maximum for numeric scoring, or categorical_value from the anonymized allowed mapping for categorical scoring.'
               : undefined,
             evaluation_scores: outputFields.has('evaluation_scores')
               ? 'Return only active AI-generated factor references and values matching each factor type, range, and category.'
@@ -481,7 +508,8 @@ Deno.serve(async (request) => {
       result.trend = restoreSchemaCategory(result.trend, schemaPrivacyMap)
       const validationError = validatePrediction(result, evaluationCriteria, 'anonymized_schema_context', outputFields, schemaPrivacyMap)
       if (validationError) return json({ error: `The configured prediction provider returned an invalid prediction: ${validationError}` }, 502)
-      const assessmentValidation = validateAssessmentPredictions(result.assessment_predictions, safeAssessmentInstances as Record<string, any>[], outputFields, schemaPrivacyMap)
+      const existingRefs = new Set(((safeInputs[index].records as any)?.assessment_results ?? []).filter((item: any) => item?.score !== undefined || item?.percentage !== undefined || item?.categorical_value !== undefined).map((item: any) => String(item.assessment_ref)))
+      const assessmentValidation = validateAssessmentPredictions(result.assessment_predictions, safeAssessmentInstances as Record<string, any>[], outputFields, schemaPrivacyMap, existingRefs)
       if (assessmentValidation.error) return json({ error: `The configured prediction provider returned an invalid prediction: ${assessmentValidation.error}` }, 502)
       predictions.push({
         enrollment_id: body.inputs[safeInputs[index].original_index].enrollment_id,
@@ -495,17 +523,36 @@ Deno.serve(async (request) => {
       })
     }
     const model = Deno.env.get('APMS_AI_SERVICE_MODEL') ?? 'custom-model'
-    const modelVersion = Deno.env.get('APMS_AI_SERVICE_MODEL_VERSION') ?? model
+    const modelVersion = String(aiConfig.modelVersion || Deno.env.get('APMS_AI_SERVICE_MODEL_VERSION') || model)
     let runId: string
     try { runId = await saveRun('custom', model, modelVersion, 'anonymized_schema_context', predictions) }
     catch (error) { return json({ error: error instanceof Error ? error.message : 'Prediction run could not be saved' }, 500) }
     return json({ run_id: runId, provider: 'custom', model, model_version: modelVersion, data_basis: 'anonymized_schema_context', advisory_only: true, predictions })
   }
 
-  const geminiKey = Deno.env.get('GEMINI_API_KEY')
-  if (!geminiKey) return json({ error: 'Gemini API key is not configured' }, 503)
-
-  const model = Deno.env.get('GEMINI_MODEL') ?? 'gemini-3.5-flash-lite'
+  const openAiSelected = ['openai', 'open ai'].includes(configuredProvider)
+  const geminiSelected = ['gemini', 'google', 'google gemini'].includes(configuredProvider)
+  if (!openAiSelected && !geminiSelected) return json({ error: `Unsupported AI provider in the applied evaluation criteria: ${aiConfig.provider}` }, 409)
+  const selectedProvider = openAiSelected ? 'openai' : 'gemini'
+  const { data: resolvedCredentials, error: credentialError } = await adminClient.rpc('ai_provider_resolve_key', { p_class_record_id: body.class_id, p_provider: selectedProvider })
+  if (credentialError) return json({ error: 'Provider credentials could not be securely resolved' }, 503)
+  const credential = Array.isArray(resolvedCredentials) ? resolvedCredentials[0] : resolvedCredentials
+  const fallbackKey = openAiSelected ? Deno.env.get('OPENAI_API_KEY') : Deno.env.get('GEMINI_API_KEY')
+  const apiKey = credential?.api_key || fallbackKey
+  if (!apiKey) return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} has no configured system or department API key` }, 503)
+  const model = String(credential?.model || aiConfig.modelName || (openAiSelected ? Deno.env.get('OPENAI_MODEL') : Deno.env.get('GEMINI_MODEL')) || (openAiSelected ? 'gpt-4.1-mini' : 'gemini-3.8-flash')).trim()
+  const usageScope = credential?.scope_type ?? 'system'
+  const usageScopeId = credential?.scope_id ?? null
+  let requestLimit = credential?.monthly_request_limit ?? null
+  let tokenLimit = credential?.monthly_token_limit ?? null
+  if (usageScope === 'system') {
+    const { data: limitSettings, error: limitError } = await adminClient.from('system_settings').select('key,value').in('key', ['ai.usage.monthly_request_limit', 'ai.usage.monthly_token_limit'])
+    if (limitError) return json({ error: 'System AI usage limits could not be loaded' }, 503)
+    const limitMap = new Map((limitSettings ?? []).map((entry: any) => [entry.key, entry.value]))
+    const parseLimit = (value: unknown) => { const parsed = Number(value); return value == null || value === '' || !Number.isFinite(parsed) || parsed < 0 ? null : parsed }
+    requestLimit = parseLimit(limitMap.get('ai.usage.monthly_request_limit'))
+    tokenLimit = parseLimit(limitMap.get('ai.usage.monthly_token_limit'))
+  }
   const aiRiskFactor = outputFields.has('risk_level') ? evaluationCriteria.factors.find((factor: any) => factor.source === 'ai_risk_level' && factor.categories?.length) : undefined
   const trendFactor = evaluationCriteria.factors.find((factor: any) => (factor.source === 'trend' || factor.source === 'recent_trend') && factor.categories?.length)
   const supportedTrends = ['improving', 'stable', 'declining']
@@ -568,38 +615,82 @@ Deno.serve(async (request) => {
     'The application applies the evaluation rules deterministically after this forecast. Do not assign low/medium/high using fixed cutoffs. Only provide ai_risk_level when requested by an AI risk factor, and then choose only from that factor’s allowed categories.',
     `Return only the fields permitted by ai.outputFields (${[...outputFields].join(', ')}). For this task, return one result per record_ref with predicted_standing from 0 to 100 within its active factor range, trend selected from the supplied allowed values${outputFields.has('risk_probability') ? ', and risk_probability from 0 to 1 within its active factor range' : ''}${outputFields.has('risk_level') ? ', and ai_risk_level selected from its supplied category references' : ''}${outputFields.has('evaluation_scores') ? '. evaluation_scores must use only the supplied anonymous AI factor references and each value must satisfy its declared type, range, or category' : ''}${outputFields.has('assessment_score_predictions') ? '. assessment_predictions must use the supplied assessment_ref values only; for numeric results return kind=numeric, numeric_value and the exact maximum; for categorical results return kind=categorical and categorical_value from the active mapping' : ''}. Add factors only when permitted. Do not invent evidence or treat missing records as zero unless the grading schema says so.`,
     'Inputs are shuffled and contain only anonymized numeric evidence. Never infer or request any student, class, subject, or assessment identity. Refer to records and factors only by their opaque reference or generic factor number.',
+    'When assessment_predictions are enabled, predict only instances with no recorded result for that specific record_ref. Never return a forecast for a scored instance. Return one valid result for every required unscored instance.',
     'Risk probability is heuristic and unvalidated. Factors must cite concrete schema-defined inputs and values. These results are advisory only, never official grades or decisions.',
     serializedInput,
   ].join('\n\n')
-  const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
-    method: 'POST',
-    headers: { 'x-goog-api-key': geminiKey, 'Content-Type': 'application/json' },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: 'Return only valid JSON matching the requested response schema.' }] },
-      contents: [{ role: 'user', parts: [{ text: prompt }] }],
-      generationConfig: {
-        temperature: 0,
-        responseMimeType: 'application/json',
-        responseSchema: { type: 'ARRAY', items: { type: 'OBJECT', properties, required } },
-      },
-    }),
+  const responseSchema = { type: 'ARRAY', items: { type: 'OBJECT', properties, required } }
+  const estimatedOutputTokens = Math.min(30_000, body.inputs.length * (256 + (outputFields.has('assessment_score_predictions') ? safeAssessmentInstances.length * 64 : 0)))
+  const estimatedTokens = Math.ceil(prompt.length / 4) + estimatedOutputTokens
+  const { data: usageReservation, error: reservationError } = await adminClient.rpc('ai_provider_reserve_usage', {
+    p_actor_id: caller.user.id, p_class_record_id: body.class_id, p_scope_type: usageScope, p_scope_id: usageScopeId,
+    p_provider: selectedProvider, p_model: model, p_feature: 'evaluation_and_assessment_prediction',
+    p_monthly_request_limit: requestLimit, p_monthly_token_limit: tokenLimit, p_reserved_tokens: estimatedTokens,
   })
+  if (reservationError) return json({ error: 'AI usage limits could not be checked; the provider request was not sent' }, 503)
+  if (!usageReservation) return json({ error: 'This provider key has reached a monthly request or token limit.' }, 429)
+  // Each invocation sends one fresh, stateless request. No provider thread,
+  // conversation, prompt cache, or cross-user context identifier is reused.
+  const response = openAiSelected
+    ? await (async () => {
+      return await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          temperature: 0,
+          max_completion_tokens: 30000,
+          messages: [
+            { role: 'system', content: 'Return only the requested advisory predictions. Do not identify students or infer identities. Follow the active grading and evaluation schemas.' },
+            { role: 'user', content: prompt },
+          ],
+          response_format: { type: 'json_schema', json_schema: { name: 'apms_advisory_predictions', strict: true, schema: openAiStrictSchema(responseSchema) } },
+        }),
+      })
+    })()
+    : await (async () => {
+      return await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+        method: 'POST',
+        headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: 'Return only valid JSON matching the requested response schema.' }] },
+          contents: [{ role: 'user', parts: [{ text: prompt }] }],
+          generationConfig: { temperature: 0, responseMimeType: 'application/json', responseSchema },
+        }),
+      })
+    })()
+  if (!response) return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} API key is not configured` }, 503)
+  let usagePayload: any = null
+  try { usagePayload = await response.clone().json() } catch { /* Some provider errors are not JSON. */ }
+  const usageInputTokens = Number(usagePayload?.usage?.prompt_tokens ?? usagePayload?.usageMetadata?.promptTokenCount ?? usagePayload?.usage?.input_tokens ?? 0)
+  const usageOutputTokens = Number(usagePayload?.usage?.completion_tokens ?? usagePayload?.usageMetadata?.candidatesTokenCount ?? usagePayload?.usage?.output_tokens ?? 0)
+  const recordedInputTokens = Number.isSafeInteger(usageInputTokens) && usageInputTokens > 0 ? usageInputTokens : estimatedTokens
+  const { error: usageWriteError } = await adminClient.from('ai_model_usage').update({
+    input_tokens: recordedInputTokens,
+    output_tokens: Number.isSafeInteger(usageOutputTokens) && usageOutputTokens >= 0 ? usageOutputTokens : 0,
+    succeeded: response.ok,
+  }).eq('id', usageReservation)
+  if (usageWriteError) return json({ error: 'The provider ran, but usage could not be recorded. Contact an administrator before retrying.' }, 503)
   if (!response.ok) {
     await response.text()
-    console.error('Gemini prediction request failed', response.status)
-    return json({ error: `Gemini prediction request failed (${response.status})` }, 502)
+    console.error(`${openAiSelected ? 'OpenAI' : 'Gemini'} prediction request failed`, response.status)
+    return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} prediction request failed (${response.status})` }, 502)
   }
   let rawResults: any
-  try { rawResults = parseJson(readGeminiText(await response.json())) } catch { return json({ error: 'Gemini returned an invalid prediction response' }, 502) }
-  if (!Array.isArray(rawResults) || rawResults.length !== body.inputs.length) return json({ error: 'Gemini returned an incomplete prediction response' }, 502)
+  try {
+    const payload = await response.json()
+    if (openAiSelected && payload?.choices?.[0]?.message?.refusal) return json({ error: 'OpenAI declined the prediction request' }, 502)
+    rawResults = openAiSelected ? parseJson(payload?.choices?.[0]?.message?.content ?? '')?.predictions : parseJson(readGeminiText(payload))
+  } catch { return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} returned an invalid prediction response` }, 502) }
+  if (!Array.isArray(rawResults) || rawResults.length !== body.inputs.length) return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} returned an incomplete prediction response` }, 502)
   const safeByRef = new Map(safeInputs.map((input) => [input.record_ref, input]))
   const predictionByIndex = new Map<number, any>()
   for (const result of rawResults) {
     const safeInput = safeByRef.get(result?.record_ref)
-    if (!safeInput || predictionByIndex.has(safeInput.original_index)) return json({ error: 'Gemini returned an invalid anonymous record reference' }, 502)
+    if (!safeInput || predictionByIndex.has(safeInput.original_index)) return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} returned an invalid anonymous record reference` }, 502)
     predictionByIndex.set(safeInput.original_index, result)
   }
-  if (predictionByIndex.size !== body.inputs.length) return json({ error: 'Gemini returned an incomplete prediction response' }, 502)
+  if (predictionByIndex.size !== body.inputs.length) return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} returned an incomplete prediction response` }, 502)
   const predictions: any[] = []
   for (let index = 0; index < body.inputs.length; index++) {
     const input = body.inputs[index]
@@ -607,9 +698,11 @@ Deno.serve(async (request) => {
     result.trend = restoreSchemaCategory(result.trend, schemaPrivacyMap)
     result.ai_risk_level = restoreSchemaCategory(result.ai_risk_level ?? result.risk_level, schemaPrivacyMap)
     const validationError = validatePrediction(result, evaluationCriteria, 'applied_grading_and_evaluation_schemas', outputFields, schemaPrivacyMap)
-    if (validationError) return json({ error: `Gemini returned an invalid prediction: ${validationError}` }, 502)
-    const assessmentValidation = validateAssessmentPredictions(result.assessment_predictions, safeAssessmentInstances as Record<string, any>[], outputFields, schemaPrivacyMap)
-    if (assessmentValidation.error) return json({ error: `Gemini returned an invalid prediction: ${assessmentValidation.error}` }, 502)
+    if (validationError) return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} returned an invalid prediction: ${validationError}` }, 502)
+    const safeInput = safeByRef.get(result.record_ref)
+    const existingRefs = new Set(((safeInput?.records as any)?.assessment_results ?? []).filter((item: any) => item?.score !== undefined || item?.percentage !== undefined || item?.categorical_value !== undefined).map((item: any) => String(item.assessment_ref)))
+    const assessmentValidation = validateAssessmentPredictions(result.assessment_predictions, safeAssessmentInstances as Record<string, any>[], outputFields, schemaPrivacyMap, existingRefs)
+    if (assessmentValidation.error) return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} returned an invalid prediction: ${assessmentValidation.error}` }, 502)
     predictions.push({
       enrollment_id: input.enrollment_id,
       predicted_standing: result.predicted_standing,
@@ -621,9 +714,10 @@ Deno.serve(async (request) => {
       assessment_predictions: assessmentValidation.values.map((prediction) => ({ assessment_id: assessmentIdsByRef.get(String(prediction.assessment_ref)), result: prediction.result, confidence: prediction.confidence, evidence: prediction.evidence })),
     })
   }
-  const modelVersion = `${model}-schema-context-v3`
+  const provider = openAiSelected ? 'openai' : 'gemini'
+  const modelVersion = String(aiConfig.modelVersion || `${model}-schema-context-v4`)
   let runId: string
-  try { runId = await saveRun('gemini', model, modelVersion, 'applied_grading_and_evaluation_schemas', predictions) }
+  try { runId = await saveRun(provider, model, modelVersion, 'applied_grading_and_evaluation_schemas', predictions) }
   catch (error) { return json({ error: error instanceof Error ? error.message : 'Prediction run could not be saved' }, 500) }
-  return json({ run_id: runId, provider: 'gemini', model, model_version: modelVersion, data_basis: 'applied_grading_and_evaluation_schemas', advisory_only: true, predictions })
+  return json({ run_id: runId, provider, model, model_version: modelVersion, data_basis: 'applied_grading_and_evaluation_schemas', advisory_only: true, predictions })
 })

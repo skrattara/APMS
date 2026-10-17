@@ -26,6 +26,8 @@ import {
 } from "@/data/mockFaculty";
 import { changePassword, saveSettings } from "@/services/actions";
 import { usePersistentDemoState } from "@/hooks/usePersistentDemoState";
+import { useYearLevels } from "@/hooks/useAcademicOptions";
+import { normalizeStudentId } from "@/utils/studentId";
 import { colors } from "@/theme/tokens";
 
 export function FacultyPortalContent({ screen }: { screen: string }) {
@@ -267,11 +269,12 @@ function FacultyStudents() {
   const [year, setYear] = useState("All");
   const [open, setOpen] = useState(false);
   const toast = useToast();
+  const normalizedQuery = query.trim().toLocaleLowerCase();
+  const normalizedStudentIdQuery = normalizeStudentId(query);
   const filtered = students.filter(
     (student) =>
-      `${student.id} ${student.name} ${student.email}`
-        .toLowerCase()
-        .includes(query.toLowerCase()) &&
+      (`${student.name} ${student.email}`.toLocaleLowerCase().includes(normalizedQuery)
+        || normalizeStudentId(student.id).includes(normalizedStudentIdQuery)) &&
       (year === "All" || student.year === year),
   );
   return (
@@ -338,9 +341,10 @@ function StudentDialog({
   onClose: () => void;
   onAdd: (student: FacultyStudent) => void;
 }) {
+  const yearLevels = useYearLevels();
   const [id, setId] = useState("");
   const [name, setName] = useState("");
-  const [year, setYear] = useState("Y1");
+  const [year, setYear] = useState("1");
   const [phone, setPhone] = useState("");
   const [email, setEmail] = useState("");
   const [section, setSection] = useState("");
@@ -376,10 +380,7 @@ function StudentDialog({
         <SelectField
           label="Year Level *"
           value={year}
-          options={["Y1", "Y2", "Y3", "Y4"].map((value) => ({
-            label: value,
-            value,
-          }))}
+          options={yearLevels.map((item) => ({ label: item.label, value: String(item.level) }))}
           onChange={setYear}
           containerStyle={styles.dialogField}
         />

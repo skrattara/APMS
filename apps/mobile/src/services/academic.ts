@@ -15,12 +15,32 @@ export type AcademicWorkspace = {
   personalEvaluationSystemMetadata: { updatedAt: string | null; updatedBy: string | null };
 };
 
+export type DepartmentFacultyMember = { userId: string; name: string; employeeId: string };
+export type ClassRequestReview = {
+  id: string;
+  requestedBy: string;
+  requesterName: string;
+  subjectId: string;
+  subject: string;
+  academicTermId: string;
+  term: string;
+  section: string;
+  lectureUnits: number;
+  laboratoryUnits: number;
+  rationale: string;
+  status: 'pending' | 'approved' | 'rejected';
+  reviewNote: string | null;
+  createdAt: string;
+};
+
 export type AcademicSubject = {
   id: string;
   departmentId: string;
   code: string;
   title: string;
   units: number;
+  lectureUnits: number;
+  laboratoryUnits: number;
   status: 'active' | 'inactive';
   createdAt: string;
   updatedAt: string;
@@ -90,7 +110,7 @@ export async function loadAcademicWorkspace(userId: string): Promise<AcademicWor
   // who is not also a Faculty member.
   const { data: classRows, error: classError } = await client()
     .from('class_records')
-    .select('id,subject_id,section,subjects(code,title),academic_terms(academic_year,semester),enrollments(count)')
+    .select('id,subject_id,section,subjects(code,title,lecture_units,laboratory_units),academic_terms(academic_year,semester),enrollments(count)')
     .eq('department_id', departmentId)
     .eq('status', 'active')
     .order('created_at', { ascending: false });
@@ -104,6 +124,8 @@ export async function loadAcademicWorkspace(userId: string): Promise<AcademicWor
     section: row.section,
     term: `${row.academic_terms?.academic_year ?? ''} ${row.academic_terms?.semester ?? ''}`.trim(),
     studentCount: Number(row.enrollments?.[0]?.count ?? 0),
+    lectureUnits: Number(row.subjects?.lecture_units ?? 3),
+    laboratoryUnits: Number(row.subjects?.laboratory_units ?? 0),
   }));
 
   const classIds = classSummaries.map((item) => item.id);
@@ -252,7 +274,7 @@ export async function loadDepartmentSubjects(): Promise<AcademicSubject[]> {
   // RLS restricts results to the Academic Admin's authorized department.
   const { data, error } = await client()
     .from('subjects')
-    .select('id,department_id,code,title,units,status,created_at,updated_at')
+    .select('id,department_id,code,title,units,lecture_units,laboratory_units,status,created_at,updated_at')
     .order('code');
   if (error) throw error;
   return (data ?? []).map((row: any) => ({
@@ -261,10 +283,87 @@ export async function loadDepartmentSubjects(): Promise<AcademicSubject[]> {
     code: row.code,
     title: row.title,
     units: Number(row.units),
+    lectureUnits: Number(row.lecture_units ?? 3),
+    laboratoryUnits: Number(row.laboratory_units ?? 0),
     status: row.status,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   }));
+}
+
+export async function loadClassCreationReferences(): Promise<{
+  subjects: { id: string; label: string; lectureUnits: number; laboratoryUnits: number }[];
+  terms: { id: string; label: string }[];
+  faculty: DepartmentFacultyMember[];
+}> {
+  const [subjectsResult, termsResult, facultyResult] = await Promise.all([
+    client().from('subjects').select('id,code,title,lecture_units,laboratory_units').eq('status', 'active').order('code'),
+    client().from('academic_terms').select('id,academic_year,semester').in('status', ['active', 'planned']).order('starts_on', { ascending: false }),
+    client().from('faculty_profiles').select('profile_id,employee_id,profiles!faculty_profiles_profile_id_fkey(first_name,last_name)').eq('status', 'active').order('employee_id'),
+  ]);
+  const error = subjectsResult.error ?? termsResult.error ?? facultyResult.error;
+  if (error) throw error;
+  return {
+    subjects: (subjectsResult.data ?? []).map((row: any) => ({ id: row.id, label: `${row.code} · ${row.title}`, lectureUnits: Number(row.lecture_units ?? 3), laboratoryUnits: Number(row.laboratory_units ?? 0) })),
+    terms: (termsResult.data ?? []).map((row: any) => ({ id: row.id, label: `${row.academic_year} · ${row.semester}` })),
+    faculty: (facultyResult.data ?? []).map((row: any) => ({
+      userId: row.profile_id,
+      name: `${row.profiles?.first_name ?? ''} ${row.profiles?.last_name ?? ''}`.trim() || row.employee_id,
+      employeeId: row.employee_id,
+    })),
+  };
+}
+
+export async function loadDepartmentClassRequests(): Promise<ClassRequestReview[]> {
+  const { data, error } = await client().from('class_requests')
+    .select('id,requested_by,subject_id,academic_term_id,section,rationale,status,review_note,created_at,profiles!class_requests_requested_by_fkey(first_name,last_name),subjects(code,title,lecture_units,laboratory_units),academic_terms(academic_year,semester)')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((row: any) => ({
+    id: row.id,
+    requestedBy: row.requested_by,
+    requesterName: `${row.profiles?.first_name ?? ''} ${row.profiles?.last_name ?? ''}`.trim() || 'Faculty member',
+    subjectId: row.subject_id,
+    subject: `${row.subjects?.code ?? '—'} · ${row.subjects?.title ?? 'Subject'}`,
+    academicTermId: row.academic_term_id,
+    term: `${row.academic_terms?.academic_year ?? ''} ${row.academic_terms?.semester ?? ''}`.trim(),
+    section: row.section,
+    lectureUnits: Number(row.subjects?.lecture_units ?? 3),
+    laboratoryUnits: Number(row.subjects?.laboratory_units ?? 0),
+    rationale: row.rationale,
+    status: row.status,
+    reviewNote: row.review_note ?? null,
+    createdAt: row.created_at,
+  }));
+}
+
+export async function createAcademicAdminClass(input: {
+  subjectId: string;
+  termId: string;
+  section: string;
+  facultyUserIds: string[];
+  requestId?: string;
+}): Promise<string> {
+  const { data, error } = await client().rpc('academic_admin_create_class', {
+    p_subject_id: input.subjectId,
+    p_academic_term_id: input.termId,
+    p_section: input.section.trim(),
+    p_faculty_user_ids: input.facultyUserIds,
+    p_request_id: input.requestId ?? null,
+  });
+  if (error) {
+    if (error.code === '23505') throw new Error('A class for this subject and section already exists in this term.');
+    throw error;
+  }
+  return data as string;
+}
+
+export async function rejectAcademicAdminClassRequest(requestId: string, reviewNote: string): Promise<void> {
+  const { error } = await client().rpc('academic_admin_reject_class_request', {
+    p_request_id: requestId,
+    p_review_note: reviewNote.trim(),
+  });
+  if (error) throw error;
 }
 
 export async function manageSubject(input: {
@@ -273,16 +372,28 @@ export async function manageSubject(input: {
   code: string;
   title: string;
   units: number;
+  lectureUnits?: number;
+  laboratoryUnits?: number;
   status: 'active' | 'inactive';
 }): Promise<string> {
-  const { data, error } = await client().rpc('academic_admin_manage_subject', {
+  const rpc = input.lectureUnits != null && input.laboratoryUnits != null ? 'academic_admin_manage_subject_unit_split' : 'academic_admin_manage_subject';
+  const args = rpc === 'academic_admin_manage_subject_unit_split' ? {
+    p_subject_id: input.subjectId ?? null,
+    p_department_id: input.departmentId,
+    p_code: input.code.trim(),
+    p_title: input.title.trim(),
+    p_lecture_units: input.lectureUnits,
+    p_laboratory_units: input.laboratoryUnits,
+    p_status: input.status,
+  } : {
     p_subject_id: input.subjectId ?? null,
     p_department_id: input.departmentId,
     p_code: input.code.trim(),
     p_title: input.title.trim(),
     p_units: input.units,
     p_status: input.status,
-  });
+  };
+  const { data, error } = await client().rpc(rpc, args);
   if (error) {
     if (error.code === '23505') {
       throw new Error(`A subject with code "${input.code}" already exists in this department.`);

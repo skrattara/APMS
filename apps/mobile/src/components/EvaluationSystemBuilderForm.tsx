@@ -1,4 +1,5 @@
 import { Button, Field, HelpTooltip, SelectField } from '@/components/ui';
+import { AppIcon } from '@/components/Icon';
 import { DEFAULT_EVALUATION_SYSTEM, type EvaluationDefinition } from '@apms/domain';
 import type { GradingDefinition } from '@apms/domain';
 import { colors } from '@/theme/tokens';
@@ -84,9 +85,55 @@ export function EvaluationSystemBuilderForm({ definition, onChange, gradingSyste
     const scheme = definition.classification?.colorScheme ?? 'custom';
     onChange({ ...definition, levels: applyColorScheme(levels, scheme) });
   };
+  const patchAi = (patch: Partial<NonNullable<EvaluationDefinition['ai']>>) => onChange({
+    ...definition,
+    ai: { enabled: true, advisoryOnly: true, institutionallyValidated: false, inputFeatures: [], outputFields: [], unavailablePolicy: 'continue_with_available_rules', ...definition.ai, ...patch },
+  });
+  const toggleAiList = (key: 'inputFeatures' | 'outputFields', value: string) => {
+    const list = definition.ai?.[key] ?? [];
+    const updated = list.includes(value) ? list.filter((item) => item !== value) : [...list, value];
+    patchAi({ [key]: updated });
+  };
+  const aiChoice = (label: string, checked: boolean, onPress: () => void) => <Pressable key={label} accessibilityRole="checkbox" accessibilityState={{ checked }} onPress={onPress} style={{ flexDirection: 'row', alignItems: 'center', gap: 8, paddingVertical: 5, paddingRight: 12 }}><AppIcon name={checked ? 'checkboxChecked' : 'checkbox'} size={18} color={checked ? colors.brand : colors.textMuted} /><Text style={{ color: colors.text, fontSize: 12 }}>{label}</Text></Pressable>;
   return <View style={{ gap: 16 }}>
     <Field label="Evaluation system name" value={definition.name} onChangeText={(name) => onChange({ ...definition, name })} helpText="The name shown to academic admins when they review this evaluation system." helpExample="Department Student Risk Evaluation" />
     <Field label="Description" value={definition.description ?? ''} onChangeText={(description) => onChange({ ...definition, description })} multiline helpText="Summarize what this evaluation system monitors and how its results should be used." helpExample="Advisory monitoring based on current standing, attendance, and recent results." />
+    <View style={{ gap: 10, borderWidth: 1, borderColor: '#DCE3EC', borderRadius: 10, padding: 14, backgroundColor: '#F8FAFC' }}>
+      <Text style={{ color: colors.text, fontSize: 14, fontWeight: '700' }}>AI forecasts and evaluation factors</Text>
+      <Text style={{ color: colors.textMuted, fontSize: 12, lineHeight: 18 }}>Choose the provider and outputs for this evaluation system. API keys remain in protected Edge Function secrets. AI output is advisory and validated against this system before it is saved.</Text>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 10, alignItems: 'flex-end' }}>
+        <SelectField label="AI provider" value={definition.ai?.provider ?? 'Gemini'} options={[{ label: 'Google Gemini', value: 'Gemini' }, { label: 'OpenAI', value: 'OpenAI' }, { label: 'Custom model endpoint', value: 'custom' }]} onChange={(provider) => patchAi({ provider })} containerStyle={{ flex: 1, minWidth: 180 }} />
+        <Field label="Model name (optional)" value={definition.ai?.modelName ?? ''} onChangeText={(modelName) => patchAi({ modelName: modelName.trim() || undefined })} placeholder="Use the server default" containerStyle={{ flex: 1, minWidth: 180 }} autoCapitalize="none" />
+        <Field label="Model version (optional)" value={definition.ai?.modelVersion ?? ''} onChangeText={(modelVersion) => patchAi({ modelVersion: modelVersion.trim() || undefined })} placeholder="Record a version tag" containerStyle={{ flex: 1, minWidth: 180 }} autoCapitalize="none" />
+        <Button label={definition.ai?.enabled === false ? 'Enable AI' : 'Disable AI'} variant="secondary" onPress={() => patchAi({ enabled: definition.ai?.enabled === false })} />
+      </View>
+      <Text style={{ color: colors.text, fontSize: 12, fontWeight: '700', marginTop: 2 }}>Allowed AI inputs</Text>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+        {aiChoice('Current standing', (definition.ai?.inputFeatures ?? []).includes('current_standing'), () => toggleAiList('inputFeatures', 'current_standing'))}
+        {aiChoice('Recent scores', (definition.ai?.inputFeatures ?? []).includes('recent_scores'), () => toggleAiList('inputFeatures', 'recent_scores'))}
+        {aiChoice('Missing assessment count', (definition.ai?.inputFeatures ?? []).includes('missing_assessment_count'), () => toggleAiList('inputFeatures', 'missing_assessment_count'))}
+        {aiChoice('Assessment results', (definition.ai?.inputFeatures ?? []).includes('assessment_results'), () => {
+          const current = definition.ai?.inputFeatures ?? [];
+          const enabled = !current.includes('assessment_results');
+          const inputFeatures = current.filter((item) => item !== 'assessment_results' && item !== 'assessment_instance_details');
+          patchAi({ inputFeatures: enabled ? [...inputFeatures, 'assessment_results', 'assessment_instance_details'] : inputFeatures });
+        })}
+        {aiChoice('Assessment instance details', (definition.ai?.inputFeatures ?? []).includes('assessment_instance_details'), () => toggleAiList('inputFeatures', 'assessment_instance_details'))}
+        {aiChoice('Attendance rate', (definition.ai?.inputFeatures ?? []).includes('attendance_rate'), () => toggleAiList('inputFeatures', 'attendance_rate'))}
+      </View>
+      <Text style={{ color: colors.text, fontSize: 12, fontWeight: '700', marginTop: 2 }}>Allowed AI outputs</Text>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap' }}>
+        {aiChoice('Evaluation factor scores', (definition.ai?.outputFields ?? []).includes('evaluation_scores'), () => toggleAiList('outputFields', 'evaluation_scores'))}
+        {aiChoice('Assessment score predictions', (definition.ai?.outputFields ?? []).includes('assessment_score_predictions'), () => {
+          const enabled = (definition.ai?.outputFields ?? []).includes('assessment_score_predictions');
+          if (enabled) toggleAiList('outputFields', 'assessment_score_predictions');
+          else {
+            patchAi({ outputFields: [...new Set([...(definition.ai?.outputFields ?? []), 'assessment_score_predictions'])], inputFeatures: [...new Set([...(definition.ai?.inputFeatures ?? []), 'assessment_results', 'assessment_instance_details'])] });
+          }
+        })}
+      </View>
+      {(definition.ai?.outputFields ?? []).includes('assessment_score_predictions') ? <Text style={{ color: colors.danger, fontSize: 11, lineHeight: 16 }}>Assessment score forecasts require the System Admin to enable anonymous assessment data sharing. Existing scored assessments are never replaced by forecasts.</Text> : null}
+    </View>
     <View accessibilityRole="tablist" style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
       {([{ id: 'factors', label: 'Evaluation factors' }, { id: 'rules', label: 'Risk levels and rules' }] as const).map((item, index) => <Pressable key={item.id} accessibilityRole="tab" accessibilityState={{ selected: step === item.id }} onPress={() => setStep(item.id)} style={{ paddingVertical: 8, paddingHorizontal: 10, borderRadius: 18, borderWidth: 1, borderColor: step === item.id ? colors.brand : '#D5DCE7', backgroundColor: step === item.id ? colors.brand : '#FFFFFF' }}><Text style={{ color: step === item.id ? '#FFFFFF' : colors.textMuted, fontSize: 12, fontWeight: '600' }}>{index + 1}. {item.label}</Text></Pressable>)}
     </View>
@@ -100,6 +147,12 @@ export function EvaluationSystemBuilderForm({ definition, onChange, gradingSyste
         {factor.source === 'grading_group' ? <SelectField label="Grade group" value={factor.gradingGroupId ?? ''} options={groupOptions} onChange={(gradingGroupId) => onChange({ ...definition, factors: definition.factors.map((item, i) => i === index ? { ...item, gradingGroupId } : item) })} containerStyle={{ flex: 1, minWidth: 180 }} helpText="Select an assessment group. Child groups are included in the group percentage." helpExample="Module 2 includes its directly assigned assessments and nested groups." /> : null}
         {factor.source === 'grading_component' || factor.source === 'grading_group' ? <SelectField label="Summarize scores using" value={factor.gradingAggregation ?? 'average'} options={[{ label: 'Average', value: 'average', helpText: 'Use the arithmetic mean of the matching assessment percentages.' }, { label: 'Highest', value: 'highest', helpText: 'Use the highest matching assessment percentage.' }, { label: 'Lowest', value: 'lowest', helpText: 'Use the lowest matching assessment percentage.' }]} onChange={(gradingAggregation) => onChange({ ...definition, factors: definition.factors.map((item, i) => i === index ? { ...item, gradingAggregation: gradingAggregation as 'average' | 'highest' | 'lowest' } : item) })} containerStyle={{ width: 180 }} helpText="Choose how scores for the selected grade component or group are summarized." helpExample="Scores 65%, 80%, and 95% produce Average 80%, Highest 95%, or Lowest 65%." /> : null}
         {['recent_scores', 'recent_score_average', 'recent_trend'].includes(factor.source) ? <Field label="Recent window" value={String(factor.windowSize ?? 5)} keyboardType="numeric" onChangeText={(value) => onChange({ ...definition, factors: definition.factors.map((item, i) => i === index ? { ...item, windowSize: Math.min(50, Math.max(1, Number(value) || 1)) } : item) })} containerStyle={{ width: 120 }} helpText="How many most recent assessment records are included in this factor." helpExample="A recent window of 5 uses the five latest scores to calculate the recent score average or trend." /> : null}
+        {aiChoice('AI-generated factor', factor.aiGenerated === true || factor.origin === 'ai_prediction', () => {
+          const enabled = factor.aiGenerated !== true && factor.origin !== 'ai_prediction';
+          const factors = definition.factors.map((item, i) => i === index ? { ...item, aiGenerated: enabled, origin: enabled ? 'ai_prediction' as const : 'derived' as const } : item);
+          const outputs = definition.ai?.outputFields ?? [];
+          onChange({ ...definition, factors, ai: { enabled: true, advisoryOnly: true, institutionallyValidated: false, inputFeatures: [], outputFields: [], unavailablePolicy: 'continue_with_available_rules', ...definition.ai, ...(enabled ? { outputFields: [...new Set([...outputs, 'evaluation_scores'])] } : {}) } });
+        })}
         <Field label="Factor weight" value={String(factor.weight ?? 1)} keyboardType="decimal-pad" onChangeText={(value) => onChange({ ...definition, factors: definition.factors.map((item, i) => i === index ? { ...item, weight: value === '' ? undefined : Math.max(0, Math.min(100, Number(value) || 0)) } : item) })} containerStyle={{ width: 110 }} helpText="Relative influence in weighted evaluation mode. Set to 0 to exclude this factor from the weighted score." />
         <Button label="Remove" variant="ghost" disabled={definition.factors.length <= 1} onPress={() => onChange({
           ...definition,

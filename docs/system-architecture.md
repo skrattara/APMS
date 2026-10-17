@@ -27,7 +27,7 @@ If AI is unavailable, records, calculations, reports, and historical data remain
 - Expo client: authenticated UI, manual/batch workflows, dashboards, and reports.
 - Shared domain package: deterministic calculations and validation; it never calls AI or Supabase.
 - Supabase Auth/Postgres/Data API: identity, persistence, RLS authorization, auditing, and the preserved connection.
-- FastAPI AI service: isolated prediction contract and controlled-synthetic prototype. No official-grade authority.
+- FastAPI AI service: isolated, authenticated prediction contract backed by a configured schema-conditioned Transformer artifact. Explicit synthetic pretraining and real-data adaptation share a versioned pipeline. No official-grade authority; see [model architecture](AI_MODEL_ARCHITECTURE.md) and [service guide](../services/ai/README.md).
 - SWU SIS: external authoritative system; no scraping, grade submission, enrollment, billing, or account-management workflow exists.
 - External classroom/SIS systems: not implemented. APMS classes remain independent and manual/CSV input remains supported.
 - Email: feedback drafts/history work without delivery; sending requires an approved service and Faculty confirmation.

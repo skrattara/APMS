@@ -7,9 +7,11 @@ import { SvgXml } from "react-native-svg";
 import { useAuth, type AuthUser } from "@/auth/AuthProvider";
 import { AppShell } from "@/components/AppShell";
 import { AppIcon } from "@/components/Icon";
+import { AIProviderSettings } from "@/components/AIProviderSettings";
 import {
   Button,
   Card,
+  CompactControlsProvider,
   ConfirmDialog,
   DataTable,
   Field,
@@ -837,7 +839,7 @@ function LiveAnalyticsContent({
   const filteredScoreDistribution = filters.filtered.map((record) => ({ label: record.label, value: record.score, kind: "continuous" as const }));
   const average = filters.filtered.length ? filters.filtered.reduce((sum, item) => sum + item.score, 0) / filters.filtered.length : null;
   const highRisk = filters.filtered.filter((item) => item.risk === "high").length;
-  return (
+  const portalContent = (
     <>
       {filters.controls}
       {truncated ? <Card><Text style={styles.muted}>Charts and filtered metrics use the latest 5,000 evaluation records. The total evaluation count remains complete.</Text></Card> : null}
@@ -862,6 +864,8 @@ function LiveAnalyticsContent({
       <ReportComposer title="Academic Monitoring Report" scopeLabel={role === "academic_admin" ? "Authorized department" : "Assigned class"} description="Persisted APMS performance analytics for your authorized scope." rows={reportRows} />
     </>
   );
+  const compactControls = screen !== "gradebook" && !(role === "academic_admin" && screen === "criteria");
+  return compactControls ? <CompactControlsProvider>{portalContent}</CompactControlsProvider> : portalContent;
 }
 
 function DemoSystemReports() {
@@ -887,7 +891,7 @@ export function Settings({
   const personal = screen === "settings";
   const notification = screen === "notifications";
   const tabs = personal
-    ? ["Profile", "Password", "MFA", "Notifications"]
+    ? ["Profile", ...(role === "academic_admin" ? ["AI Providers"] : []), "Password", "MFA", "Notifications"]
     : notification
       ? ["Delivery", "Rules"]
       : ["General", "Authentication", "Integrations"];
@@ -1018,6 +1022,7 @@ export function Settings({
           <SaveButton saving={saving} onPress={save} />
         </View>
       ) : null}
+      {personal && role === "academic_admin" && tab === "AI Providers" ? <AIProviderSettings onMessage={onMessage} /> : null}
       {personal && tab === "Password" ? (
         <View style={styles.form}>
           <Field

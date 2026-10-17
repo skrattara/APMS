@@ -10,7 +10,12 @@ RPC: `review_grader_submission(target_submission_id, review_decision, review_rea
 
 AI service:
 
-- `GET /health` — service/model availability.
-- `POST /v1/predictions` — validated evaluation input; returns 503 without an approved model and never fabricates a prediction.
+- `GET /health` — process liveness and model availability.
+- `GET /ready` — readiness; requires a verified artifact and configured server authentication.
+- `GET /metrics` — bearer-authenticated, worker-local request/error counts and bounded latency summary; no student data.
+- `POST /v1/predictions` — bearer-authenticated existing gateway adapter. Accepts privacy-projected grading/evaluation snapshots, evidence, task contract, and optional assessment inventory; returns only the gateway's allowlisted output fields. Returns 503 without a configured artifact.
+- `POST /v2/forecasts` — bearer-authenticated typed sequence API. Accepts `fields`, ordered `history`, scalar `queries` with horizons/bounds/choices, `schema_context`, and optional assessment inventory. Returns typed predictions, intervals, calibration flags, trend, and risk probabilities. Future labels are forbidden. This is a private service API; clients continue through the application's authorization boundary.
+
+See [the AI service guide](../services/ai/README.md) for artifact selection, input examples, resource limits, and deployment. A synthetic artifact requires explicit development opt-in and does not establish real-world accuracy.
 
 Errors shown to users are sanitized; raw database paths, SQL, stack traces, and secrets are not rendered.

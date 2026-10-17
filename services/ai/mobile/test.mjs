@@ -1,0 +1,63 @@
+import assert from 'node:assert/strict';
+import { prepareExample, inputNames, decodeOutputs } from './index.mjs';
+
+class Tensor { constructor(type,data,dims){Object.assign(this,{type,data,dims});} }
+const ort={Tensor};
+const metadata={fields:['score','state'],model_config:{max_history:512,max_queries:128,categories:16},preprocessing:{score:[50,10]},schema_symbols:{gradingSystem:1,evaluationCriteria:2,components:3,calculation:4,mode:5,linear:6}};
+const example={fields:[{name:'score',kind:'float',minimum:0,maximum:100},{name:'state',kind:'category',categories:['ready','late']}],history:[{score:60,state:'late'},{score:null,state:'ready'}],queries:[{field:'score',horizon:2},{field:'state',horizon:1}],schema:{gradingSystem:{components:[{calculation:{mode:'linear'}}]}}};
+const prepared=prepareExample(example,metadata,ort), f=prepared.feed;
+assert.deepEqual(Object.keys(f),inputNames);
+assert.deepEqual(Array.from(f.values.data),[1,2,0,1]);
+assert.deepEqual(Array.from(f.field_ids.data),[0n,1n,0n,1n]);
+assert.deepEqual(Array.from(f.kinds.data),[0n,3n,4n,3n]);
+assert.deepEqual(Array.from(f.query_ids.data),[0n,1n]);
+assert.ok(Math.abs(f.query_features.data[0]-Math.log1p(2)/Math.log(129))<1e-7);
+assert.deepEqual(Array.from(f.query_features.data.slice(1,8)),[0,1,1,-0.5,0.5,0,1]);
+assert.deepEqual(Array.from(f.legal_category_mask.data.slice(0,32)),[...Array(16).fill(0),1,1,...Array(14).fill(0)]);
+assert.equal(f.values.type,'float32');assert.equal(f.field_ids.type,'int64');assert.equal(f.history_mask.type,'bool');
+const reordered={...example,queries:[example.queries[1],example.queries[0]]};
+const rf=prepareExample(reordered,metadata,ort).feed;
+assert.deepEqual(Array.from(rf.query_ids.data),[1n,0n]);
+assert.deepEqual(Array.from(rf.query_features.data.slice(0,8)),Array.from(f.query_features.data.slice(8,16)));
+assert.deepEqual(Array.from(rf.query_features.data.slice(8,16)),Array.from(f.query_features.data.slice(0,8)));
+const subsetExample={fields:[example.fields[0]],history:[{score:60}],queries:[{field:'score'}]};
+const subsetPrepared=prepareExample(subsetExample,metadata,ort);
+assert.deepEqual(Array.from(subsetPrepared.feed.field_ids.data),[0n]);
+assert.deepEqual(Array.from(subsetPrepared.feed.query_ids.data),[0n]);
+assert.throws(()=>prepareExample({...subsetExample,queries:[{field:'score',minimum:-1}]},metadata,ort),/cannot widen/);
+const rawArrays={quantiles:[[[[0.1,0.2,0.3]],[[0,0,0]]]],categorical:[[[0,1,0],[0,0,0]]],trend:[[[1,0,0],[0,1,0]]],failure:[[0,1]]};
+// ONNX Runtime returns flat typed tensor data plus dimensions. Decoding these
+// must match the equivalent nested-array path used by the reference helper.
+const rawTensors=Object.fromEntries(Object.entries(rawArrays).map(([k,v])=>{
+  const dims=k==='quantiles'?[1,2,1,3]:k==='categorical'?[1,2,3]:k==='trend'?[1,2,3]:[1,2];
+  const flatten=a=>a.flatMap(x=>Array.isArray(x)?flatten(x):[x]);
+  return [k,new Tensor('float32',Float32Array.from(flatten(v)),dims)];
+}));
+const arrDecoded=decodeOutputs(rawArrays,example,metadata,prepared);
+const tensorDecoded=decodeOutputs(rawTensors,example,metadata,prepared);
+const rounded=x=>typeof x==='number'?Number(x.toFixed(5)):Array.isArray(x)?x.map(rounded):x&&typeof x==='object'?Object.fromEntries(Object.entries(x).map(([k,v])=>[k,rounded(v)])):x;
+assert.deepEqual(rounded(tensorDecoded),rounded(arrDecoded));
+assert.equal(arrDecoded[0].interval.calibrated,false);
+assert.equal(arrDecoded[0].failure_calibrated,false);
+assert.equal(arrDecoded[1].value,'ready');
+assert.equal(arrDecoded[1].class_probability_calibrated,false);
+const calibratedMetadata={...metadata,calibration:{risk_by_query:{typed_category:{field:'state',horizon:1,domain:{kind:'category',minimum:null,maximum:null,categories:['ready','late'],choices:[]},temperature:2,calibrated:true}}}};
+const calibratedDecoded=decodeOutputs(rawArrays,example,calibratedMetadata,prepared);
+assert.ok(Math.abs(calibratedDecoded[1].failure_probability-(1/(1+Math.exp(-0.5))))<1e-12);
+assert.equal(calibratedDecoded[1].failure_calibrated,true);
+assert.throws(()=>decodeOutputs({...rawTensors,failure:new Tensor('float32',Float32Array.of(NaN,0),[1,2])},example,metadata,prepared),/non-finite/);
+const integerExample={fields:[{name:'n',kind:'integer',minimum:1.2,maximum:1.8}],history:[],queries:[{field:'n'}]};
+const integerMeta={...metadata,fields:['n'],preprocessing:{n:[0,1]}};
+assert.throws(()=>prepareExample(integerExample,integerMeta,ort),/no legal integer/);
+const boundedExample={fields:[{name:'bounded',kind:'float',minimum:0,maximum:1}],history:[],queries:[{field:'bounded'}]};
+const boundedMetadata={...metadata,fields:['bounded'],preprocessing:{bounded:[0,1]}};
+const boundedPrepared=prepareExample(boundedExample,boundedMetadata,ort);
+const numericOutput=(lo,mid,hi)=>({quantiles:[[[[lo,mid,hi]]]],categorical:[[Array(16).fill(0)]],trend:[[[1,0,0]]],failure:[[0]]});
+assert.equal(decodeOutputs(numericOutput(-0.000001,-0.000001,0.000001),boundedExample,boundedMetadata,boundedPrepared)[0].value,0);
+assert.throws(()=>decodeOutputs(numericOutput(1,1.1,1.2),boundedExample,boundedMetadata,boundedPrepared),/outside active schema bounds/);
+const integerRoundingExample={fields:[{name:'n',kind:'integer',minimum:0,maximum:5}],history:[],queries:[{field:'n'}]};
+const integerRoundingMeta={...metadata,fields:['n'],preprocessing:{n:[0,1]}};
+const integerRoundingPrepared=prepareExample(integerRoundingExample,integerRoundingMeta,ort);
+assert.equal(decodeOutputs(numericOutput(2.5,2.5,2.5),integerRoundingExample,integerRoundingMeta,integerRoundingPrepared)[0].value,2);
+assert.equal(decodeOutputs(numericOutput(3.5,3.5,3.5),integerRoundingExample,integerRoundingMeta,integerRoundingPrepared)[0].value,4);
+console.log('mobile encoder fixture and query order checks passed');

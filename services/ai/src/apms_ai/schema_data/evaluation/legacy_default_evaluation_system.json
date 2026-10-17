@@ -1,0 +1,164 @@
+{
+  "schemaVersion": 2,
+  "definitionVersion": 1,
+  "id": "84f591da-0414-44d3-b15b-1503cad573cb",
+  "name": "Legacy APMS Student Performance Evaluation",
+  "description": "Representation of the pre-builder risk rules from AcademicAdminPortalContent.tsx at repository revision 56ec094. A saved low, medium, or high AI risk label took precedence; otherwise current standing, mastery, and attendance used 70% high-risk and 80% medium-risk thresholds.",
+  "factors": [
+    {
+      "id": "28af5164-e238-48ad-ad32-5fd54453eed9",
+      "name": "Current standing",
+      "source": "grading_component",
+      "gradingComponentId": "semester-grade",
+      "gradingAggregation": "average",
+      "valueType": "number",
+      "unit": "percentage",
+      "origin": "academic_record",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "id": "254d43c0-eed0-4a13-9dc2-b1b0f87837fc",
+      "name": "Mastery",
+      "source": "grading_component",
+      "gradingComponentId": "mg",
+      "gradingAggregation": "average",
+      "valueType": "number",
+      "unit": "percentage",
+      "origin": "academic_record",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "id": "60c3d2de-83de-44e2-ab76-9f1f9ed2cf33",
+      "name": "Attendance rate",
+      "source": "attendance_rate",
+      "valueType": "number",
+      "unit": "percentage",
+      "origin": "academic_record",
+      "minimum": 0,
+      "maximum": 100
+    },
+    {
+      "id": "93f9860e-bae8-4710-b5ba-53cbb593f21b",
+      "name": "Saved AI risk level",
+      "source": "ai_risk_level",
+      "valueType": "category",
+      "unit": "category",
+      "origin": "ai_prediction",
+      "categories": ["low", "medium", "high"],
+      "aiGenerated": true
+    }
+  ],
+  "levels": [
+    {
+      "id": "bddf62b5-b851-4679-aaf4-8d86448d043e",
+      "name": "Saved AI High Risk",
+      "severity": "high",
+      "priority": 60,
+      "match": "any",
+      "rules": [
+        { "factorId": "93f9860e-bae8-4710-b5ba-53cbb593f21b", "operator": "equals", "threshold": "high" }
+      ],
+      "color": "#CA2121",
+      "recommendedAction": "Review the advisory prediction alongside the student's academic record.",
+      "requiresHumanReview": true
+    },
+    {
+      "id": "533b0fa1-650c-471e-ad20-8d6a6d0a8dd3",
+      "name": "Saved AI Medium Risk",
+      "severity": "medium",
+      "priority": 59,
+      "match": "any",
+      "rules": [
+        { "factorId": "93f9860e-bae8-4710-b5ba-53cbb593f21b", "operator": "equals", "threshold": "medium" }
+      ],
+      "color": "#CACA21",
+      "recommendedAction": "Review current progress and provide support where appropriate.",
+      "requiresHumanReview": true
+    },
+    {
+      "id": "e94fe8bd-4d65-439c-8e22-1b950ae06356",
+      "name": "Saved AI Low Risk",
+      "severity": "low",
+      "priority": 58,
+      "match": "any",
+      "rules": [
+        { "factorId": "93f9860e-bae8-4710-b5ba-53cbb593f21b", "operator": "equals", "threshold": "low" }
+      ],
+      "color": "#21CA21",
+      "requiresHumanReview": true
+    },
+    {
+      "id": "f12fb2d3-3ac1-41fb-9f38-3a7d819f3c8e",
+      "name": "High Risk",
+      "severity": "high",
+      "priority": 30,
+      "match": "any",
+      "rules": [
+        { "factorId": "28af5164-e238-48ad-ad32-5fd54453eed9", "operator": "below", "threshold": 70 },
+        { "factorId": "254d43c0-eed0-4a13-9dc2-b1b0f87837fc", "operator": "below", "threshold": 70 },
+        { "factorId": "60c3d2de-83de-44e2-ab76-9f1f9ed2cf33", "operator": "below", "threshold": 70 }
+      ],
+      "color": "#CA2121",
+      "requiresHumanReview": true
+    },
+    {
+      "id": "508c50a7-4327-4ce3-8385-93db361d1ef3",
+      "name": "Medium Risk",
+      "severity": "medium",
+      "priority": 20,
+      "match": "any",
+      "rules": [
+        { "factorId": "28af5164-e238-48ad-ad32-5fd54453eed9", "operator": "below", "threshold": 80 },
+        { "factorId": "254d43c0-eed0-4a13-9dc2-b1b0f87837fc", "operator": "below", "threshold": 80 },
+        { "factorId": "60c3d2de-83de-44e2-ab76-9f1f9ed2cf33", "operator": "below", "threshold": 80 }
+      ],
+      "color": "#CACA21",
+      "requiresHumanReview": true
+    },
+    {
+      "id": "ccf05565-7d5b-4a2f-88d7-20c951cdb8ea",
+      "name": "Low Risk",
+      "severity": "low",
+      "priority": 10,
+      "match": "any",
+      "rules": [],
+      "color": "#21CA21",
+      "requiresHumanReview": true
+    }
+  ],
+  "classification": {
+    "strategy": "priority",
+    "colorScheme": "green_to_red",
+    "unmatchedSeverity": "low",
+    "missingValuePolicy": "ignore_rule",
+    "minimumEvidenceCount": 0,
+    "requireRecentPrediction": false
+  },
+  "ai": {
+    "enabled": true,
+    "advisoryOnly": true,
+    "institutionallyValidated": false,
+    "provider": "Gemini",
+    "supportedScenarios": ["minimum", "maximum", "minimum_pass", "stable", "custom"],
+    "inputFeatures": ["current_standing", "recent_scores", "attendance_rate", "missing_assessment_count"],
+    "outputFields": ["predicted_standing", "risk_probability", "risk_level", "trend", "factors", "model_version", "data_basis", "generated_at"],
+    "riskProbabilityMeaning": "heuristic",
+    "unavailablePolicy": "continue_with_available_rules",
+    "explanationPolicy": "show_model_factors_as_advisory"
+  },
+  "decisionPolicy": {
+    "advisoryOnly": true,
+    "maySetOfficialGrade": false,
+    "mayApplyAutomaticPenalty": false,
+    "requiresEducatorReview": true,
+    "officialRecordSystem": "SWU SIS"
+  },
+  "explanation": {
+    "includeMatchedRules": true,
+    "includeInputValues": true,
+    "includeMissingInputs": true,
+    "includeAiFactors": true
+  }
+}

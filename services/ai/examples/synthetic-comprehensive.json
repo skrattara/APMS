@@ -1,0 +1,37 @@
+{
+  "count": 640,
+  "seed": 20261017,
+  "config": {
+    "history_min": 1,
+    "history_max": 16,
+    "horizons": [1, 2],
+    "family_names": [
+      "smooth",
+      "rising",
+      "falling",
+      "mean_reverting",
+      "seasonal",
+      "delayed_response",
+      "shock",
+      "intervention",
+      "volatility_regime",
+      "nonlinear_plateau"
+    ],
+    "noise_laws": ["normal", "uniform", "triangular", "heavy_tailed", "skewed", "mixture"],
+    "noise_scale_range": [1.5, 9.0],
+    "slope_magnitude_range": [0.15, 3.8],
+    "other_subject_correlation": 0.62,
+    "attendance_score_correlation": 0.28,
+    "field_missing_probability": 0.1,
+    "structural_absence_probability": 0.04,
+    "burst_missing_probability": 0.2,
+    "burst_missing_length": [2, 5],
+    "sparse_history_probability": 0.05,
+    "empty_history_probability": 0.02,
+    "label_missing_probability": 0.08,
+    "task_missing_probability": 0.04,
+    "windows_per_student": 2,
+    "passing_threshold_range": [57.0, 81.0],
+    "attendance_threshold_range": [54.0, 84.0]
+  }
+}

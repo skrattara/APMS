@@ -135,8 +135,12 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
   const storedFeedbackFromName = data.settings.find((row) => row.key === 'FEEDBACK_FROM_NAME')?.value;
   const [feedbackFromName, setFeedbackFromName] = useState(typeof storedFeedbackFromName === 'string' && storedFeedbackFromName.trim() ? storedFeedbackFromName : 'APMS Feedback');
   const [saving, setSaving] = useState(false);
+  const [providerStatus, setProviderStatus] = useState<any>(null);
+  useEffect(() => { let active = true; if (!supabase) return; void supabase.functions.invoke('ai-provider-settings', { method: 'GET' }).then(({ data: result }) => { if (active && result && !result.error) setProviderStatus(result); }); return () => { active = false; }; }, []);
   const storedDefaultId = data.settings.find((row) => row.key === 'grading.default_system_id')?.value;
   const [defaultSystemId, setDefaultSystemId] = useState(typeof storedDefaultId === 'string' ? storedDefaultId : IT_GLOBAL_GRADING_SYSTEM.id);
+  const [studentIdValidation, setStudentIdValidation] = useState(data.settings.find((row) => row.key === 'student_id.validation_enabled')?.value === true);
+  useEffect(() => { setStudentIdValidation(data.settings.find((row) => row.key === 'student_id.validation_enabled')?.value === true); }, [data.settings]);
   const [gradingSystems, setGradingSystems] = useState<GradingDefinition[]>([IT_GLOBAL_GRADING_SYSTEM]);
   useEffect(() => {
     const saved = data.settings.find((row) => row.key === 'FEEDBACK_FROM_EMAIL')?.value;
@@ -165,6 +169,12 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
       }
       await saveSystemSetting(userId, 'FEEDBACK_FROM_EMAIL', feedbackFromEmail.trim());
       await saveSystemSetting(userId, 'FEEDBACK_FROM_NAME', feedbackFromName.trim());
+      await saveSystemSetting(userId, 'student_id.validation_enabled', studentIdValidation);
+      for (const key of ['ai.usage.monthly_request_limit', 'ai.usage.monthly_token_limit']) {
+        const raw = values[key]?.trim() ?? '';
+        if (raw && (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)))) throw new Error(`${key.includes('request') ? 'Monthly request' : 'Monthly token'} limit must be a non-negative whole number or blank for unlimited.`);
+        await saveSystemSetting(userId, key, raw ? Number(raw) : null);
+      }
       const selectedDefault = gradingSystems.find((system) => system.id === defaultSystemId) ?? IT_GLOBAL_GRADING_SYSTEM;
       await saveSystemSetting(userId, 'grading.default_system_id', selectedDefault.id);
       await saveSystemSetting(userId, 'grading.default_system_definition', selectedDefault);
@@ -184,6 +194,23 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
         <View style={styles.settingRow}><View style={styles.settingCopy}><Text style={styles.settingLabel}>AI assistant</Text><Text style={styles.help}>Allow approved decision-support features to run.</Text></View><Pressable accessibilityRole="switch" accessibilityState={{ checked: boolValue('ai.enabled') }} onPress={() => update('ai.enabled', String(!boolValue('ai.enabled')))} style={[styles.switch, boolValue('ai.enabled') && styles.switchOn]}><View style={[styles.switchThumb, boolValue('ai.enabled') && styles.switchThumbOn]} /></Pressable></View>
         <View style={styles.settingRow}><View style={styles.settingCopy}><Text style={styles.settingLabel}>Share anonymous assessment data with AI</Text><Text style={styles.help}>Off by default. When enabled, AI may receive numeric scores and derived grades with assessment titles and student identifiers removed.</Text></View><Pressable accessibilityRole="switch" accessibilityState={{ checked: boolValue('ai.assessment_data.enabled') }} onPress={() => update('ai.assessment_data.enabled', String(!boolValue('ai.assessment_data.enabled')))} style={[styles.switch, boolValue('ai.assessment_data.enabled') && styles.switchOn]}><View style={[styles.switchThumb, boolValue('ai.assessment_data.enabled') && styles.switchThumbOn]} /></Pressable></View>
         <View style={styles.settingRow}><View style={styles.settingCopy}><Text style={styles.settingLabel}>Share anonymous attendance data with AI</Text><Text style={styles.help}>Off by default. When enabled, AI may receive numeric attendance rates without student or class identifiers.</Text></View><Pressable accessibilityRole="switch" accessibilityState={{ checked: boolValue('ai.attendance_data.enabled') }} onPress={() => update('ai.attendance_data.enabled', String(!boolValue('ai.attendance_data.enabled')))} style={[styles.switch, boolValue('ai.attendance_data.enabled') && styles.switchOn]}><View style={[styles.switchThumb, boolValue('ai.attendance_data.enabled') && styles.switchThumbOn]} /></Pressable></View>
+        <View style={styles.settingRow}><View style={styles.settingCopy}><Text style={styles.settingLabel}>Validate student ID format</Text><Text style={styles.help}>When enabled, student ID fields accept a 12-digit number or the formatted 05-XXXX-XXXXXX pattern. Disabled by default because some existing institutional IDs use other formats.</Text></View><Pressable accessibilityRole="switch" accessibilityState={{ checked: studentIdValidation }} onPress={() => setStudentIdValidation((enabled) => !enabled)} style={[styles.switch, studentIdValidation && styles.switchOn]}><View style={[styles.switchThumb, studentIdValidation && styles.switchThumbOn]} /></Pressable></View>
+      </Card>
+      <Card style={styles.settingsCard}>
+        <Text style={styles.sectionTitle}>AI provider keys and usage</Text>
+        <Text style={styles.sectionHelp}>System-provided keys stay in Supabase Edge Function Secrets (OPENAI_API_KEY and GEMINI_API_KEY). Department keys can override them for authorized classes. A shared key does not share prompts or student context: each request is authorized and sent as a fresh, stateless call. Usage records contain billing metadata, not prompts or context.</Text>
+        <DataTable columns={['System provider', 'Key status', 'Default model']} rows={[
+          ['OpenAI', providerStatus?.systemProviders?.openai?.configured ? 'Configured' : 'Not configured', providerStatus?.systemProviders?.openai?.model ?? 'gpt-4.1-mini'],
+          ['Google Gemini', providerStatus?.systemProviders?.gemini?.configured ? 'Configured' : 'Not configured', providerStatus?.systemProviders?.gemini?.model ?? 'gemini-3.8-flash'],
+        ]} />
+        <View style={styles.formGrid}>
+          <Field label="Monthly requests per system provider (blank = unlimited)" value={values['ai.usage.monthly_request_limit'] === 'null' ? '' : values['ai.usage.monthly_request_limit'] ?? ''} onChangeText={(value) => update('ai.usage.monthly_request_limit', value.replace(/\D/g, ''))} keyboardType="number-pad" />
+          <Field label="Monthly tokens per system provider (blank = unlimited)" value={values['ai.usage.monthly_token_limit'] === 'null' ? '' : values['ai.usage.monthly_token_limit'] ?? ''} onChangeText={(value) => update('ai.usage.monthly_token_limit', value.replace(/\D/g, ''))} keyboardType="number-pad" />
+        </View>
+        <Text style={styles.help}>System-provided-key usage this month: {providerStatus?.systemUsage?.requests ?? 0} requests · {(providerStatus?.systemUsage?.inputTokens ?? 0).toLocaleString()} input tokens · {(providerStatus?.systemUsage?.outputTokens ?? 0).toLocaleString()} output tokens.</Text>
+        {providerStatus?.systemUsageByModel?.length ? <DataTable columns={['Provider', 'Model', 'Requests', 'Input tokens', 'Output tokens']} rows={providerStatus.systemUsageByModel.map((row: any) => [row.provider, row.model, String(row.requests), Number(row.input_tokens).toLocaleString(), Number(row.output_tokens).toLocaleString()])} /> : null}
+        <Text style={styles.help}>All scopes this month: {providerStatus?.adminUsage?.requests ?? 0} requests · {(providerStatus?.adminUsage?.inputTokens ?? 0).toLocaleString()} input tokens · {(providerStatus?.adminUsage?.outputTokens ?? 0).toLocaleString()} output tokens.</Text>
+        {providerStatus?.adminUsageByScope?.length ? <DataTable columns={['Key scope', 'Reference', 'Provider', 'Model', 'Requests', 'Input tokens', 'Output tokens']} rows={providerStatus.adminUsageByScope.map((row: any) => [row.scope_type === 'user' ? 'Legacy personal key' : row.scope_type, row.scope_id ? `${String(row.scope_id).slice(0, 8)}…` : 'System', row.provider, row.model, String(row.requests), Number(row.input_tokens).toLocaleString(), Number(row.output_tokens).toLocaleString()])} /> : null}
       </Card>
       <Card style={styles.settingsCard}>
         <Text style={styles.sectionTitle}>Feedback email</Text>

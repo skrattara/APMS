@@ -1,0 +1,29 @@
+{
+  "dataset": {"profile": "synthetic-comprehensive.json", "count": 640, "seed": 20261021},
+  "training": {
+    "seed": 42,
+    "epochs": 24,
+    "batch_size": 32,
+    "width": 32,
+    "layers": 1,
+    "heads": 4,
+    "patience": 6,
+    "learning_rate": 0.001,
+    "accelerator": "cpu",
+    "dropout": 0.1,
+    "weight_decay": 0.01,
+    "min_delta": 0.0001,
+    "selection_metric": "numeric_rmse"
+  },
+  "models": {
+    "absolute": {"numeric_residual": false, "numeric_history_context": false, "numeric_center_loss_weight": 0.0, "input_dropout": 0.0},
+    "residual_control": {"numeric_residual": true, "residual_link": "additive", "numeric_history_context": false, "numeric_center_loss_kind": "mse", "numeric_center_loss_weight": 1.0, "input_dropout": 0.03},
+    "history_context": {"numeric_residual": true, "residual_link": "additive", "numeric_history_context": true, "numeric_center_loss_kind": "mse", "numeric_center_loss_weight": 1.0, "input_dropout": 0.03}
+  },
+  "selection": {
+    "criterion": "lowest validation RMSE averaged across current_standing horizons 1 and 2",
+    "failure_brier_tolerance": 0.02,
+    "require_mae_no_worse_than_absolute": true,
+    "test_policy": "Freeze selection before reading test or calibration results; keep absolute if no eligible candidate improves RMSE. Test absolute and selected only, once. No test-driven retuning."
+  }
+}

@@ -1,0 +1,21 @@
+{
+  "seed": 42,
+  "epochs": 24,
+  "batch_size": 32,
+  "width": 32,
+  "layers": 1,
+  "heads": 4,
+  "patience": 6,
+  "learning_rate": 0.001,
+  "accelerator": "cpu",
+  "dropout": 0.1,
+  "weight_decay": 0.01,
+  "min_delta": 0.0001,
+  "selection_metric": "numeric_rmse",
+  "numeric_residual": true,
+  "residual_link": "additive",
+  "numeric_history_context": true,
+  "numeric_center_loss_kind": "mse",
+  "numeric_center_loss_weight": 1.0,
+  "input_dropout": 0.03
+}

@@ -1,0 +1,35 @@
+{
+  "contract_version": 2,
+  "purpose": "Advisory-only client integration contract",
+  "prediction_source": "The authenticated APMS gateway, or a matched ONNX artifact and metadata through mobile/index.mjs after application authorization and domain validation. Never embed training records or service secrets in the mobile bundle.",
+  "required_behavior": [
+    "Treat every prediction as advisory and show that an educator must review it.",
+    "Keep the existing grading and evaluation engines authoritative.",
+    "Send only privacy-projected, allowlisted fields from the active gateway contract.",
+    "Do not persist provider credentials, bearer secrets, or raw student histories in client logs.",
+    "Treat missing, invalid, unsupported, or out-of-range output as unavailable and continue the existing rule-based workflow.",
+    "Display calibrated intervals only when the serving contract supplies them for the same target and horizon."
+  ],
+  "v1_prediction_fields": [
+    "record_id",
+    "predicted_standing",
+    "trend",
+    "risk_probability",
+    "ai_risk_level",
+    "factors",
+    "evaluation_scores",
+    "assessment_predictions"
+  ],
+  "validation": {
+    "reject_unknown_top_level_fields": true,
+    "require_record_reference_match": true,
+    "require_finite_numeric_values": true,
+    "enforce_active_schema_bounds_and_categories": true,
+    "never_change_official_grade_or_risk_classification": true
+  },
+  "measurement_status": {
+    "mobile_parity_tested": false,
+    "mobile_latency_measured": false,
+    "institutionally_validated": false
+  }
+}

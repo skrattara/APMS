@@ -46,6 +46,14 @@ async function fetchAllForIds<T>(ids: string[], fetchPage: (ids: string[], from:
   return { data: rows, error: null };
 }
 
+/** Prediction history is a timeline: a bounded recent slice is enough to locate each student's latest run. */
+async function fetchRecentForIds<T>(ids: string[], fetchRecent: (ids: string[]) => PromiseLike<{ data: T[] | null; error: unknown | null }>, batchSize = 500) {
+  const batches = Array.from({ length: Math.ceil(ids.length / batchSize) }, (_, index) => ids.slice(index * batchSize, (index + 1) * batchSize));
+  const results = await Promise.all(batches.map((batch) => fetchRecent(batch)));
+  const error = results.find((result) => result.error)?.error ?? null;
+  return { data: results.flatMap((result) => result.data ?? []), error };
+}
+
 export type FacultyClass = {
   id: string;
   subjectId: string;
@@ -54,6 +62,21 @@ export type FacultyClass = {
   section: string;
   term: string;
   studentCount: number;
+  lectureUnits: number;
+  laboratoryUnits: number;
+};
+
+export type FacultyClassRequest = {
+  id: string;
+  subject: string;
+  section: string;
+  term: string;
+  lectureUnits: number;
+  laboratoryUnits: number;
+  rationale: string;
+  status: 'pending' | 'approved' | 'rejected';
+  reviewNote: string | null;
+  createdAt: string;
 };
 
 export type FacultyEvaluationCriteriaSummary = {
@@ -65,7 +88,7 @@ export type FacultyEvaluationCriteriaSummary = {
 };
 
 export type FacultyReferenceData = {
-  subjects: { id: string; code: string; title: string }[];
+  subjects: { id: string; code: string; title: string; lecture_units: number; laboratory_units: number }[];
   terms: { id: string; label: string; status: 'active' | 'planned' }[];
   programs: { id: string; code: string; name: string }[];
 };
@@ -123,6 +146,8 @@ export type EvaluationRow = {
   modelName?: string | null;
   trend: 'improving' | 'stable' | 'declining' | 'unknown';
   factors: string[];
+  evaluationScores?: Record<string, unknown>;
+  assessmentPredictions?: Array<{ assessment_id: string; result: { kind: 'numeric'; value: number; maximum: number } | { kind: 'categorical'; value: string }; confidence?: number | null }>;
 };
 export type FeedbackRecord = {
   id: string;
@@ -227,17 +252,31 @@ export function loadFacultyClasses(includeStudentCounts = false, requesterUserId
     return Promise.resolve(cached.classes);
   }
   return shareForSignedInUser(requesterUserId, `classes:${includeStudentCounts}`, async () => {
-    const classes = await loadFacultyClassesRequest(includeStudentCounts);
+    const classes = await loadFacultyClassesRequest(includeStudentCounts, requesterUserId);
     if (cacheKey) facultyClassesCache.set(cacheKey, { classes, loadedAt: Date.now() });
     return classes;
   });
 }
 
-async function loadFacultyClassesRequest(includeStudentCounts: boolean): Promise<FacultyClass[]> {
+async function loadFacultyClassesRequest(includeStudentCounts: boolean, requesterUserId?: string): Promise<FacultyClass[]> {
   const client = connected();
+  let userId = requesterUserId;
+  if (!userId) {
+    const { data } = await client.auth.getSession();
+    userId = data.session?.user.id;
+  }
+  if (!userId) return [];
+  const { data: assignments, error: assignmentsError } = await client.from('faculty_assignments')
+    .select('class_record_id,faculty_profiles!inner(profile_id)')
+    .eq('status', 'active')
+    .eq('faculty_profiles.profile_id', userId);
+  if (assignmentsError) throw assignmentsError;
+  const classIds = [...new Set((assignments ?? []).map((row: any) => row.class_record_id))];
+  if (!classIds.length) return [];
   const buildQuery = () => client
     .from('class_records')
-    .select(`id,subject_id,section,subjects(code,title),academic_terms(academic_year,semester)${includeStudentCounts ? ',enrollments(count)' : ''}`)
+    .select(`id,subject_id,section,subjects(code,title,lecture_units,laboratory_units),academic_terms(academic_year,semester)${includeStudentCounts ? ',enrollments(count)' : ''}`)
+    .in('id', classIds)
     .eq('status', 'active')
     .order('created_at', { ascending: false });
   const { data, error } = await buildQuery();
@@ -250,6 +289,8 @@ async function loadFacultyClassesRequest(includeStudentCounts: boolean): Promise
     section: row.section,
     term: `${row.academic_terms?.academic_year ?? ''} ${row.academic_terms?.semester ?? ''}`.trim(),
     studentCount: Number(row.enrollments?.[0]?.count ?? 0),
+    lectureUnits: Number(row.subjects?.lecture_units ?? 3),
+    laboratoryUnits: Number(row.subjects?.laboratory_units ?? 0),
   }));
 }
 
@@ -292,7 +333,7 @@ async function loadFacultyReferenceDataRequest(): Promise<FacultyReferenceData> 
   // Subjects are now filtered by the database RLS policy:
   // Faculty only see active subjects in their own assigned department.
   // No client-side department filter is needed or trusted.
-  const subjectQuery = () => client.from('subjects').select('id,code,title').order('code');
+  const subjectQuery = () => client.from('subjects').select('id,code,title,lecture_units,laboratory_units').order('code');
   const termsQuery = () => client.from('academic_terms').select('id,academic_year,semester,status').in('status', ['active', 'planned']).order('starts_on', { ascending: false });
   const programsQuery = () => client.from('programs').select('id,code,name').eq('status', 'active').order('code');
   const [subjects, terms, programs] = await Promise.all([subjectQuery(), termsQuery(), programsQuery()]);
@@ -309,21 +350,39 @@ async function loadFacultyReferenceDataRequest(): Promise<FacultyReferenceData> 
   };
 }
 
-export async function createFacultyClass(subjectId: string, termId: string, section: string) {
-  const { data, error } = await connected().rpc('faculty_create_class', {
-    p_subject_id: subjectId,
-    p_academic_term_id: termId,
-    p_section: section.trim(),
+export async function submitFacultyClassRequest(input: {
+  subjectId: string;
+  termId: string;
+  section: string;
+  rationale: string;
+}) {
+  const { data, error } = await connected().rpc('faculty_submit_class_request', {
+    p_subject_id: input.subjectId,
+    p_academic_term_id: input.termId,
+    p_section: input.section.trim(),
+    p_rationale: input.rationale.trim(),
   });
-  if (error) {
-    // Translate PostgreSQL unique-constraint violation into a user-friendly message.
-    if (error.code === '23505' || error.message?.includes('class_records_subject_id_academic_term_id_section_key')) {
-      throw new Error('A class for this subject and section already exists in this term. Use a different section identifier.');
-    }
-    // Surface other actionable messages from the RPC directly.
-    throw error;
-  }
+  if (error) throw error;
   return data as string;
+}
+
+export async function loadMyClassRequests(): Promise<FacultyClassRequest[]> {
+  const { data, error } = await connected().from('class_requests')
+    .select('id,section,rationale,status,review_note,created_at,subjects(code,title,lecture_units,laboratory_units),academic_terms(academic_year,semester)')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((row: any) => ({
+    id: row.id,
+    subject: `${row.subjects?.code ?? '—'} · ${row.subjects?.title ?? 'Subject'}`,
+    section: row.section,
+    term: `${row.academic_terms?.academic_year ?? ''} ${row.academic_terms?.semester ?? ''}`.trim(),
+    lectureUnits: Number(row.subjects?.lecture_units ?? 3),
+    laboratoryUnits: Number(row.subjects?.laboratory_units ?? 0),
+    rationale: row.rationale,
+    status: row.status,
+    reviewNote: row.review_note ?? null,
+    createdAt: row.created_at,
+  }));
 }
 
 // ─── Subject requests ────────────────────────────────────────────────────────
@@ -642,7 +701,7 @@ async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSy
       : Promise.resolve({ data: [], error: null }),
     includeAttendance && sessionIds.length ? fetchAllForIds(sessionIds, (ids, from, to) => client.from('attendance_records').select('attendance_session_id,enrollment_id,status').in('attendance_session_id', ids).order('attendance_session_id').order('enrollment_id').range(from, to), 25) : Promise.resolve({ data: [], error: null }),
     includeEvaluations && enrollmentIds.length ? fetchAllForIds(enrollmentIds, (ids, from, to) => client.from('performance_evaluations').select('enrollment_id,score,risk_level,explanation').in('enrollment_id', ids).order('enrollment_id').range(from, to)) : Promise.resolve({ data: [], error: null }),
-    includeEvaluations && enrollmentIds.length ? fetchAllForIds(enrollmentIds, (ids, from, to) => client.from('performance_predictions').select('enrollment_id,predicted_score,risk_level,trend,confidence,explanation,created_at,prediction_run:prediction_runs(model_version:model_versions(provider,name,version))').in('enrollment_id', ids).order('created_at', { ascending: false }).order('id', { ascending: false }).range(from, to)) : Promise.resolve({ data: [], error: null }),
+    includeEvaluations && enrollmentIds.length ? fetchRecentForIds(enrollmentIds, (ids) => client.from('performance_predictions').select('enrollment_id,predicted_score,risk_level,trend,confidence,explanation,created_at,prediction_run:prediction_runs(model_version:model_versions(provider,name,version))').in('enrollment_id', ids).order('created_at', { ascending: false }).order('id', { ascending: false }).range(0, 999)) : Promise.resolve({ data: [], error: null }),
     includeFeedback && enrollmentIds.length ? fetchAllForIds(enrollmentIds, (ids, from, to) => client.from('feedback_records').select('id,enrollment_id,body,category,status,created_at').in('enrollment_id', ids).order('created_at', { ascending: false }).order('id', { ascending: false }).range(from, to)) : Promise.resolve({ data: [], error: null }),
   ]);
   const secondaryError = results.error ?? attendance.error ?? evaluations.error ?? predictions.error ?? feedback.error;
@@ -668,6 +727,8 @@ async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSy
       const modelVersion = Array.isArray(predictionRun?.model_version) ? predictionRun.model_version[0] : predictionRun?.model_version;
       current.predictedStanding = Number(row.predicted_score); current.riskLevel = row.risk_level; current.trend = row.trend; current.riskProbability = row.confidence == null ? null : Number(row.confidence); current.predictionGeneratedAt = row.created_at; current.dataBasis = (row.explanation as any)?.data_basis ?? null; current.modelProvider = modelVersion?.provider ?? null; current.modelName = typeof modelVersion?.name === 'string' ? modelVersion.name.split(':').slice(1).join(':') : null;
       current.factors = Array.isArray((row.explanation as any)?.factors) ? (row.explanation as any).factors : current.factors;
+      current.evaluationScores = (row.explanation as any)?.evaluation_scores && typeof (row.explanation as any).evaluation_scores === 'object' ? (row.explanation as any).evaluation_scores : {};
+      current.assessmentPredictions = Array.isArray((row.explanation as any)?.assessment_predictions) ? (row.explanation as any).assessment_predictions : [];
       evaluationMap[row.enrollment_id] = current;
     }
   }
@@ -1131,7 +1192,9 @@ export async function runAiPredictions(classId: string, gradingSystem: GradingDe
       const rawAssessmentPredictions = result.assessment_predictions ?? [];
       if (!Array.isArray(rawAssessmentPredictions) || (configuredOutputs.has('assessment_score_predictions') && !result.assessment_predictions) || (!configuredOutputs.has('assessment_score_predictions') && rawAssessmentPredictions.length)) throw new Error('The AI provider returned assessment predictions outside the active output contract.');
       if (configuredOutputs.has('assessment_score_predictions')) {
-        const assessmentValidation = validateAiAssessmentScorePrediction(gradingSystem, assessmentInstances, {
+        const recordedAssessmentRefs = new Set(((input.recordContext.assessment_results as any[]) ?? []).filter((item) => item?.score != null).map((item) => String(item.assessmentRef)));
+        const studentAssessmentInstances = assessmentInstances.map((item) => ({ ...item, hasResult: recordedAssessmentRefs.has(item.assessmentRef) }));
+        const assessmentValidation = validateAiAssessmentScorePrediction(gradingSystem, studentAssessmentInstances, {
           predictions: rawAssessmentPredictions.map((item: any) => ({ assessmentRef: item.assessment_id, result: item.result, confidence: item.confidence, evidence: item.evidence })),
         });
         if (!assessmentValidation.valid) throw new Error(`AI assessment results do not match the active grading system or assessment instances: ${assessmentValidation.errors.join(' ')}`);
@@ -1237,6 +1300,12 @@ export async function generateFacultyFeedbackDraft(classId: string, enrollmentId
         const payload = await functionError.context.clone().json() as { error?: string; message?: string };
         detail = payload.error ?? payload.message ?? '';
       } catch { /* Fall back to the SDK error when the response body is not JSON. */ }
+    }
+    // Older deployed revisions required student_name and forwarded the raw request
+    // context to Gemini. The current client deliberately omits names; the current
+    // Edge Function validates the enrollment and sends only anonymized data.
+    if (detail === 'Class, student, and record context are required') {
+      throw new Error('The deployed apms-feedback-draft Edge Function is out of date. Deploy the current version; it no longer requires student_name so student names stay out of Gemini requests.');
     }
     throw new Error(detail || error.message || 'Gemini could not generate a feedback draft.');
   }
