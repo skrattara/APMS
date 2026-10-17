@@ -8,5 +8,6 @@ export * from './permissions';
 export * from './schemas';
 export * from './ai/contracts';
 export * from './ai/validation';
+export * from './ai/predictionPresentation';
 export * from './types';
 export * from './workflows';

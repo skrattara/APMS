@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "apms-ai-container-gateway",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-17",
+  "compatibility_flags": ["nodejs_compat"],
+  "containers": [
+    {
+      "class_name": "APMSContainer",
+      "image": "registry.cloudflare.com/REPLACE_WITH_ACCOUNT_ID/apms-forecast:2026-10-17",
+      "max_instances": 1,
+      "instance_type": "standard-2"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      { "name": "AI_CONTAINER", "class_name": "APMSContainer" }
+    ]
+  },
+  "exports": {
+    "APMSContainer": { "type": "durable-object", "storage": "sqlite" }
+  },
+  "vars": {
+    "APMS_MODEL_ARTIFACT_PATH": "/models/active",
+    "APMS_AI_ENABLE_SYNTHETIC_DEMO": "false",
+    "APMS_AI_ARTIFACT_ENDPOINT": "",
+    "APMS_AI_ARTIFACT_MANIFEST_SHA256": "",
+    "APMS_AI_ARTIFACT_CACHE_DIR": "/tmp/apms-model-cache"
+  }
+}

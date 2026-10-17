@@ -68,6 +68,12 @@ See the [AI service guide](services/ai/README.md), [usage and deployment instruc
 
 Start with [how training works](docs/AI_MODEL_TRAINING_EXPLAINED.md) for a plain-language explanation of the model and its accuracy reports. Read [files and safe cleanup](docs/AI_MODEL_FILES_AND_CLEANUP.md) before removing generated data, checkpoints, exports, or temporary experiment folders.
 
+For Docker on another computer, Supabase integration, System Admin connection settings, and AWS/Cloudflare hosting, follow [the cloud deployment guide](docs/AI_MODEL_CLOUD_DEPLOYMENT.md). The app calls the authenticated Supabase gateway; model credentials remain server-side.
+
+Models can also be loaded from a [private Supabase artifact bucket](docs/AI_MODEL_ARTIFACT_STORAGE.md) with pinned manifests and a verified startup cache. Inference still runs in the container; Storage is the release archive rather than a per-prediction dependency.
+
+See [forecasts in the app](docs/AI_MODEL_APP_INTEGRATION.md) for Gradebook Full View, At-Risk and AI Prediction actions, batch behavior, saved model provenance and the separation between forecasts and recorded scores.
+
 ## Validation
 
 ```powershell

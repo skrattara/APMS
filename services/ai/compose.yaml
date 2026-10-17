@@ -9,7 +9,7 @@ services:
     restart: unless-stopped
     environment:
       APMS_MODEL_ARTIFACT_PATH: /models/active
-      APMS_AI_SERVICE_API_KEY: ${APMS_AI_SERVICE_API_KEY:?Set a server-only service token}
+      APMS_AI_SERVICE_API_KEY: ${APMS_AI_SERVICE_API_KEY:-}
       APMS_AI_ENABLE_SYNTHETIC_DEMO: ${APMS_AI_ENABLE_SYNTHETIC_DEMO:-false}
       APMS_AI_DEVICE: cpu
       APMS_AI_MAX_REQUEST_BYTES: ${APMS_AI_MAX_REQUEST_BYTES:-1048576}

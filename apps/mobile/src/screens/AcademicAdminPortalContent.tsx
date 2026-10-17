@@ -15,7 +15,7 @@ import {
   rejectAcademicAdminClassRequest, type ClassRequestReview, type DepartmentFacultyMember,
 } from '@/services/academic';
 import { applyGradingSystemToClasses, calculateEnrollmentGrade, deleteGradingSystem, saveGradingSystem, summarizeEnrollmentStanding, type ClassWorkspace } from '@/services/faculty';
-import { calculateGradingSystem, calculateTrend, IT_GLOBAL_GRADING_SYSTEM, validateGradingSystem, type GradingDefinition } from '@apms/domain';
+import { calculateGradingSystem, calculateTrend, extractValidatedSavedAiFactorValues, IT_GLOBAL_GRADING_SYSTEM, validateGradingSystem, type GradingDefinition } from '@apms/domain';
 import { createGradingDefinitionId, GradingSystemBuilderForm } from '@/components/GradingSystemBuilderForm';
 import { EvaluationSystemBuilderForm } from '@/components/EvaluationSystemBuilderForm';
 import { DEFAULT_EVALUATION_SYSTEM, evaluateStudentPerformanceDetailed, validateEvaluationSystem, type EvaluationDefinition } from '@apms/domain';
@@ -97,17 +97,19 @@ function riskResult(workspace: ClassWorkspace, enrollmentId: string, definition:
   const trendScores = scoreHistory.slice(-windowFor('recent_trend'));
   const trend = saved?.trend && saved.trend !== 'unknown' ? saved.trend : null;
   const recentTrend = trendScores.length > 1 ? calculateTrend(trendScores) : null;
+  const savedAiFactors = extractValidatedSavedAiFactorValues(definition, saved?.evaluationScores);
   const values = {
     ...gradeFactorValues(workspace, enrollmentId),
     current_standing: summary.finalGrade ?? summary.p3 ?? null, mastery: summary.mastery, attendance: attendance(workspace, enrollmentId),
     attendance_rate: attendance(workspace, enrollmentId), recent_scores: recentScores,
     recent_score_average: averageScores.length ? averageScores.reduce((sum, value) => sum + value, 0) / averageScores.length : null,
     recent_trend: recentTrend, trend, missing_assessment_count: workspace.assessments.filter((assessment) => workspace.scores[`${enrollmentId}:${assessment.id}`] == null && workspace.categoricalScores[`${enrollmentId}:${assessment.id}`] == null).length,
-    predicted_standing: saved?.predictedStanding ?? null, risk_probability: saved?.riskProbability ?? null, model_confidence: saved?.riskProbability ?? null,
-    ai_risk_level: saved?.riskLevel && saved.riskLevel !== 'unknown' ? saved.riskLevel : null,
+    predicted_standing: saved?.predictedStanding ?? null, risk_probability: saved?.riskProbability ?? null, model_confidence: null,
+    ai_risk_level: null,
     prediction_available: saved?.predictedStanding != null,
     prediction_age_hours: saved?.predictionGeneratedAt ? Math.max(0, (Date.now() - new Date(saved.predictionGeneratedAt).getTime()) / 3_600_000) : null,
     ai_factor_count: saved?.factors.length ?? null, data_basis: saved?.dataBasis ?? null,
+    ...savedAiFactors,
   };
   return evaluateStudentPerformanceDetailed(definition, values);
 }

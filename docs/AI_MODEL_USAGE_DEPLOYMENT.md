@@ -211,6 +211,10 @@ The local address is for this development server. In deployment, authorized serv
 
 ## 9. Container, monitoring, and rollback
 
+For the complete app/Supabase connection, Docker running on another computer, secret-file mounts, custom usage limits, AWS ECS Fargate and Cloudflare Tunnel/Containers, follow [the cloud deployment guide](AI_MODEL_CLOUD_DEPLOYMENT.md). That guide also explains the required target-image/runtime verification; local Python tests do not establish Linux-container parity.
+
+For versioned models and supporting artifacts stored outside a container image, follow [Supabase artifact storage](AI_MODEL_ARTIFACT_STORAGE.md). The optional worker loader verifies a pinned release and caches it at startup; training/checkpoint/report archives are not automatically loaded into serving.
+
 The checked-in Compose configuration binds the service to loopback, mounts one artifact read-only, runs with a read-only filesystem and a temporary `/tmp`, drops capabilities, and checks `/ready`. From the repository root, copy the environment example to the ignored deployment file, edit the server-only token and absolute artifact path, and start it:
 
 ```bat

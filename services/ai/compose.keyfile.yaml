@@ -1,0 +1,11 @@
+services:
+  ai:
+    environment:
+      APMS_AI_SERVICE_API_KEY: ""
+      APMS_AI_SERVICE_API_KEY_FILE: /run/secrets/apms_ai_service_key
+    secrets:
+      - apms_ai_service_key
+
+secrets:
+  apms_ai_service_key:
+    file: ${APMS_AI_KEY_HOST_PATH:?Set the host path to the service key file}

@@ -160,29 +160,43 @@ export function evaluateStudentPerformanceDetailed(definition: EvaluationDefinit
   const factors = new Map(definition.factors.map((factor) => [factor.id, factor]));
   const levels = [...definition.levels].sort((a, b) => b.priority - a.priority);
   const unavailableFactors: string[] = [];
-  const evidenceCount = definition.factors.filter((factor) => isCompatibleValue(factor, valueForFactor(factor, values)) && valueForFactor(factor, values) !== null && valueForFactor(factor, values) !== undefined).length;
+  // A configured confidence threshold is a strict gate. Missing confidence is
+  // unavailable too; risk probability estimates adverse outcome risk, not confidence.
+  const minimumConfidence = definition.ai?.minimumConfidence;
+  const confidence = values.model_confidence;
+  const confidenceMeetsMinimum = minimumConfidence == null || (typeof confidence === 'number' && Number.isFinite(confidence) && confidence >= 0 && confidence <= 1 && confidence >= minimumConfidence);
+  const evaluationValues: EvaluationValue = { ...values };
+  if (!confidenceMeetsMinimum) {
+    for (const factor of definition.factors) {
+      if (factor.aiGenerated || factor.origin === 'ai_prediction') {
+        evaluationValues[factor.source] = null;
+        evaluationValues[factor.id] = null;
+        if (factor.source === 'grading_component' && factor.gradingComponentId) evaluationValues[`grading_component:${factor.gradingComponentId}:${factor.gradingAggregation ?? 'average'}`] = null;
+        if (factor.source === 'grading_group' && factor.gradingGroupId) evaluationValues[`grading_group:${factor.gradingGroupId}:${factor.gradingAggregation ?? 'average'}`] = null;
+      }
+    }
+  }
+  const evidenceCount = definition.factors.filter((factor) => isCompatibleValue(factor, valueForFactor(factor, evaluationValues)) && valueForFactor(factor, evaluationValues) !== null && valueForFactor(factor, evaluationValues) !== undefined).length;
   const minimumEvidenceCount = definition.classification?.minimumEvidenceCount ?? 1;
   const handlesUnavailable = definition.levels.some((level) => level.rules.some((rule) => rule.operator === 'is_unavailable'));
   if (evidenceCount < minimumEvidenceCount && !handlesUnavailable) return { severity: 'unavailable', matchedLevelId: null, matchedRuleIds: [], evidenceCount, unavailableFactors: definition.factors.map((factor) => factor.name) };
   const requiredFactors = definition.factors.filter((factor) => factor.required || factor.missingValuePolicy === 'unavailable');
-  const missingRequired = requiredFactors.filter((factor) => !isCompatibleValue(factor, valueForFactor(factor, values)) || valueForFactor(factor, values) === null || valueForFactor(factor, values) === undefined);
+  const missingRequired = requiredFactors.filter((factor) => !isCompatibleValue(factor, valueForFactor(factor, evaluationValues)) || valueForFactor(factor, evaluationValues) === null || valueForFactor(factor, evaluationValues) === undefined);
   if (missingRequired.length) return { severity: 'unavailable', matchedLevelId: null, matchedRuleIds: [], evidenceCount, unavailableFactors: missingRequired.map((factor) => factor.name) };
   if (definition.ai?.enabled && definition.ai.unavailablePolicy === 'return_unavailable') {
-    const unavailableAiFactors = definition.factors.filter((factor) => (factor.aiGenerated || factor.origin === 'ai_prediction') && (valueForFactor(factor, values) === null || valueForFactor(factor, values) === undefined));
+    const unavailableAiFactors = definition.factors.filter((factor) => (factor.aiGenerated || factor.origin === 'ai_prediction') && (valueForFactor(factor, evaluationValues) === null || valueForFactor(factor, evaluationValues) === undefined));
     if (unavailableAiFactors.length) return { severity: 'unavailable', matchedLevelId: null, matchedRuleIds: [], evidenceCount, unavailableFactors: unavailableAiFactors.map((factor) => factor.name) };
   }
-  if (definition.classification?.requireRecentPrediction && values.prediction_available !== true) return { severity: 'unavailable', matchedLevelId: null, matchedRuleIds: [], evidenceCount, unavailableFactors: ['Recent AI prediction'] };
-  if (definition.classification?.maximumPredictionAgeHours != null && (typeof values.prediction_age_hours !== 'number' || values.prediction_age_hours > definition.classification.maximumPredictionAgeHours)) return { severity: 'unavailable', matchedLevelId: null, matchedRuleIds: [], evidenceCount, unavailableFactors: ['AI prediction is stale or unavailable'] };
-  const confidence = values.model_confidence;
+  if (definition.classification?.requireRecentPrediction && evaluationValues.prediction_available !== true) return { severity: 'unavailable', matchedLevelId: null, matchedRuleIds: [], evidenceCount, unavailableFactors: ['Recent AI prediction'] };
+  if (definition.classification?.maximumPredictionAgeHours != null && (typeof evaluationValues.prediction_age_hours !== 'number' || evaluationValues.prediction_age_hours > definition.classification.maximumPredictionAgeHours)) return { severity: 'unavailable', matchedLevelId: null, matchedRuleIds: [], evidenceCount, unavailableFactors: ['AI prediction is stale or unavailable'] };
   const weightedMatches: { level: EvaluationDefinition['levels'][number]; matchedRuleIds: string[]; score: number }[] = [];
   for (const level of levels) {
     if (level.severity === 'low' && level.rules.length === 0) continue;
     const outcomes: { match: boolean; ruleId: string; factorName: string; factorId: string }[] = level.rules.flatMap((rule, ruleIndex) => {
       const factor = factors.get(rule.factorId);
       if (!factor) return [];
-      let value = valueForFactor(factor, values);
+      let value = valueForFactor(factor, evaluationValues);
       if (!isCompatibleValue(factor, value)) { unavailableFactors.push(factor.name); value = null; }
-      if ((factor.aiGenerated || factor.origin === 'ai_prediction') && typeof confidence === 'number' && definition.ai?.minimumConfidence != null && confidence < definition.ai.minimumConfidence) value = null;
       if ((value === null || value === undefined) && factor.required) unavailableFactors.push(factor.name);
       if ((value === null || value === undefined) && !['is_unavailable', 'is_available'].includes(rule.operator) && factor.missingValuePolicy === 'treat_as_zero' && inferredValueType(factor.source) === 'number') value = 0;
       else if ((value === null || value === undefined) && !['is_unavailable', 'is_available'].includes(rule.operator) && definition.classification?.missingValuePolicy === 'treat_as_zero' && inferredValueType(factor.source) === 'number') value = 0;

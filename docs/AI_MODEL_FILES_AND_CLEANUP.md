@@ -93,3 +93,19 @@ mkdir services\ai\artifacts\rebuild-20261017
 ```
 
 The workflow guide explains calibration, export, deployment, and CPU/GPU considerations: [AI model usage and deployment](AI_MODEL_USAGE_DEPLOYMENT.md).
+
+## Container and cloud deployment files
+
+Keep `services/ai/Dockerfile`, the Compose files, `deploy.env.example`, `services/ai/deploy/` source/templates, its Cloudflare `package.json` and lockfile, the shared Edge connector/status function, the custom-usage migration, and deployment documentation. These are maintained source, not temporary Docker outputs. The Cloudflare `worker-configuration.d.ts` is generated but checked in for typechecking; regenerate with the deployment subproject's pinned Wrangler (`wrangler types worker-configuration.d.ts --include-runtime false`) after binding/variable changes, rather than deleting it before a build.
+
+`services/ai/deploy/cloudflare/node_modules/`, `.wrangler/`, build caches and downloaded local test runtimes under `tmp/` are rebuildable once dependent processes stop. Recreate the deployment dependencies with `npm ci` inside that subproject. The ignored PGlite verification environment is separate from the live Supabase database and can be recreated for regression checks.
+
+`services/ai/.env.deploy`, private `.env.ai-production` / `.env.aws-parameters.json` files and `services/ai/secrets/` contain deployment configuration or credentials. Keep them out of Git and image build contexts, restrict access and back up required credentials securely. Removing a key/tunnel-token file may prevent the service from restarting; revoke/rotate credentials if retiring the deployment. They are not ordinary caches.
+
+Packaged release bundles under `services/ai/artifacts/`, published Docker image digests, active and rollback model mounts, and release manifests may be the only reproducible deployment record. Keep or verify an approved archive before deleting them. Packaging deliberately omits optimizer state and training-only fingerprints, so a release image cannot replace the original training bundle for exact resume or later evaluation. Local Docker image layers can be rebuilt only while the exact source, base/runtime versions and model package remain available. Avoid blanket Docker volume/image pruning when active services or rollback images may depend on them.
+
+## Supabase artifact releases and startup caches
+
+Keep `artifact_store.py`, `compose.storage.yaml`, the artifact-broker source, its private-bucket migration/tests and manifest-generation code. In a release package, `manifest.json` is part of the exact pinned deployment contract: reformatting it changes its digest. Retain that pin together with the four inference files and validation evidence. Bucket objects under an active or rollback release prefix are deployment artifacts; deleting or replacing them prevents a cold worker from loading that release.
+
+The remote loader's cache is organized by manifest digest. Compose uses a named cache volume; ECS and Cloudflare use temporary local storage. A cache can be regenerated only while the matching private release, manifest, working credentials and compatible runtime remain available. It may also be the only copy allowing startup during an outage, so verify the remote archive before removing it. Stop dependent workers before explicitly retiring cache versions. Never run blanket volume deletion against an active deployment. Archive checkpoints, reports and real datasets separately under their own retention controls; serving packages intentionally omit training-only state. See [artifact storage and rollback](AI_MODEL_ARTIFACT_STORAGE.md).

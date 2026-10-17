@@ -7,6 +7,7 @@ import { supabase } from '@/services/supabase';
 import { Button, Card, ConfirmDialog, DataTable, DateField, Field, MetricCard, PageState, RefreshIndicator, SelectField, useToast } from '@/components/ui';
 import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
 import { ReportComposer } from '@/components/reports/ReportComposer';
+import { AIServiceSettings } from '@/components/AIServiceSettings';
 import { Settings as AccountSettings } from '@/screens/AppPortalScreen';
 import { createManagedUser, deleteProgram, loadAdminWorkspace, queueBackup, saveAcademicTerm, saveDepartment, saveProgram, saveSystemSetting, updateManagedUser, type AcademicTermRecord, type AdminWorkspace, type DepartmentRecord, type ManagedUser, type ProgramRecord } from '@/services/admin';
 import { IT_GLOBAL_GRADING_SYSTEM, type GradingDefinition } from '@apms/domain';
@@ -159,10 +160,24 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
       toast.show('Enter a sender name up to 100 characters without angle brackets or line breaks.');
       return;
     }
+    const quotaFields = [
+      { key: 'ai.usage.monthly_request_limit', label: 'Monthly provider request limit', maximum: Number.MAX_SAFE_INTEGER },
+      { key: 'ai.usage.monthly_token_limit', label: 'Monthly provider token limit', maximum: Number.MAX_SAFE_INTEGER },
+      { key: 'ai.custom.monthly_request_limit', label: 'Monthly APMS model forecast limit', maximum: 2_147_483_647 },
+    ];
+    const quotaValues: Record<string, number | null> = {};
+    for (const field of quotaFields) {
+      const raw = values[field.key]?.trim() ?? '';
+      if (raw && (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)) || Number(raw) > field.maximum)) {
+        toast.show(`${field.label} must be a whole number from 0 to ${field.maximum.toLocaleString()}, or blank for unlimited.`);
+        return;
+      }
+      quotaValues[field.key] = raw ? Number(raw) : null;
+    }
     setSaving(true);
     try {
       for (const row of data.settings) {
-        if (row.key === 'grading.swunext_global_modules' || row.key === 'grading.default_system_id' || row.key === 'grading.default_system_definition' || row.key === 'FEEDBACK_FROM_EMAIL' || row.key === 'FEEDBACK_FROM_NAME') continue;
+        if (row.key === 'grading.swunext_global_modules' || row.key === 'grading.default_system_id' || row.key === 'grading.default_system_definition' || row.key === 'FEEDBACK_FROM_EMAIL' || row.key === 'FEEDBACK_FROM_NAME' || quotaFields.some((field) => field.key === row.key)) continue;
         let value: unknown = values[row.key] ?? '';
         try { value = JSON.parse(value as string); } catch { /* plain strings remain valid JSONB values */ }
         await saveSystemSetting(userId, row.key, value);
@@ -170,11 +185,7 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
       await saveSystemSetting(userId, 'FEEDBACK_FROM_EMAIL', feedbackFromEmail.trim());
       await saveSystemSetting(userId, 'FEEDBACK_FROM_NAME', feedbackFromName.trim());
       await saveSystemSetting(userId, 'student_id.validation_enabled', studentIdValidation);
-      for (const key of ['ai.usage.monthly_request_limit', 'ai.usage.monthly_token_limit']) {
-        const raw = values[key]?.trim() ?? '';
-        if (raw && (!/^\d+$/.test(raw) || !Number.isSafeInteger(Number(raw)))) throw new Error(`${key.includes('request') ? 'Monthly request' : 'Monthly token'} limit must be a non-negative whole number or blank for unlimited.`);
-        await saveSystemSetting(userId, key, raw ? Number(raw) : null);
-      }
+      for (const [key, value] of Object.entries(quotaValues)) await saveSystemSetting(userId, key, value);
       const selectedDefault = gradingSystems.find((system) => system.id === defaultSystemId) ?? IT_GLOBAL_GRADING_SYSTEM;
       await saveSystemSetting(userId, 'grading.default_system_id', selectedDefault.id);
       await saveSystemSetting(userId, 'grading.default_system_definition', selectedDefault);
@@ -196,6 +207,7 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
         <View style={styles.settingRow}><View style={styles.settingCopy}><Text style={styles.settingLabel}>Share anonymous attendance data with AI</Text><Text style={styles.help}>Off by default. When enabled, AI may receive numeric attendance rates without student or class identifiers.</Text></View><Pressable accessibilityRole="switch" accessibilityState={{ checked: boolValue('ai.attendance_data.enabled') }} onPress={() => update('ai.attendance_data.enabled', String(!boolValue('ai.attendance_data.enabled')))} style={[styles.switch, boolValue('ai.attendance_data.enabled') && styles.switchOn]}><View style={[styles.switchThumb, boolValue('ai.attendance_data.enabled') && styles.switchThumbOn]} /></Pressable></View>
         <View style={styles.settingRow}><View style={styles.settingCopy}><Text style={styles.settingLabel}>Validate student ID format</Text><Text style={styles.help}>When enabled, student ID fields accept a 12-digit number or the formatted 05-XXXX-XXXXXX pattern. Disabled by default because some existing institutional IDs use other formats.</Text></View><Pressable accessibilityRole="switch" accessibilityState={{ checked: studentIdValidation }} onPress={() => setStudentIdValidation((enabled) => !enabled)} style={[styles.switch, studentIdValidation && styles.switchOn]}><View style={[styles.switchThumb, studentIdValidation && styles.switchThumbOn]} /></Pressable></View>
       </Card>
+      <AIServiceSettings />
       <Card style={styles.settingsCard}>
         <Text style={styles.sectionTitle}>AI provider keys and usage</Text>
         <Text style={styles.sectionHelp}>System-provided keys stay in Supabase Edge Function Secrets (OPENAI_API_KEY and GEMINI_API_KEY). Department keys can override them for authorized classes. A shared key does not share prompts or student context: each request is authorized and sent as a fresh, stateless call. Usage records contain billing metadata, not prompts or context.</Text>
@@ -206,7 +218,9 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
         <View style={styles.formGrid}>
           <Field label="Monthly requests per system provider (blank = unlimited)" value={values['ai.usage.monthly_request_limit'] === 'null' ? '' : values['ai.usage.monthly_request_limit'] ?? ''} onChangeText={(value) => update('ai.usage.monthly_request_limit', value.replace(/\D/g, ''))} keyboardType="number-pad" />
           <Field label="Monthly tokens per system provider (blank = unlimited)" value={values['ai.usage.monthly_token_limit'] === 'null' ? '' : values['ai.usage.monthly_token_limit'] ?? ''} onChangeText={(value) => update('ai.usage.monthly_token_limit', value.replace(/\D/g, ''))} keyboardType="number-pad" />
+          <Field label="Monthly APMS model forecasts (blank = unlimited)" value={values['ai.custom.monthly_request_limit'] === 'null' ? '' : values['ai.custom.monthly_request_limit'] ?? ''} onChangeText={(value) => update('ai.custom.monthly_request_limit', value.replace(/\D/g, '').slice(0, 10))} keyboardType="number-pad" helpText="Counts one forecast per eligible student record, not LLM tokens. Set 0 to block APMS model forecasts." helpExample="Leave blank for unlimited, or enter a monthly count such as 500." />
         </View>
+        <Text style={styles.help}>APMS model-forecast usage is separate from OpenAI/Gemini token usage. Faculty may select the centrally configured custom provider in applied evaluation criteria; the service remains advisory.</Text>
         <Text style={styles.help}>System-provided-key usage this month: {providerStatus?.systemUsage?.requests ?? 0} requests · {(providerStatus?.systemUsage?.inputTokens ?? 0).toLocaleString()} input tokens · {(providerStatus?.systemUsage?.outputTokens ?? 0).toLocaleString()} output tokens.</Text>
         {providerStatus?.systemUsageByModel?.length ? <DataTable columns={['Provider', 'Model', 'Requests', 'Input tokens', 'Output tokens']} rows={providerStatus.systemUsageByModel.map((row: any) => [row.provider, row.model, String(row.requests), Number(row.input_tokens).toLocaleString(), Number(row.output_tokens).toLocaleString()])} /> : null}
         <Text style={styles.help}>All scopes this month: {providerStatus?.adminUsage?.requests ?? 0} requests · {(providerStatus?.adminUsage?.inputTokens ?? 0).toLocaleString()} input tokens · {(providerStatus?.adminUsage?.outputTokens ?? 0).toLocaleString()} output tokens.</Text>

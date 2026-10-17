@@ -13,6 +13,16 @@ This guide describes the provider boundary and the privacy controls used by the 
 
 All provider calls must stay on the server. The custom prediction URL and its key are read only from Edge Function secrets (`APMS_AI_SERVICE_URL` and `APMS_AI_SERVICE_API_KEY`); Gemini credentials also stay server-side.
 
+The custom provider now shares a bounded HTTPS connector in `supabase/functions/_shared/aiService.ts`: no credential-bearing redirects, per-call/batch deadlines, actual UTF-8 request/response byte caps and optional paired Cloudflare Access service credentials. It probes the authenticated worker for its actual model version and reserves per-record usage through the service-role-only `ai_custom_reserve_usage` RPC before outbound work. Apply `20261017092935_ai_custom_service_usage.sql` before deploying the updated prediction function. An unavailable quota RPC fails closed; failed attempts remain counted. The gateway validates every response before saving the complete batch.
+
+`ai-service-status` exposes secret-free configuration and an explicit no-student-data probe only to active, currently authorized global System Admins. `AIServiceSettings` renders this contract in System Settings; `ai.custom.monthly_request_limit` controls the separate custom forecast budget. Service addresses, bearer tokens, and Access tokens are never editable client settings. See [Docker and cloud deployment](../AI_MODEL_CLOUD_DEPLOYMENT.md) for secret names, deployment order and cloud templates.
+
+Artifact delivery is a separate machine-only boundary: `ai-model-artifact` authenticates a dedicated artifact token and signs only a private, server-selected release manifest's four approved files. It receives no student data and does not authorize app prediction requests. The worker caches/verifies the pinned bundle at startup; no service-role key or signed model URL reaches the client. See [artifact storage](../AI_MODEL_ARTIFACT_STORAGE.md).
+
+Risk probability is not independent model confidence. The current prediction contract supplies no independent confidence scalar, so `model_confidence` is unavailable rather than copied from risk probability. Applied minimum-confidence rules must respect that missing evidence. Legacy database `performance_predictions.confidence` remains the stored risk-probability field for compatibility and must be labeled accordingly in the UI.
+
+The saved `risk_level` column is a deterministic evaluation snapshot; it must not be fed back as a new `ai_risk_level`. A validated model risk category is now preserved under its original AI-owned factor ID in the existing `explanation.evaluation_scores` JSON. Current app evaluation contexts validate those stored factor values against the active definition before using them. Historical rows without an independently recorded AI category leave that factor unavailable. The provider response/output allowlist is unchanged. See [app integration](../AI_MODEL_APP_INTEGRATION.md).
+
 ## Shared contracts
 
 `packages/domain/src/ai/contracts.ts` defines provider-neutral task names, schema context, opaque record references, output shapes, and provenance metadata. It intentionally defines no adapter, routing configuration reader, or network client.

@@ -1,0 +1,347 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: APMS advisory AI inference on private ECS Fargate tasks behind an HTTPS ALB.
+
+Parameters:
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: Existing VPC containing the supplied public and private subnets.
+  PublicSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: At least two public subnets in distinct Availability Zones for the ALB.
+  PrivateSubnetIds:
+    Type: List<AWS::EC2::Subnet::Id>
+    Description: Private task subnets with NAT or required VPC endpoints for ECR, logs, and Secrets Manager.
+  CertificateArn:
+    Type: String
+    AllowedPattern: '^arn:aws(-[a-z]+)?:acm:[a-z0-9-]+:[0-9]{12}:certificate/[A-Fa-f0-9-]+$'
+    Description: Existing ACM certificate ARN whose DNS name covers the service hostname.
+  ImageUri:
+    Type: String
+    AllowedPattern: '^[0-9]{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com/.+@sha256:[a-f0-9]{64}$'
+    Description: Reviewed generic CPU runtime image digest or an image with its bundle baked at /models/active.
+  ServiceTokenSecretArn:
+    Type: String
+    AllowedPattern: '^arn:aws(-[a-z]+)?:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+$'
+    Description: Secrets Manager secret containing only the worker API token as a raw string.
+  ArtifactEndpoint:
+    Type: String
+    Default: ''
+    AllowedPattern: '^(|https://[^ ]+)$'
+    Description: Optional private artifact broker HTTPS URL; empty uses the baked image bundle.
+  ArtifactManifestSha256:
+    Type: String
+    Default: ''
+    AllowedPattern: '^(|[A-Fa-f0-9]{64})$'
+    Description: Required pinned manifest SHA-256 when remote artifacts are enabled.
+  ArtifactTokenSecretArn:
+    Type: String
+    Default: ''
+    AllowedPattern: '^(|arn:aws(-[a-z]+)?:secretsmanager:[a-z0-9-]+:[0-9]{12}:secret:.+)$'
+    Description: Optional machine-only artifact broker token secret, separate from the inference API key.
+  KmsKeyArn:
+    Type: String
+    Default: ''
+    Description: Optional customer-managed KMS key used to encrypt the service token and, if selected, artifact token secret.
+  DesiredCount:
+    Type: Number
+    Default: 1
+    MinValue: 1
+    MaxValue: 10
+  AllowSyntheticDemo:
+    Type: String
+    Default: 'false'
+    AllowedValues: ['true', 'false']
+    Description: Keep false for real deployment artifacts; true only for an explicit synthetic demo.
+
+Conditions:
+  HasCustomKmsKey: !Not [!Equals [!Ref KmsKeyArn, '']]
+  HasArtifactToken: !Not [!Equals [!Ref ArtifactTokenSecretArn, '']]
+  UseRemoteArtifacts: !Not [!Equals [!Ref ArtifactEndpoint, '']]
+
+Rules:
+  RemoteArtifactConfigurationComplete:
+    RuleCondition: !Not [!Equals [!Ref ArtifactEndpoint, '']]
+    Assertions:
+      - Assert: !Not [!Equals [!Ref ArtifactManifestSha256, '']]
+        AssertDescription: Remote artifacts require a pinned 64-character manifest SHA-256.
+      - Assert: !Not [!Equals [!Ref ArtifactTokenSecretArn, '']]
+        AssertDescription: Remote artifacts require a separate machine-only artifact token secret.
+
+Resources:
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/ecs/${AWS::StackName}/apms-ai'
+      RetentionInDays: 30
+
+  ExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadOnlyInferenceToken
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource: !Ref ServiceTokenSecretArn
+        - !If
+          - HasCustomKmsKey
+          - PolicyName: DecryptServiceToken
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: kms:Decrypt
+                  Resource: !Ref KmsKeyArn
+          - !Ref AWS::NoValue
+        - !If
+          - HasArtifactToken
+          - PolicyName: ReadOnlyArtifactBrokerToken
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action: secretsmanager:GetSecretValue
+                  Resource: !Ref ArtifactTokenSecretArn
+          - !Ref AWS::NoValue
+
+  TaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow HTTPS ingress to the APMS AI service ALB.
+      VpcId: !Ref VpcId
+      # A localhost-only inline rule suppresses AWS's default allow-all egress.
+      SecurityGroupEgress:
+        - IpProtocol: '-1'
+          CidrIp: 127.0.0.1/32
+
+  TaskSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow inference traffic only from the ALB security group.
+      VpcId: !Ref VpcId
+      SecurityGroupIngress: []
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+
+  LoadBalancerHttpsIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref LoadBalancerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 443
+      ToPort: 443
+      CidrIp: 0.0.0.0/0
+
+  LoadBalancerToTasks:
+    Type: AWS::EC2::SecurityGroupEgress
+    Properties:
+      GroupId: !Ref LoadBalancerSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      DestinationSecurityGroupId: !Ref TaskSecurityGroup
+
+  TasksFromLoadBalancer:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      GroupId: !Ref TaskSecurityGroup
+      IpProtocol: tcp
+      FromPort: 8080
+      ToPort: 8080
+      SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Type: application
+      Scheme: internet-facing
+      IpAddressType: ipv4
+      Subnets: !Ref PublicSubnetIds
+      SecurityGroups: [!Ref LoadBalancerSecurityGroup]
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      Protocol: HTTP
+      Port: 8080
+      TargetType: ip
+      HealthCheckEnabled: true
+      HealthCheckProtocol: HTTP
+      HealthCheckPort: traffic-port
+      HealthCheckPath: /ready
+      Matcher:
+        HttpCode: '200'
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      SslPolicy: ELBSecurityPolicy-TLS13-1-2-2021-06
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: '1024'
+      Memory: '4096'
+      ExecutionRoleArn: !GetAtt ExecutionRole.Arn
+      TaskRoleArn: !GetAtt TaskRole.Arn
+      RuntimePlatform:
+        OperatingSystemFamily: LINUX
+        CpuArchitecture: X86_64
+      Volumes:
+        - Name: writable-tmp
+      ContainerDefinitions:
+        - Name: apms-ai
+          Image: !Ref ImageUri
+          Essential: true
+          User: '10001:10001'
+          ReadonlyRootFilesystem: true
+          StopTimeout: 30
+          PortMappings:
+            - ContainerPort: 8080
+              Protocol: tcp
+          Environment:
+            - Name: APMS_MODEL_ARTIFACT_PATH
+              Value: !If [UseRemoteArtifacts, '', /models/active]
+            - Name: APMS_AI_ARTIFACT_CACHE_DIR
+              Value: /tmp/apms-model-cache
+            - !If
+              - UseRemoteArtifacts
+              - Name: APMS_AI_ARTIFACT_ENDPOINT
+                Value: !Ref ArtifactEndpoint
+              - !Ref AWS::NoValue
+            - !If
+              - UseRemoteArtifacts
+              - Name: APMS_AI_ARTIFACT_MANIFEST_SHA256
+                Value: !Ref ArtifactManifestSha256
+              - !Ref AWS::NoValue
+            - Name: APMS_AI_DEVICE
+              Value: cpu
+            - Name: APMS_AI_ENABLE_SYNTHETIC_DEMO
+              Value: !Ref AllowSyntheticDemo
+            - Name: APMS_AI_MAX_REQUEST_BYTES
+              Value: '1048576'
+            - Name: APMS_AI_MAX_CONCURRENT_REQUESTS
+              Value: '1'
+            - Name: OMP_NUM_THREADS
+              Value: '1'
+            - Name: MKL_NUM_THREADS
+              Value: '1'
+          Secrets:
+            - Name: APMS_AI_SERVICE_API_KEY
+              ValueFrom: !Ref ServiceTokenSecretArn
+            - !If
+              - UseRemoteArtifacts
+              - Name: APMS_AI_ARTIFACT_TOKEN
+                ValueFrom: !Ref ArtifactTokenSecretArn
+              - !Ref AWS::NoValue
+          MountPoints:
+            - SourceVolume: writable-tmp
+              ContainerPath: /tmp
+              ReadOnly: false
+          LinuxParameters:
+            Capabilities:
+              Drop: [ALL]
+            InitProcessEnabled: true
+          HealthCheck:
+            Command:
+              - CMD
+              - python
+              - -c
+              - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/ready', timeout=3)"
+            Interval: 30
+            Timeout: 5
+            StartPeriod: !If [UseRemoteArtifacts, 300, 60]
+            Retries: 3
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref LogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: apms-ai
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - HttpsListener
+      - LoadBalancerHttpsIngress
+      - LoadBalancerToTasks
+      - TasksFromLoadBalancer
+    Properties:
+      Cluster: !Ref Cluster
+      LaunchType: FARGATE
+      PlatformVersion: '1.4.0'
+      DesiredCount: !Ref DesiredCount
+      TaskDefinition: !Ref TaskDefinition
+      EnableECSManagedTags: true
+      HealthCheckGracePeriodSeconds: 300
+      DeploymentConfiguration:
+        DeploymentCircuitBreaker:
+          Enable: true
+          Rollback: true
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: !Ref PrivateSubnetIds
+          SecurityGroups: [!Ref TaskSecurityGroup]
+      LoadBalancers:
+        - ContainerName: apms-ai
+          ContainerPort: 8080
+          TargetGroupArn: !Ref TargetGroup
+
+Outputs:
+  LoadBalancerDnsName:
+    Description: Configure an approved DNS hostname and route it to this HTTPS load balancer.
+    Value: !GetAtt LoadBalancer.DNSName
+  TargetGroupArn:
+    Value: !Ref TargetGroup
+  ClusterArn:
+    Value: !Ref Cluster
+  ServiceArn:
+    Value: !Ref Service

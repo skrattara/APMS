@@ -20,6 +20,7 @@ playwright-live-report/
 .env.*
 !.env.example
 *.local
+services/ai/secrets/
 
 # Python
 __pycache__/

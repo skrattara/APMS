@@ -144,6 +144,7 @@ export type EvaluationRow = {
   dataBasis?: string | null;
   modelProvider?: string | null;
   modelName?: string | null;
+  modelVersion?: string | null;
   trend: 'improving' | 'stable' | 'declining' | 'unknown';
   factors: string[];
   evaluationScores?: Record<string, unknown>;
@@ -725,7 +726,7 @@ async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSy
     if (current.predictedStanding == null) {
       const predictionRun = Array.isArray(row.prediction_run) ? row.prediction_run[0] : row.prediction_run;
       const modelVersion = Array.isArray(predictionRun?.model_version) ? predictionRun.model_version[0] : predictionRun?.model_version;
-      current.predictedStanding = Number(row.predicted_score); current.riskLevel = row.risk_level; current.trend = row.trend; current.riskProbability = row.confidence == null ? null : Number(row.confidence); current.predictionGeneratedAt = row.created_at; current.dataBasis = (row.explanation as any)?.data_basis ?? null; current.modelProvider = modelVersion?.provider ?? null; current.modelName = typeof modelVersion?.name === 'string' ? modelVersion.name.split(':').slice(1).join(':') : null;
+      current.predictedStanding = Number(row.predicted_score); current.riskLevel = row.risk_level; current.trend = row.trend; current.riskProbability = row.confidence == null ? null : Number(row.confidence); current.predictionGeneratedAt = row.created_at; current.dataBasis = (row.explanation as any)?.data_basis ?? null; current.modelProvider = modelVersion?.provider ?? null; current.modelName = typeof modelVersion?.name === 'string' ? modelVersion.name.split(':').slice(1).join(':') : null; current.modelVersion = typeof modelVersion?.version === 'string' ? modelVersion.version : null;
       current.factors = Array.isArray((row.explanation as any)?.factors) ? (row.explanation as any).factors : current.factors;
       current.evaluationScores = (row.explanation as any)?.evaluation_scores && typeof (row.explanation as any).evaluation_scores === 'object' ? (row.explanation as any).evaluation_scores : {};
       current.assessmentPredictions = Array.isArray((row.explanation as any)?.assessment_predictions) ? (row.explanation as any).assessment_predictions : [];
@@ -1114,7 +1115,7 @@ export type PredictionInput = {
   enrollmentId: string;
   currentStanding: number;
   recentScores: number[];
-  attendanceRate: number;
+  attendanceRate: number | null;
   missingAssessmentCount: number;
   evaluationValues: EvaluationValue;
   recordContext: Record<string, unknown>;
@@ -1221,7 +1222,8 @@ export async function runAiPredictions(classId: string, gradingSystem: GradingDe
     const modelValues: Record<string, unknown> = {
       predicted_standing: predictedStanding,
       risk_probability: riskProbability,
-      model_confidence: riskProbability,
+      // Risk probability estimates an adverse outcome; it is not prediction confidence.
+      model_confidence: null,
       prediction_available: true,
       trend: prediction.trend,
       recent_trend: prediction.trend,

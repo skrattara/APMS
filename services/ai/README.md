@@ -53,6 +53,10 @@ ONNX export runs dynamic parity checks across batch, history, query, and schema 
 
 ## Operations and deployment
 
+See [Docker, Supabase, AWS and Cloudflare deployment](../../docs/AI_MODEL_CLOUD_DEPLOYMENT.md) for building on another computer, secret-file mounts, System Admin connection checks, custom forecast quotas, Cloudflare Tunnel/Containers, and the AWS Fargate template. Deployments use immutable inference packages; training and online learning remain separate jobs. Docker is not required on the app development PC.
+
+For models stored outside the image, use [Supabase artifact storage](../../docs/AI_MODEL_ARTIFACT_STORAGE.md). `package_model.py --manifest` produces the pinned release manifest; the optional startup loader fetches only the approved inference files through a machine-authenticated broker, verifies every file and caches it. It supports offline reuse of an intact pinned cache. Compose has a separate `compose.storage.yaml` variant, and AWS/Cloudflare support the same server-only artifact settings. No Supabase service-role key is installed in the worker.
+
 Use `--accelerator cpu`, `cuda`, or `auto` for Fabric training and fine-tuning; select compatible Torch wheels for the host GPU. Set `APMS_AI_DEVICE` similarly for inference. CPU defaults to `32-true` precision; GPU mixed precision is an explicit `--precision` choice. This implementation uses one device per process. No distributed scaling or GPU hardware result is claimed.
 
 Each checkpoint stores the last model/optimizer/RNG state and the best validation model separately. A training run writes aggregate per-task epoch metrics to `<output>.metrics.jsonl`. `debug --bundle ... --data ... --output ...json --backward-check` verifies the artifact, finite forecasts/gradients, typed label coverage, missingness, and descriptive median/IQR shift signals. Drift signals are not statistical significance tests and do not automatically retrain a model. Service logs contain event types, status, latency, model identity and device; no request bodies or student references. Configure a log collector and poll the authenticated worker-local `/metrics` endpoint in your deployment.

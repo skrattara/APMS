@@ -1,5 +1,7 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4'
 import { anonymizeAcademicData, anonymizeEvaluationValues, anonymizeSchemaRepresentation, opaqueRecordRef, restoreSchemaCategory, shuffleForProvider } from '../_shared/aiPrivacy.ts'
+import { AIServiceError, aiServiceConfigurationFromEnvironment, createAIServiceConnector, finalizeCustomServiceUsage, reserveCustomServiceUsage, type AIServiceConfiguration, type AIServiceProbe, type CustomUsageClient } from '../_shared/aiService.ts'
+import { persistableAIScores } from '../_shared/persistableAIScores.ts'
 import defaultGradingSystem from '../_shared/defaultGradingSystem.json' with { type: 'json' }
 import defaultEvaluationSystem from '../_shared/defaultEvaluationSystem.json' with { type: 'json' }
 
@@ -29,6 +31,37 @@ const json = (body: unknown, status = 200) => new Response(JSON.stringify(body),
   status,
   headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store' },
 })
+
+class InvalidRequestBody extends Error {
+  constructor(readonly tooLarge = false) { super(tooLarge ? 'too_large' : 'invalid_json') }
+}
+
+async function readRequestJsonLimited(request: Request, maximumBytes: number): Promise<unknown> {
+  const declaredLength = Number(request.headers.get('content-length'))
+  if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) throw new InvalidRequestBody(true)
+  if (!request.body) throw new InvalidRequestBody()
+  const reader = request.body.getReader()
+  const chunks: Uint8Array[] = []
+  let total = 0
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    total += value.byteLength
+    if (total > maximumBytes) {
+      await reader.cancel()
+      throw new InvalidRequestBody(true)
+    }
+    chunks.push(value)
+  }
+  const bytes = new Uint8Array(total)
+  let offset = 0
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+  try { return JSON.parse(new TextDecoder().decode(bytes)) } catch { throw new InvalidRequestBody() }
+}
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value)
+}
 
 function readGeminiText(payload: any): string {
   return payload?.candidates?.[0]?.content?.parts
@@ -85,7 +118,9 @@ function validatePrediction(result: any, evaluation: Record<string, any>, dataBa
   const generatedValues: Record<string, unknown> = {
     predicted_standing: result.predicted_standing,
     risk_probability: result.risk_probability ?? null,
-    model_confidence: result.risk_probability ?? null,
+    // The provider contract has no independent confidence score; keep this
+    // reserved factor unavailable instead of mislabeling risk probability.
+    model_confidence: null,
     prediction_available: true,
     trend: result.trend,
     recent_trend: result.trend,
@@ -125,6 +160,7 @@ function decodeAndValidateEvaluationScores(raw: unknown, evaluation: Record<stri
   const originalId = new Map([...privacyMap.ids.entries()].map(([original, safe]) => [safe, original]))
   for (const [safeFactorId, encoded] of Object.entries(values)) {
     const factorId = originalId.get(safeFactorId)
+    if (factorId === undefined) return { ...empty, error: 'Evaluation scores may only contain active AI-generated factor references.' }
     const factor = (evaluation.factors as any[]).find((item) => item.id === factorId)
     if (!factor || (factor.aiGenerated !== true && factor.origin !== 'ai_prediction')) return { ...empty, error: 'Evaluation scores may only contain active AI-generated factor references.' }
     if (sourcesWithBuiltInOutput.has(factor.source)) return { ...empty, error: `The factor ${factor.source} is already provided by the prediction fields and cannot be overridden.` }
@@ -132,7 +168,7 @@ function decodeAndValidateEvaluationScores(raw: unknown, evaluation: Record<stri
       if (factor.required || factor.missingValuePolicy === 'unavailable') return { ...empty, error: `The required evaluation score for ${factor.source} is missing.` }
       continue
     }
-    let value = encoded
+    let value: unknown = encoded
     if (typeof value === 'string') value = restoreSchemaCategory(value, privacyMap)
     const valueType = factor.valueType ?? (['trend', 'recent_trend', 'ai_risk_level', 'data_basis'].includes(factor.source) ? 'category' : 'number')
     if (valueType === 'number') {
@@ -298,11 +334,18 @@ Deno.serve(async (request) => {
   const { data: caller, error: callerError } = await userClient.auth.getUser(token)
   if (callerError || !caller.user) return json({ error: 'Invalid session' }, 401)
 
-  let body: RequestBody
-  try { body = await request.json() } catch { return json({ error: 'Invalid JSON body' }, 400) }
-  if (!body.class_id || !Array.isArray(body.inputs) || !body.inputs.length) return json({ error: 'Class and at least one student record are required' }, 400)
+  let parsedBody: unknown
+  try { parsedBody = await readRequestJsonLimited(request, 1_000_000) }
+  catch (error) {
+    if (error instanceof InvalidRequestBody && error.tooLarge) return json({ error: 'Prediction request exceeds the 1 MB limit' }, 413)
+    return json({ error: 'Invalid JSON body' }, 400)
+  }
+  if (!isObjectRecord(parsedBody)) return json({ error: 'Invalid prediction request' }, 400)
+  const body = parsedBody as unknown as RequestBody
+  if (typeof body.class_id !== 'string' || !body.class_id.trim() || !isObjectRecord(body.grading_system) || !isObjectRecord(body.evaluation_criteria) || !Array.isArray(body.inputs) || !body.inputs.length) return json({ error: 'Class, schema snapshots, and at least one student record are required' }, 400)
   if (body.inputs.length > 100) return json({ error: 'A maximum of 100 students can be predicted per request' }, 400)
-  if (body.inputs.some((item) => !item.enrollment_id || !item.evaluation_values || !item.records)) return json({ error: 'Each prediction needs schema-derived factor values and student record context' }, 400)
+  if (body.inputs.some((item) => !isObjectRecord(item) || typeof item.enrollment_id !== 'string' || !item.enrollment_id.trim() || !isObjectRecord(item.evaluation_values) || !isObjectRecord(item.records))) return json({ error: 'Each prediction needs an enrollment, schema-derived factor values, and student record context' }, 400)
+  if (new Set(body.inputs.map((item) => item.enrollment_id)).size !== body.inputs.length) return json({ error: 'Each enrollment may appear only once in a prediction request' }, 400)
 
   const { error: permissionError } = await userClient.rpc('faculty_assert_ai_access', { p_class_record_id: body.class_id, p_feature: 'predictions' })
   if (permissionError) return json({ error: 'You are not authorized to run predictions for this class' }, 403)
@@ -331,8 +374,8 @@ Deno.serve(async (request) => {
   if (!aiConfig || aiConfig.enabled !== true) return json({ error: 'AI prediction is disabled in the applied evaluation criteria' }, 403)
   const supportedScenarios = aiConfig.supportedScenarios ?? []
   if (!supportedScenarios.includes('stable')) return json({ error: 'The applied evaluation criteria do not allow the current prediction scenario' }, 409)
-  const inputFeatures = new Set(aiConfig.inputFeatures ?? [])
-  const outputFields = new Set(aiConfig.outputFields ?? [])
+  const inputFeatures = new Set<string>((Array.isArray(aiConfig.inputFeatures) ? aiConfig.inputFeatures : []).filter((feature: unknown): feature is string => typeof feature === 'string'))
+  const outputFields = new Set<string>((Array.isArray(aiConfig.outputFields) ? aiConfig.outputFields : []).filter((field: unknown): field is string => typeof field === 'string'))
   if (!inputFeatures.size || !outputFields.has('predicted_standing') || !outputFields.has('trend')) return json({ error: 'The applied evaluation criteria do not define the inputs and outputs required for this prediction task' }, 409)
   if (inputFeatures.has('assessment_results') && !inputFeatures.has('assessment_instance_details')) return json({ error: 'The applied evaluation criteria must include assessment instance details whenever assessment results are shared' }, 409)
   if (outputFields.has('assessment_score_predictions') && (!inputFeatures.has('assessment_results') || !inputFeatures.has('assessment_instance_details'))) return json({ error: 'Assessment score predictions require the applied criteria to include both existing assessment results and assessment instance details as AI inputs.' }, 409)
@@ -368,7 +411,10 @@ Deno.serve(async (request) => {
           confidence: prediction.risk_probability,
           factors: prediction.factors,
           data_basis: prediction.data_basis,
-          evaluation_scores: prediction.evaluation_scores,
+          // Keep the legacy deterministic risk_level snapshot intact. The
+          // independently validated model category is saved under the active
+          // AI factor ID so a refresh cannot mistake the snapshot for model output.
+          evaluation_scores: persistableAIScores(prediction, evaluationCriteria.factors, outputFields),
           assessment_predictions: (prediction.assessment_predictions ?? []).map((item: any) => ({ assessment_id: item.assessment_id, result: item.result, confidence: item.confidence, evidence: item.evidence })),
         }
       }),
@@ -469,46 +515,67 @@ Deno.serve(async (request) => {
     if (countError) return json({ error: countError }, 409)
   }
   const serializedInput = JSON.stringify(providerInput)
-  if (serializedInput.length > 700_000) return json({ error: 'The applied schemas and student data exceed the prediction request limit' }, 413)
+  if (new TextEncoder().encode(serializedInput).byteLength > 700_000) return json({ error: 'The applied schemas and student data exceed the prediction request limit' }, 413)
 
   const configuredProvider = String(aiConfig.provider ?? 'Gemini').trim().toLowerCase()
-  const customModelUrl = Deno.env.get('APMS_AI_SERVICE_URL')
   if (['custom', 'custom model', 'apms custom'].includes(configuredProvider)) {
-    if (!customModelUrl) return json({ error: 'The applied evaluation criteria select the custom model, but its server-side endpoint is not configured' }, 503)
-    const customKey = Deno.env.get('APMS_AI_SERVICE_API_KEY')
-    if (!customKey) return json({ error: 'The configured prediction provider is missing its server-side API key' }, 503)
+    let configuration: AIServiceConfiguration
+    try { configuration = aiServiceConfigurationFromEnvironment((name) => Deno.env.get(name)) }
+    catch {
+      return json({ error: 'The selected custom AI service is not configured correctly' }, 503)
+    }
+    if (!configuration.configured) return json({ error: 'The selected custom AI service is not configured' }, 503)
+    const model = configuration.model ?? 'custom-model'
+    const reservation = await reserveCustomServiceUsage(adminClient as unknown as CustomUsageClient, {
+      actorId: caller.user.id,
+      classRecordId: body.class_id,
+      model,
+      requestCount: body.inputs.length,
+    })
+    if (reservation.status === 'unavailable') return json({ error: 'AI usage limits could not be checked; the service request was not sent' }, 503)
+    if (reservation.status === 'limit') return json({ error: 'The custom AI service has reached its monthly request limit.' }, 429)
+
+    const connector = createAIServiceConnector(configuration)
+    let workerStatus: AIServiceProbe
+    let workerResults: Record<string, unknown>[]
+    try {
+      workerStatus = await connector.probe()
+      if (!workerStatus.ready || !workerStatus.model_version) return json({ error: 'The selected custom AI service is not ready' }, 503)
+      const requests = safeInputs.map((input) => ({
+        record_id: input.record_ref,
+        grading_system: safeGrading,
+        evaluation_criteria: safeEvaluation,
+        task_contract: {
+          allowed_outputs: [...outputFields],
+          assessment_predictions: outputFields.has('assessment_score_predictions')
+            ? 'Return assessment_predictions using only request assessment_ref values that have no recorded result for this student. Never forecast a scored instance. Include every required unscored instance. Use numeric_value with exact maximum for numeric scoring, or categorical_value from the anonymized allowed mapping for categorical scoring.'
+            : undefined,
+          evaluation_scores: outputFields.has('evaluation_scores')
+            ? 'Return only active AI-generated factor references and values matching each factor type, range, and category.'
+            : undefined,
+        },
+        evaluation_values: input.factor_values,
+        student_records: input.records,
+        ...(inputFeatures.has('assessment_instance_details') ? { assessment_instances: safeAssessmentInstances } : {}),
+      }))
+      workerResults = await connector.predictBatch(requests)
+    } catch (error) {
+      if (error instanceof AIServiceError && error.code === 'request_too_large') return json({ error: 'The anonymized custom-model request exceeds the service request limit' }, 413)
+      if (error instanceof AIServiceError && error.code === 'timeout') return json({ error: 'The custom AI service timed out' }, 504)
+      return json({ error: 'The configured prediction provider could not return a valid response' }, 502)
+    }
+    if (workerResults.length !== safeInputs.length) return json({ error: 'The configured prediction provider returned an incomplete response' }, 502)
     const predictions = []
     for (let index = 0; index < body.inputs.length; index++) {
-      const response = await fetch(`${customModelUrl.replace(/\/$/, '')}/v1/predictions`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', ...(customKey ? { Authorization: `Bearer ${customKey}` } : {}) },
-        body: JSON.stringify({
-          record_id: safeInputs[index].record_ref,
-          grading_system: safeGrading,
-          evaluation_criteria: safeEvaluation,
-          task_contract: {
-            allowed_outputs: [...outputFields],
-            assessment_predictions: outputFields.has('assessment_score_predictions')
-              ? 'Return assessment_predictions using only request assessment_ref values that have no recorded result for this student. Never forecast a scored instance. Include every required unscored instance. Use numeric_value with exact maximum for numeric scoring, or categorical_value from the anonymized allowed mapping for categorical scoring.'
-              : undefined,
-            evaluation_scores: outputFields.has('evaluation_scores')
-              ? 'Return only active AI-generated factor references and values matching each factor type, range, and category.'
-              : undefined,
-          },
-          evaluation_values: safeInputs[index].factor_values,
-          student_records: safeInputs[index].records,
-          ...(inputFeatures.has('assessment_instance_details') ? { assessment_instances: safeAssessmentInstances } : {}),
-        }),
-      })
-      if (!response.ok) return json({ error: 'The configured prediction provider rejected the request' }, 502)
-      let result: any
-      try { result = await response.json() } catch { return json({ error: 'The configured prediction provider returned an invalid response' }, 502) }
-      if ((result.record_id != null && result.record_id !== safeInputs[index].record_ref) || (result.record_ref != null && result.record_ref !== safeInputs[index].record_ref)) return json({ error: 'The configured prediction provider returned a mismatched anonymous record reference' }, 502)
+      const result: any = workerResults[index]
+      const expectedRef = safeInputs[index].record_ref
+      const echoedRef = result.record_id ?? result.record_ref
+      if (typeof echoedRef !== 'string' || echoedRef !== expectedRef || (result.record_id != null && result.record_id !== expectedRef) || (result.record_ref != null && result.record_ref !== expectedRef)) return json({ error: 'The configured prediction provider returned a mismatched anonymous record reference' }, 502)
       result.ai_risk_level = restoreSchemaCategory(result.ai_risk_level ?? result.risk_level, schemaPrivacyMap)
       result.trend = restoreSchemaCategory(result.trend, schemaPrivacyMap)
       const validationError = validatePrediction(result, evaluationCriteria, 'anonymized_schema_context', outputFields, schemaPrivacyMap)
       if (validationError) return json({ error: `The configured prediction provider returned an invalid prediction: ${validationError}` }, 502)
-      const existingRefs = new Set(((safeInputs[index].records as any)?.assessment_results ?? []).filter((item: any) => item?.score !== undefined || item?.percentage !== undefined || item?.categorical_value !== undefined).map((item: any) => String(item.assessment_ref)))
+      const existingRefs = new Set<string>((((safeInputs[index].records as any)?.assessment_results ?? []).filter((item: any) => item?.score !== undefined || item?.percentage !== undefined || item?.categorical_value !== undefined).map((item: any) => String(item.assessment_ref))) as string[])
       const assessmentValidation = validateAssessmentPredictions(result.assessment_predictions, safeAssessmentInstances as Record<string, any>[], outputFields, schemaPrivacyMap, existingRefs)
       if (assessmentValidation.error) return json({ error: `The configured prediction provider returned an invalid prediction: ${assessmentValidation.error}` }, 502)
       predictions.push({
@@ -522,11 +589,11 @@ Deno.serve(async (request) => {
         assessment_predictions: assessmentValidation.values.map((prediction) => ({ assessment_id: assessmentIdsByRef.get(String(prediction.assessment_ref)), result: prediction.result, confidence: prediction.confidence, evidence: prediction.evidence })),
       })
     }
-    const model = Deno.env.get('APMS_AI_SERVICE_MODEL') ?? 'custom-model'
-    const modelVersion = String(aiConfig.modelVersion || Deno.env.get('APMS_AI_SERVICE_MODEL_VERSION') || model)
+    const modelVersion = workerStatus.model_version
     let runId: string
     try { runId = await saveRun('custom', model, modelVersion, 'anonymized_schema_context', predictions) }
     catch (error) { return json({ error: error instanceof Error ? error.message : 'Prediction run could not be saved' }, 500) }
+    if (!await finalizeCustomServiceUsage(adminClient as unknown as CustomUsageClient, reservation.id)) return json({ error: 'The prediction run was saved, but custom-service usage could not be finalized. Contact an administrator before retrying.', run_id: runId }, 503)
     return json({ run_id: runId, provider: 'custom', model, model_version: modelVersion, data_basis: 'anonymized_schema_context', advisory_only: true, predictions })
   }
 
@@ -680,7 +747,10 @@ Deno.serve(async (request) => {
   try {
     const payload = await response.json()
     if (openAiSelected && payload?.choices?.[0]?.message?.refusal) return json({ error: 'OpenAI declined the prediction request' }, 502)
-    rawResults = openAiSelected ? parseJson(payload?.choices?.[0]?.message?.content ?? '')?.predictions : parseJson(readGeminiText(payload))
+    const parsedOpenAiContent = openAiSelected ? parseJson(payload?.choices?.[0]?.message?.content ?? '') : null
+    rawResults = openAiSelected
+      ? (isObjectRecord(parsedOpenAiContent) ? parsedOpenAiContent.predictions : undefined)
+      : parseJson(readGeminiText(payload))
   } catch { return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} returned an invalid prediction response` }, 502) }
   if (!Array.isArray(rawResults) || rawResults.length !== body.inputs.length) return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} returned an incomplete prediction response` }, 502)
   const safeByRef = new Map(safeInputs.map((input) => [input.record_ref, input]))
@@ -700,7 +770,7 @@ Deno.serve(async (request) => {
     const validationError = validatePrediction(result, evaluationCriteria, 'applied_grading_and_evaluation_schemas', outputFields, schemaPrivacyMap)
     if (validationError) return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} returned an invalid prediction: ${validationError}` }, 502)
     const safeInput = safeByRef.get(result.record_ref)
-    const existingRefs = new Set(((safeInput?.records as any)?.assessment_results ?? []).filter((item: any) => item?.score !== undefined || item?.percentage !== undefined || item?.categorical_value !== undefined).map((item: any) => String(item.assessment_ref)))
+    const existingRefs = new Set<string>((((safeInput?.records as any)?.assessment_results ?? []).filter((item: any) => item?.score !== undefined || item?.percentage !== undefined || item?.categorical_value !== undefined).map((item: any) => String(item.assessment_ref))) as string[])
     const assessmentValidation = validateAssessmentPredictions(result.assessment_predictions, safeAssessmentInstances as Record<string, any>[], outputFields, schemaPrivacyMap, existingRefs)
     if (assessmentValidation.error) return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} returned an invalid prediction: ${assessmentValidation.error}` }, 502)
     predictions.push({

@@ -7,6 +7,12 @@ node_modules
 **/.env
 **/.env.*
 !**/.env.example
+**/deploy.env
+**/.env.deploy
+**/secrets/**
+**/*.pem
+**/*.key
+**/*secret*
 tmp
 services/ai/artifacts
 services/ai/runs
@@ -17,3 +23,4 @@ services/ai/build
 **/*.onnx
 **/*.npz
 **/*.jsonl
+services/ai/artifacts/deploy-package

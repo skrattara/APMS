@@ -1,0 +1,26 @@
+services:
+  cloudflared:
+    image: ${CLOUDFLARED_IMAGE:?Set an approved cloudflared image tag or digest}
+    command:
+      - tunnel
+      - --no-autoupdate
+      - run
+      - --token-file
+      - /run/secrets/cloudflare_tunnel_token
+    restart: unless-stopped
+    depends_on:
+      ai:
+        condition: service_healthy
+    secrets:
+      - cloudflare_tunnel_token
+    read_only: true
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
+secrets:
+  cloudflare_tunnel_token:
+    file: ${APMS_CF_TUNNEL_TOKEN_HOST_PATH:?Set the host path to the Cloudflare tunnel token file}

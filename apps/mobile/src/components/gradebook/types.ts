@@ -82,6 +82,11 @@ export type GradebookProps = {
   cellOverlays?: GradebookCellOverlay[];
   /** Optional host-owned control for showing/hiding supplied overlays, such as AI predicted scores. */
   overlayControl?: GradebookOverlayControl;
+  /** Explicit user-triggered request to refresh advisory forecasts for this class. */
+  onRunAiPredictions?: () => Promise<void>;
+  predictionRunning?: boolean;
+  predictionRunError?: string | null;
+  forecastRosterCount?: number;
   /**
    * Rules are evaluated in order; the first match wins. Numeric assessments use
    * raw points, categorical assessments use their mapped percentage, and

@@ -494,9 +494,13 @@ export function Gradebook(props: GradebookProps) {
         }
       />
       <ClassSelect {...props} />
+      {gradebookView === 'full' && props.onRunAiPredictions ? <Card><Text style={styles.help}>Refresh covers the selected class roster (up to {props.forecastRosterCount ?? props.workspace.students.length} students), regardless of table filters. Only eligible records are sent; large classes are saved in separate batches. Forecasts are advisory and do not change grades.</Text></Card> : null}
+      {gradebookView === 'full' && props.predictionRunning ? <Card><Text style={styles.help}>Saving advisory forecasts for the selected class. Existing grades are not being changed.</Text></Card> : null}
+      {gradebookView === 'full' && props.predictionRunError ? <Card><Text style={styles.help}>{props.predictionRunError}</Text></Card> : null}
       <View style={styles.gradebookTabs} {...({ dataSet: { gradebookScoreHistoryRevision: String(scoreHistoryRevision) } } as any)}>
         <Button label="Assessment View" variant={gradebookView === 'assessment' ? 'primary' : 'secondary'} onPress={() => { setGradebookView('assessment'); setPage(1); }} />
         <Button label="Full View" variant={gradebookView === 'full' ? 'primary' : 'secondary'} onPress={() => { setGradebookView('full'); setPage(1); }} />
+        {gradebookView === 'full' && props.onRunAiPredictions ? <Button label="Refresh AI predictions" variant="secondary" loading={props.predictionRunning} disabled={props.predictionRunning} onPress={() => void props.onRunAiPredictions?.()} /> : null}
         <Pressable accessibilityRole="switch" accessibilityState={{ checked: paginationEnabled }} onPress={() => { setPaginationByView((current) => ({ ...current, [gradebookView]: !current[gradebookView] })); setPage(1); }} style={styles.paginationToggle}>
           <Text style={styles.paginationToggleLabel}>Pagination</Text>
           <View style={[styles.paginationSwitch, paginationEnabled && styles.paginationSwitchOn]}><View style={[styles.paginationSwitchThumb, paginationEnabled && styles.paginationSwitchThumbOn]} /></View>

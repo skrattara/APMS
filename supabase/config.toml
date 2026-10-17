@@ -35,3 +35,12 @@ enable_confirmations = true
 [storage]
 enabled = true
 file_size_limit = "20MiB"
+
+[functions.apms-predictions]
+verify_jwt = true
+
+[functions.ai-service-status]
+verify_jwt = true
+
+[functions.ai-model-artifact]
+verify_jwt = false

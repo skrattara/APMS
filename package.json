@@ -13,6 +13,7 @@
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "npm run lint --workspaces --if-present",
     "test": "vitest run",
+    "test:ai-cloudflare": "vitest run --config services/ai/deploy/cloudflare/vitest.config.ts",
     "test:schema": "node scripts/verify-schema.mjs",
     "test:watch": "vitest",
     "test:e2e": "playwright test",

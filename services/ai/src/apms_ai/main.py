@@ -51,14 +51,35 @@ class ModelRegistry:
         self.model = None
         self.metadata = {}
         self.version = "unavailable"
+        self.device = None
         self.error = None
+        self.artifact_source = None
+        self.manifest_sha256 = None
 
     def load(self):
         """Load once per worker. Any partial-load failure leaves readiness false."""
         self.state = self.model = None
         self.metadata = {}
         self.version = "unavailable"
+        self.device = None
+        self.artifact_source = None
+        self.manifest_sha256 = None
+        remote_endpoint = os.getenv("APMS_AI_ARTIFACT_ENDPOINT", "")
         path = os.getenv("APMS_MODEL_ARTIFACT_PATH", "")
+        if remote_endpoint:
+            try:
+                from .artifact_store import fetch_artifact_bundle
+
+                path = str(fetch_artifact_bundle())
+            except Exception as error:
+                # Do not log endpoint URLs, signed URLs, tokens or filesystem paths.
+                self.error = type(error).__name__
+                logger.error(
+                    json.dumps(
+                        {"event": "remote_artifact_fetch_failed", "error_type": self.error}
+                    )
+                )
+                return
         if not path:
             return
         try:
@@ -86,6 +107,12 @@ class ModelRegistry:
                 device = "cuda" if torch.cuda.is_available() else "cpu"
             model = model_from_bundle(state, metadata, device=device)
             self.state, self.metadata, self.model = state, metadata, model
+            self.device = device
+            self.artifact_source = "supabase_storage" if remote_endpoint else "local"
+            if remote_endpoint:
+                self.manifest_sha256 = os.getenv(
+                    "APMS_AI_ARTIFACT_MANIFEST_SHA256", ""
+                ).strip().lower()
             self.version = (
                 str(metadata.get("model_version", "unversioned"))
                 + ":"
@@ -104,6 +131,9 @@ class ModelRegistry:
         except Exception as error:
             self.state = self.model = None
             self.metadata = {}
+            self.device = None
+            self.artifact_source = None
+            self.manifest_sha256 = None
             self.error = type(error).__name__
             logger.error(
                 json.dumps({"event": "model_load_failed", "error_type": self.error})
@@ -115,13 +145,53 @@ class ModelRegistry:
 
 
 registry = ModelRegistry()
+_service_key_loaded = False
+_service_key: str | None = None
+
+
+def _read_service_key() -> str:
+    """Resolve the server-only token from one configured source."""
+    # Secret files and environment variables commonly include a trailing newline
+    # when populated from a text secret; normalize both sources identically.
+    environment_key = os.getenv("APMS_AI_SERVICE_API_KEY", "").strip()
+    key_file = os.getenv("APMS_AI_SERVICE_API_KEY_FILE", "")
+    if environment_key and key_file:
+        raise ValueError("Configure only one service key source")
+    if key_file:
+        try:
+            with open(key_file, "r", encoding="utf-8") as secret_stream:
+                key = secret_stream.read().strip()
+        except OSError as error:
+            raise ValueError("Service key file is unavailable") from error
+    else:
+        key = environment_key
+    if not key or not key.strip():
+        raise ValueError("Service authentication is not configured")
+    return key
+
+
+def _configured_service_key() -> str | None:
+    if _service_key_loaded:
+        return _service_key
+    try:
+        return _read_service_key()
+    except ValueError:
+        return None
 
 
 @asynccontextmanager
 async def lifespan(application):
+    global _service_key_loaded, _service_key
     registry.load()
+    try:
+        _service_key = _read_service_key()
+    except ValueError:
+        _service_key = None
+    _service_key_loaded = True
     yield
     registry.model = registry.state = None
+    _service_key = None
+    _service_key_loaded = False
 
 
 app = FastAPI(
@@ -135,7 +205,7 @@ _capacity = threading.BoundedSemaphore(
 
 
 def authorize(authorization: str | None):
-    key = os.getenv("APMS_AI_SERVICE_API_KEY", "")
+    key = _configured_service_key() or ""
     if (
         not key
         or not authorization
@@ -172,6 +242,20 @@ async def monitor_and_bound_request(request: Request, call_next):
                 chunks.append(chunk)
             request._body = b"".join(chunks)
         response = await call_next(request)
+        if (
+            request.method == "POST"
+            and request.url.path == "/v1/predictions"
+            and response.status_code == 200
+            and registry.available
+        ):
+            # Keep provenance out of the strict v1 JSON allowlist. Response
+            # headers tie this exact request to the worker artifact that served it.
+            response.headers["X-APMS-Artifact-ID"] = str(
+                registry.metadata.get("artifact_id")
+                or registry.metadata.get("weights_sha256", "")
+            )
+            response.headers["X-APMS-Model-Version"] = registry.version
+            response.headers["Cache-Control"] = "no-store"
         return response
     finally:
         elapsed = time.perf_counter() - start
@@ -241,9 +325,43 @@ def health():
 @app.get("/ready")
 def ready():
     _ready()
-    if not os.getenv("APMS_AI_SERVICE_API_KEY"):
+    if not _configured_service_key():
         raise HTTPException(503, "Service authentication is not configured")
     return {"status": "ready", "model_version": registry.version}
+
+
+@app.get("/v1/status")
+def status(authorization: str | None = Header(default=None)):
+    """Authenticated, intentionally narrow worker status for the gateway."""
+    authorize(authorization)
+    training = registry.metadata.get("training", {}) if registry.available else {}
+    source_counts = training.get("source_counts", {})
+    return {
+        "ready": bool(registry.available and _configured_service_key()),
+        "model_version": registry.version if registry.available else None,
+        "artifact_id": (
+            registry.metadata.get("artifact_id")
+            or registry.metadata.get("weights_sha256")
+            if registry.available
+            else None
+        ),
+        "device": registry.device if registry.available else None,
+        "artifact_source": (
+            registry.artifact_source
+            if registry.available
+            else "supabase_storage"
+            if os.getenv("APMS_AI_ARTIFACT_ENDPOINT", "")
+            else "unavailable"
+        ),
+        "manifest_sha256": registry.manifest_sha256 if registry.available else None,
+        "synthetic_demo": not bool(source_counts.get("train", 0)),
+        "institutionally_validated": False,
+        "limits": {
+            "max_request_bytes": int(os.getenv("APMS_AI_MAX_REQUEST_BYTES", "1048576")),
+            "max_concurrent_requests": int(os.getenv("APMS_AI_MAX_CONCURRENT_REQUESTS", "2")),
+        },
+        "capabilities": {"v1_predictions": True, "v2_forecasts": True},
+    }
 
 
 @app.get("/metrics")
