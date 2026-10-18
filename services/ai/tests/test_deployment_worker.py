@@ -46,6 +46,7 @@ def test_api_key_file_loads_at_worker_startup_and_status_is_allowlisted(
     assert body["manifest_sha256"] is None
     assert body["synthetic_demo"] is True
     assert body["institutionally_validated"] is False
+    assert body["capabilities"]["partial_assessment_inventory"] is True
     assert set(body["limits"]) == {"max_request_bytes", "max_concurrent_requests"}
 
 

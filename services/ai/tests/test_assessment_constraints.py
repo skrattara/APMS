@@ -123,3 +123,100 @@ def test_numeric_mapping_and_weighted_instance_constraints():
     component["assessmentDefinition"]["aggregation"] = {"mode": "weighted"}
     with pytest.raises(ValueError, match="explicit weight"):
         validate_assessment_instances(weighted, [instance("a")])
+
+
+def test_partial_inventory_skips_only_minimum_count_requirements():
+    definition = grading()
+    soc = next(
+        component
+        for component in definition["components"]
+        if component.get("assessmentDefinition", {}).get("typeId") == "soc"
+    )
+    soc["assessmentDefinition"]["count"] = {
+        "min": 2,
+        "max": 2,
+        "scope": {"type": "per_group", "groupTypeId": "module"},
+    }
+    only_current = instance("current-soc", period_ref="p1", group_ref="m1")
+
+    # Existing calls remain strict unless they opt in to partial inventory.
+    with pytest.raises(ValueError, match="minimum count"):
+        validate_assessment_instances(definition, [only_current])
+    validate_assessment_instances(definition, [only_current], inventory="partial")
+
+    too_many = [
+        instance(f"soc-{index}", period_ref="p1", group_ref="m1")
+        for index in range(3)
+    ]
+    with pytest.raises(ValueError, match="maximum count"):
+        validate_assessment_instances(definition, too_many, inventory="partial")
+
+    wrong_mapping = instance("wrong-map", period_ref="p1", group_ref="m1")
+    wrong_mapping["scoring"]["mapping"][0]["percentage"] = 99
+    with pytest.raises(ValueError, match="differs from its grading definition"):
+        validate_assessment_instances(
+            definition, [wrong_mapping], inventory="partial"
+        )
+
+    outside_scope = instance("outside", period_ref="p2", group_ref="m1")
+    with pytest.raises(ValueError, match="outside its assigned period"):
+        validate_assessment_instances(
+            definition, [outside_scope], inventory="partial"
+        )
+
+    with pytest.raises(ValueError, match="inventory must be"):
+        validate_assessment_instances(definition, [only_current], inventory="future")
+
+
+def test_partial_count_scopes_require_explicit_matching_assignments():
+    per_group = grading()
+    soc = next(
+        component
+        for component in per_group["components"]
+        if component.get("assessmentDefinition", {}).get("typeId") == "soc"
+    )
+    soc["assessmentDefinition"]["count"] = {
+        "min": 1,
+        "max": 2,
+        "scope": {"type": "per_group", "groupTypeId": "module"},
+    }
+    missing_group = instance("no-group", period_ref="p1")
+    with pytest.raises(ValueError, match="requires group_ref"):
+        validate_assessment_instances(
+            per_group, [missing_group], inventory="partial"
+        )
+
+    wrong_type = json.loads(json.dumps(per_group))
+    wrong_type["groupTypes"].append(
+        {"id": "seminar", "name": "Seminar", "description": "Test scope"}
+    )
+    wrong_type["groups"].append(
+        {
+            "id": "seminar-1",
+            "name": "Seminar 1",
+            "typeId": "seminar",
+            "sequence": 1,
+        }
+    )
+    with pytest.raises(ValueError, match="group type differs"):
+        validate_assessment_instances(
+            wrong_type,
+            [instance("wrong-group", group_ref="seminar-1")],
+            inventory="partial",
+        )
+
+    per_period = grading()
+    soc = next(
+        component
+        for component in per_period["components"]
+        if component.get("assessmentDefinition", {}).get("typeId") == "soc"
+    )
+    soc["assessmentDefinition"]["count"] = {
+        "min": 1,
+        "max": 2,
+        "scope": {"type": "per_period"},
+    }
+    with pytest.raises(ValueError, match="requires period_ref"):
+        validate_assessment_instances(
+            per_period, [instance("no-period")], inventory="partial"
+        )

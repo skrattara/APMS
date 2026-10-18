@@ -1,4 +1,8 @@
 import { getErrorMessage } from '@/services/errors';
+import { forecastError, formatForecastError } from '@/services/predictionErrors';
+import { buildRecordedAssessmentColumns, formatForecastAggregate, formatRecordedAssessmentScore, isForecastOutputEnabled } from '@/services/forecastGradeColumns';
+import { buildForecastEvidence } from '@/services/forecastEligibility';
+import { planPredictionRequestBatches, predictionBatchItemLimit } from '@/services/predictionBatching';
 import { useIsFocused } from 'expo-router';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ActivityIndicator, Modal, Platform, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
@@ -19,7 +23,7 @@ import { styles } from '@/screens/FacultyLivePortalContent.styles';
 import { storedAssessmentValue, valueMappingForType } from '@/components/gradebook/shared';
 import { assessmentComponentPath, assessmentGroupLabel, assessmentPeriodLabel, componentLabel, gradingComponentPath, groupHierarchyName } from '@/components/gradebook/model';
 import {
-  addStudentToClass, applyFacultyEvaluationSystemToClasses, createAssessment, createAttendanceSession, deleteFacultyClassEvaluationSystem, exportClassCsv, invalidateFacultyClassWorkspaceCache, invalidateFacultyClassesCache, loadAssessmentScoreHistory, loadGradebookScoreHistory, nameGradebookScoreVersion, restoreAssessmentInstanceVersion, restoreAssessmentScoreVersion, restoreGradebookToVersion,
+  addStudentToClass, applyFacultyEvaluationSystemToClasses, createAssessment, createAttendanceSession, deleteFacultyClassEvaluationSystem, encodePredictionInput, exportClassCsv, invalidateFacultyClassWorkspaceCache, invalidateFacultyClassesCache, loadAssessmentScoreHistory, loadGradebookScoreHistory, nameGradebookScoreVersion, restoreAssessmentInstanceVersion, restoreAssessmentScoreVersion, restoreGradebookToVersion,
   importRosterCsv, importRosterExcel, loadClassWorkspace, loadFacultyClasses, loadFacultyEvaluationCriteriaLibrary, loadFacultyReferenceData, loadMyClassRequests, loadMySubjectRequests, removeStudentsFromClass,
   previewRosterCsv, previewRosterExcel, generateFacultyFeedbackDraft, runAiPredictions, saveAttendance, saveFacultyFeedback, sendFacultyFeedbackEmail, saveScores, saveScoreBatch,
   submitFacultyClassRequest, submitSubjectRequest, calculateEnrollmentGrade, summarizeEnrollmentStanding, updateAssessment,
@@ -28,7 +32,7 @@ import {
 } from '@/services/faculty';
 import { EvaluationSystemBuilderForm } from '@/components/EvaluationSystemBuilderForm';
 import { colors, shadow } from '@/theme/tokens';
-import { buildUnscoredAssessmentForecastOverlays, calculateGradingSystem, calculateTrend, createAssessmentForecastDomainValidator, DEFAULT_EVALUATION_SYSTEM, evaluateStudentPerformanceDetailed, extractValidatedSavedAiFactorValues, IT_GLOBAL_GRADING_SYSTEM, planForecastBatches, summarizeSavedForecast, swunextAssessmentComponents, validateEvaluationSystem, type EvaluationDefinition, type SwunextAssessmentComponent } from '@apms/domain';
+import { buildUnscoredAssessmentForecastOverlays, calculateGradingSystem, calculateTrend, createAssessmentForecastDomainValidator, DEFAULT_EVALUATION_SYSTEM, evaluateStudentPerformanceDetailed, extractValidatedSavedAiFactorValues, IT_GLOBAL_GRADING_SYSTEM, summarizeSavedForecast, swunextAssessmentComponents, validateEvaluationSystem, validateGradingSystem, type EvaluationDefinition, type SwunextAssessmentComponent } from '@apms/domain';
 
 const LazyGradebook = lazy(() => import('@/components/gradebook/Gradebook').then((module) => ({ default: module.Gradebook })));
 const LazyVisualizationPanel = lazy(() => import('@/components/charts/VisualizationPanel').then((module) => ({ default: module.VisualizationPanel })));
@@ -44,8 +48,9 @@ export function buildClassPredictionInputs(workspace: ClassWorkspace, evaluation
   return workspace.students.flatMap((student) => {
     const context = evaluationContextForStudent(workspace, student.enrollmentId);
     const standing = context.calculated.finalGrade;
+    // An incomplete final is intentionally kept null; mapped history may still
+    // support an early forecast when the applied criteria allow recent scores.
     const scores = recentScorePercentages(workspace, student.enrollmentId);
-    if (standing == null || !scores.length) return [];
     const attendance = attendanceRate(workspace, student.enrollmentId);
     const missing = missingAssessments(workspace, student.enrollmentId);
     const studentAssessments = workspace.assessments.map((assessment) => ({
@@ -60,22 +65,29 @@ export function buildClassPredictionInputs(workspace: ClassWorkspace, evaluation
       periodId: assessment.gradingPeriodId,
       groupId: assessment.gradingGroupId,
     }));
+    const evidence = buildForecastEvidence({
+      currentStanding: standing,
+      recentScores: scores,
+      inputFeatures: evaluationDefinition.ai?.inputFeatures ?? [],
+    });
+    if (!evidence) return [];
     return [{
       enrollmentId: student.enrollmentId,
-      currentStanding: Number(standing.toFixed(2)),
-      recentScores: scores,
+      currentStanding: evidence.currentStanding == null ? null : Number(evidence.currentStanding.toFixed(2)),
+      recentScores: evidence.recentScores,
       attendanceRate: attendance,
       missingAssessmentCount: missing,
       evaluationValues: context.values,
       recordContext: {
-        current_standing: standing,
+        current_standing: evidence.currentStanding,
         point_grade: context.calculated.pointGrade,
         letter_grade: context.calculated.letterGrade,
         final_remarks: context.calculated.remarks,
         period_grades: context.calculated.periods,
         component_grades: context.calculated.components,
         group_grades: context.calculated.groups,
-        recent_assessment_percentages: scores,
+        recent_assessment_percentages: evidence.recentScores,
+        recent_scores: evidence.recentScores,
         attendance_rate: attendance,
         missing_assessment_count: missing,
         assessment_results: studentAssessments,
@@ -332,12 +344,24 @@ export function FacultyLivePortalContent({ screen }: { screen: string }) {
     try {
       const gradingDefinition = state.workspace.criteria?.gradingSystemDefinition ?? state.workspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
       const evaluationDefinition = state.workspace.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
+      // Check the locally applied schemas before preparing inputs so zero-eligible
+      // counts do not hide a grading or evaluation configuration problem.
+      if (!validateGradingSystem(gradingDefinition).valid) throw forecastError('invalid_grading');
+      if (!validateEvaluationSystem(evaluationDefinition).valid) throw forecastError('invalid_criteria');
       const inputs = buildClassPredictionInputs(state.workspace, evaluationDefinition);
       requested = inputs.length;
-      if (!requested) throw new Error('No students currently have enough recorded grades for a forecast.');
+      if (!requested) throw forecastError('no_eligible_students');
       const assessmentInstances = buildClassAssessmentConstraints(state.workspace);
-      for (const batch of planForecastBatches(inputs)) {
-        const result = await runAiPredictions(classId, gradingDefinition, evaluationDefinition, batch, assessmentInstances);
+      // Preflight every exact wire body before the first inference. A very large
+      // schema or single student record must not fail after earlier batches save.
+      const baseRequest = { class_id: classId, grading_system: gradingDefinition, evaluation_criteria: evaluationDefinition };
+      const batches = planPredictionRequestBatches(baseRequest, inputs, {
+        maxBytes: 900_000,
+        maxItems: predictionBatchItemLimit(evaluationDefinition.ai?.provider),
+        encodeItem: (input) => encodePredictionInput(input, evaluationDefinition),
+      });
+      for (const batch of batches) {
+        const result = await runAiPredictions(classId, gradingDefinition, evaluationDefinition, batch.items, assessmentInstances);
         completed += result.predictions.length;
         invalidateFacultyClassWorkspaceCache(state.userId, classId);
       }
@@ -347,8 +371,8 @@ export function FacultyLivePortalContent({ screen }: { screen: string }) {
       }
     } catch (cause) {
       const message = completed > 0
-        ? `Confirmed forecasts saved for ${completed} of ${requested} eligible students in ${classLabel}. The next request failed; later batches were not sent. Check saved predictions before retrying in case the interrupted request was saved. ${getErrorMessage(cause, 'Refresh the class to check saved forecasts.')}`
-        : `${classLabel}: ${getErrorMessage(cause, 'The forecast result could not be confirmed. Check saved predictions before retrying; student records remain available.')}`;
+        ? `Confirmed forecasts saved for ${completed} of ${requested} eligible students in ${classLabel}. The next request failed; later batches were not sent. Check saved predictions before retrying in case the interrupted request was saved. ${formatForecastError(cause)}`
+        : `${classLabel}: ${formatForecastError(cause)}`;
       invalidateFacultyClassWorkspaceCache(state.userId, classId);
       if (mounted.current && selectedClassRef.current === classId) setPredictionRunError(message);
       if (completed > 0) {
@@ -446,10 +470,12 @@ export function attendanceRate(workspace: ClassWorkspace, enrollmentId: string) 
 }
 
 function recentScorePercentages(workspace: ClassWorkspace, enrollmentId: string) {
-  return workspace.assessments.flatMap((assessment) => {
-    const value = assessmentPercentForWorkspace(workspace, enrollmentId, assessment);
-    return value == null ? [] : [value];
-  });
+  return [...workspace.assessments]
+    .sort((left, right) => left.assessmentDate.localeCompare(right.assessmentDate))
+    .flatMap((assessment) => {
+      const value = assessmentPercentForWorkspace(workspace, enrollmentId, assessment);
+      return typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? [value] : [];
+    });
 }
 
 function expectedAssessmentInstances(workspace: ClassWorkspace) {
@@ -1708,10 +1734,17 @@ function Risk(props: StateProps & { prediction: boolean }) {
   const [concernFilter, setConcernFilter] = useState('all');
   const [predictionQuery, setPredictionQuery] = useState('');
   const [predictionRiskFilter, setPredictionRiskFilter] = useState('all');
+  const [gradeColumnView, setGradeColumnView] = useState<'summary' | 'recorded'>('summary');
   const gradingDefinition = props.workspace.criteria?.gradingSystemDefinition ?? props.workspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
   const evaluationDefinition = props.workspace.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
-  useEffect(() => { setRiskFilter('attention'); setPredictionRiskFilter('all'); }, [props.selectedClassId, evaluationDefinition.id]);
+  useEffect(() => { setRiskFilter('attention'); setPredictionRiskFilter('all'); setGradeColumnView('summary'); }, [props.selectedClassId, evaluationDefinition.id]);
   const gradingPeriods = [...(gradingDefinition.periods ?? [])].sort((left: any, right: any) => (left.sequence ?? 0) - (right.sequence ?? 0));
+  const gradingComponents = [...(gradingDefinition.components ?? [])];
+  const gradingGroups = [...(gradingDefinition.groups ?? [])];
+  const assessmentColumns = buildRecordedAssessmentColumns(props.workspace.assessments.map((assessment) => ({
+    ...assessment,
+    categorical: Boolean(valueMappingForType(gradingDefinition, assessment.gradingTypeId ?? assessment.component)),
+  })));
   const run = props.onRunAiPredictions;
   const studentRows = useMemo(() => props.workspace.students.map((student) => {
     const summary = summarizeEnrollmentStanding(props.workspace, student.enrollmentId);
@@ -1733,7 +1766,7 @@ function Risk(props: StateProps & { prediction: boolean }) {
     const concern = evaluationRuleReasons(context.definition, context.result);
     const trend = String(context.values.recent_trend ?? evaluation?.trend ?? 'unknown');
     const decline = current != null && evaluation?.predictedStanding != null ? current - evaluation.predictedStanding : null;
-    return { student, summary, current, calculated: context.calculated, predicted: evaluation?.predictedStanding ?? null, riskProbability: evaluation?.riskProbability ?? null, predictionGeneratedAt: evaluation?.predictionGeneratedAt ?? null, dataBasis: evaluation?.dataBasis ?? null, modelProvider: evaluation?.modelProvider ?? null, modelName: evaluation?.modelName ?? null, modelVersion: evaluation?.modelVersion ?? null, attendance, risk, riskValue: evaluationRiskValue(context.definition, context.result), levelId: level?.id ?? null, levelName: level?.name ?? (risk === 'unavailable' ? 'Unavailable' : 'No matching level'), levelColor: level?.color, missing, trend, concernKey, concernFactorIds, concern, decline };
+    return { student, summary, current, calculated: context.calculated, assessmentScores: props.workspace.assessments.map((assessment) => storedAssessmentValue(props.workspace, student.enrollmentId, assessment.id)), predicted: evaluation?.predictedStanding ?? null, riskProbability: evaluation?.riskProbability ?? null, predictionGeneratedAt: evaluation?.predictionGeneratedAt ?? null, dataBasis: evaluation?.dataBasis ?? null, modelProvider: evaluation?.modelProvider ?? null, modelName: evaluation?.modelName ?? null, modelVersion: evaluation?.modelVersion ?? null, attendance, risk, riskValue: evaluationRiskValue(context.definition, context.result), levelId: level?.id ?? null, levelName: level?.name ?? (risk === 'unavailable' ? 'Unavailable' : 'No matching level'), levelColor: level?.color, missing, trend, concernKey, concernFactorIds, concern, decline };
   }), [props.workspace]);
   const attentionCount = studentRows.filter((row) => row.risk === 'medium' || row.risk === 'high').length;
   const highCount = studentRows.filter((row) => row.risk === 'high').length;
@@ -1763,8 +1796,25 @@ function Risk(props: StateProps & { prediction: boolean }) {
   const usedEvaluationFactorIds = new Set(evaluationDefinition.levels.flatMap((level) => level.rules.map((rule) => rule.factorId)));
   const concernOptions = [{ label: 'All evaluation factors', value: 'all' }, ...evaluationDefinition.factors.filter((factor) => usedEvaluationFactorIds.has(factor.id)).map((factor) => ({ label: factor.name, value: factor.id }))];
   const missingAssessmentFactorId = evaluationDefinition.factors.find((factor) => factor.source === 'missing_assessment_count')?.id;
-  const hasPredictedStandingFactor = evaluationDefinition.factors.some((factor) => factor.source === 'predicted_standing');
+  const hasPredictedStandingOutput = isForecastOutputEnabled(evaluationDefinition, 'predicted_standing');
   const configuredRiskOptions = evaluationRiskOptions(evaluationDefinition, 'All students');
+  const recordedGradeColumns = [
+    ...gradingPeriods.map((period: any) => ({ key: period.id, label: period.name, kind: 'period' as const })),
+    ...gradingComponents.map((component: any) => ({ key: component.id, label: `${component.shortCode ? `${component.shortCode} ` : ''}${component.name} · component`, kind: 'component' as const })),
+    ...gradingGroups.map((group: any) => ({ key: group.id, label: `${group.name} · group`, kind: 'group' as const })),
+    ...assessmentColumns.map((assessment) => ({ key: assessment.key, label: `${assessment.label} · score`, kind: 'assessment' as const, maximumScore: assessment.maximumScore, categorical: assessment.categorical, assessmentIndex: assessment.assessmentIndex })),
+  ];
+  const recordedGradeColumnWidths = [190, ...gradingPeriods.map(() => 92), ...gradingComponents.map(() => 120), ...gradingGroups.map(() => 120), ...assessmentColumns.map(() => 150)];
+  const summaryGradeColumns = gradingPeriods.map((period: any) => ({ key: period.id, label: period.name, kind: 'period' as const }));
+  const visibleGradeColumns = gradeColumnView === 'recorded' ? recordedGradeColumns : summaryGradeColumns;
+  const visibleGradeColumnWidths = gradeColumnView === 'recorded' ? recordedGradeColumnWidths : [190, ...gradingPeriods.map(() => 92)];
+  const gradeCells = (row: (typeof studentRows)[number]) => visibleGradeColumns.map((column) => {
+    if (column.kind === 'assessment') {
+      return formatRecordedAssessmentScore(row.assessmentScores[column.assessmentIndex], column.maximumScore, column.categorical);
+    }
+    const values = column.kind === 'period' ? row.calculated.periods : column.kind === 'component' ? row.calculated.components : row.calculated.groups;
+    return formatForecastAggregate(values?.[column.key]);
+  });
   const riskFilterOptions = [
     { label: 'Requires Attention', value: 'attention' },
     { label: 'Any high-severity level', value: 'severity:high' },
@@ -1781,24 +1831,24 @@ function Risk(props: StateProps & { prediction: boolean }) {
       return row.riskValue === predictionRiskFilter;
     });
   }, [predictionQuery, predictionRiskFilter, studentRows]);
-  const attentionColumns = ['Student', ...gradingPeriods.map((period: any) => period.name), 'Final percentage', 'Point / letter grade', 'Risk level', 'Matched evaluation rules', ...(hasPredictedStandingFactor ? ['Predicted standing'] : []), 'AI risk probability'];
+  const attentionColumns = ['Student', ...visibleGradeColumns.map((column) => column.label), 'Final percentage', 'Point / letter grade', 'Risk level', 'Matched evaluation rules', ...(hasPredictedStandingOutput ? ['Predicted standing'] : []), 'AI risk probability'];
   const attentionTableRows = filteredRows.map((row) => [
     `${row.student.name} · ${formatStudentId(row.student.institutionalId)}`,
-    ...gradingPeriods.map((period: any) => row.calculated.periods[period.id] == null ? '—' : `${row.calculated.periods[period.id]!.toFixed(1)}%`),
+    ...gradeCells(row),
     row.calculated.finalGrade == null ? '—' : `${row.calculated.finalGrade.toFixed(1)}%`,
     row.calculated.pointGrade == null ? '—' : `${row.calculated.pointGrade.toFixed(2)}${row.calculated.letterGrade ? ` / ${row.calculated.letterGrade}` : ''}`,
     row.levelName,
     row.concern,
-    ...(hasPredictedStandingFactor ? [row.predicted == null ? 'Unavailable' : `${row.predicted.toFixed(1)}%`] : []),
+    ...(hasPredictedStandingOutput ? [row.predicted == null ? 'Unavailable' : `${row.predicted.toFixed(1)}%`] : []),
     row.riskProbability == null ? 'Unavailable' : `${(row.riskProbability * 100).toFixed(1)}%`,
   ]);
-  const predictionColumns = ['Student', ...gradingPeriods.map((period: any) => period.name), 'Final percentage', 'Point / letter grade', ...(hasPredictedStandingFactor ? ['Predicted standing'] : []), 'Risk level', 'Matched evaluation rules', 'AI risk probability', 'Generated', 'AI model / version'];
+  const predictionColumns = ['Student', ...visibleGradeColumns.map((column) => column.label), 'Final percentage', 'Point / letter grade', ...(hasPredictedStandingOutput ? ['Predicted standing'] : []), 'Risk level', 'Matched evaluation rules', 'AI risk probability', 'Generated', 'AI model / version'];
   const predictionTableRows = predictionRows.map((row) => [
     `${row.student.name} · ${formatStudentId(row.student.institutionalId)}`,
-    ...gradingPeriods.map((period: any) => row.calculated.periods[period.id] == null ? '—' : `${row.calculated.periods[period.id]!.toFixed(1)}%`),
+    ...gradeCells(row),
     row.calculated.finalGrade == null ? '—' : `${row.calculated.finalGrade.toFixed(1)}%`,
     row.calculated.pointGrade == null ? '—' : `${row.calculated.pointGrade.toFixed(2)}${row.calculated.letterGrade ? ` / ${row.calculated.letterGrade}` : ''}`,
-    ...(hasPredictedStandingFactor ? [row.predicted == null ? 'Unavailable' : `${row.predicted.toFixed(1)}%`] : []),
+    ...(hasPredictedStandingOutput ? [row.predicted == null ? 'Unavailable' : `${row.predicted.toFixed(1)}%`] : []),
     row.levelName,
     row.concern,
     row.riskProbability == null ? 'Unavailable' : `${(row.riskProbability * 100).toFixed(1)}%`,
@@ -1828,10 +1878,11 @@ function Risk(props: StateProps & { prediction: boolean }) {
           <SelectField label="Risk" value={riskFilter} options={riskFilterOptions} onChange={setRiskFilter} containerStyle={styles.attentionFilter} />
           <SelectField label="Trend" value={trendFilter} options={[{ label: 'All Trends', value: 'all' }, { label: 'Declining', value: 'declining' }, { label: 'Stable', value: 'stable' }, { label: 'Improving', value: 'improving' }]} onChange={(value) => setTrendFilter(value as typeof trendFilter)} containerStyle={styles.attentionFilter} />
           <SelectField label="Concern" value={concernFilter} options={concernOptions} onChange={(value) => setConcernFilter(value as typeof concernFilter)} containerStyle={styles.attentionFilter} />
+          <SelectField label="Grade columns" value={gradeColumnView} options={[{ label: 'Summary', value: 'summary' }, { label: 'Recorded details', value: 'recorded' }]} onChange={(value) => setGradeColumnView(value as typeof gradeColumnView)} containerStyle={styles.attentionFilter} />
         </View>
         <Text style={styles.help}>Grades use {gradingDefinition.name}; risk levels and matched rules use {evaluationDefinition.name}.</Text>
         {filteredRows.length ? (
-          <DataTable columns={attentionColumns} rows={attentionTableRows} onRowPress={(tableRow) => { const match = filteredRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === String(tableRow[0])); if (match) setSelected(match.student); }} columnWidths={[190, ...gradingPeriods.map(() => 92), 104, 118, 132, 290, ...(hasPredictedStandingFactor ? [120] : []), 120]} />
+          <DataTable columns={attentionColumns} rows={attentionTableRows} onRowPress={(tableRow) => { const match = filteredRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === String(tableRow[0])); if (match) setSelected(match.student); }} columnWidths={[...visibleGradeColumnWidths, 104, 118, 132, 290, ...(hasPredictedStandingOutput ? [120] : []), 120]} />
         ) : (
           <PageState kind="empty" title={riskFilter === 'attention' && !attentionCount ? 'No students currently require attention' : 'No students match the selected filters'} message={riskFilter === 'attention' && !attentionCount ? 'Based on the applied evaluation criteria and available records, no students in this class currently meet the attention criteria.' : 'Try clearing one or more filters.'} action={<Button label={riskFilter === 'attention' && !attentionCount ? 'View all students' : 'Clear filters'} variant="secondary" onPress={() => riskFilter === 'attention' && !attentionCount ? setRiskFilter('all') : clearFilters()} />} />
         )}
@@ -1848,9 +1899,10 @@ function Risk(props: StateProps & { prediction: boolean }) {
          <View style={styles.predictionToolbar}>
            <SearchFilter value={predictionQuery} onChange={setPredictionQuery} placeholder="Search students..." accessibilityLabel="Search prediction results" />
            <SelectField label="Risk" value={predictionRiskFilter} options={configuredRiskOptions} onChange={setPredictionRiskFilter} containerStyle={styles.predictionFilter} />
+           <SelectField label="Grade columns" value={gradeColumnView} options={[{ label: 'Summary', value: 'summary' }, { label: 'Recorded details', value: 'recorded' }]} onChange={(value) => setGradeColumnView(value as typeof gradeColumnView)} containerStyle={styles.predictionFilter} />
          </View>
-         <Text style={styles.predictionSectionLabel}>Standing and risk results from the applied grading and evaluation definitions</Text>
-         {predictionRows.length ? <DataTable columns={predictionColumns} rows={predictionTableRows} onRowPress={(tableRow) => { const match = predictionRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === tableRow[0]); if (match) setSelected(match.student); }} columnWidths={[190, ...gradingPeriods.map(() => 92), 104, 118, ...(hasPredictedStandingFactor ? [120] : []), 132, 290, 120, 170, 230]} /> : <PageState kind="empty" title="No matching estimates" message="Try another student name or risk level." />}
+         <Text style={styles.predictionSectionLabel}>{gradeColumnView === 'summary' ? 'Summary keeps grading periods and forecast fields together. Choose Recorded details to review component totals, groups, and individual assessment scores.' : 'Recorded details show saved assessment scores and grading summaries. Missing values remain blank; AI forecast fields stay unavailable until a forecast is saved.'}</Text>
+         {predictionRows.length ? <DataTable columns={predictionColumns} rows={predictionTableRows} onRowPress={(tableRow) => { const match = predictionRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === tableRow[0]); if (match) setSelected(match.student); }} columnWidths={[...visibleGradeColumnWidths, 104, 118, ...(hasPredictedStandingOutput ? [120] : []), 132, 290, 120, 170, 230]} /> : <PageState kind="empty" title="No matching estimates" message="Try another student name or risk level." />}
          <Text style={styles.attentionCount}>{predictionRows.length} student{predictionRows.length === 1 ? '' : 's'} shown · select a student to review the underlying indicators</Text>
        </Card>
      </>}

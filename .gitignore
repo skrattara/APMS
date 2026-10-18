@@ -21,6 +21,7 @@ playwright-live-report/
 !.env.example
 *.local
 services/ai/secrets/
+/run/secrets/
 
 # Python
 __pycache__/

@@ -2,12 +2,13 @@
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "apms-ai-container-gateway",
   "main": "src/index.ts",
+  "tsconfig": "./tsconfig.json",
   "compatibility_date": "2026-10-17",
   "compatibility_flags": ["nodejs_compat"],
   "containers": [
     {
       "class_name": "APMSContainer",
-      "image": "registry.cloudflare.com/REPLACE_WITH_ACCOUNT_ID/apms-forecast:2026-10-17",
+      "image": "registry.cloudflare.com/REPLACE_WITH_ACCOUNT_ID/apms-ai-model:20261017",
       "max_instances": 1,
       "instance_type": "standard-2"
     }

@@ -45,7 +45,9 @@ def _roundoff(value, minimum, maximum):
     return value
 
 
-def bind_schema_queries(example, *, assessment_instances=None):
+def bind_schema_queries(
+    example, *, assessment_instances=None, assessment_inventory="complete"
+):
     """Resolve requested schema references into the actual neural head domains.
 
     References are removed before tensorization and restored only in response
@@ -54,6 +56,11 @@ def bind_schema_queries(example, *, assessment_instances=None):
     """
     from .contracts import compile_assessment_constraint, validate_assessment_instances
 
+    if not isinstance(assessment_inventory, str) or assessment_inventory not in (
+        "partial",
+        "complete",
+    ):
+        raise ValueError("Assessment inventory must be 'partial' or 'complete'")
     schema = example.schema
     grading, evaluation = schema.get("gradingSystem"), schema.get("evaluationCriteria")
     compile_schema_context(grading, evaluation)
@@ -61,7 +68,9 @@ def bind_schema_queries(example, *, assessment_instances=None):
     if instances:
         if not grading:
             raise ValueError("Assessment instances require a grading representation")
-        validate_assessment_instances(grading, instances)
+        validate_assessment_instances(
+            grading, instances, inventory=assessment_inventory
+        )
     by_ref = {item["assessment_ref"]: item for item in instances}
     specs = {field.name: field for field in example.fields}
     queries, references = [], []
@@ -144,21 +153,57 @@ def bind_schema_queries(example, *, assessment_instances=None):
                 if any(value not in choices for value in query["choices"]):
                     raise ValueError("Query choices violate the referenced schema")
                 choices = list(query["choices"])
-            if spec.kind == "category" and any(
-                value not in spec.categories for value in choices
-            ):
-                raise ValueError(
-                    "Output field categories disagree with the applied schema"
-                )
+            # Request schemas are privacy-projected and may replace category
+            # labels with local opaque tokens. The schema compiler above has
+            # already established the legal domain; do not compare those labels
+            # with the training artifact's category spellings here. The model
+            # predicts an ordinal within this query's own ordered domain, and
+            # predict_example decodes that ordinal using these exact choices.
             query["choices"] = choices
         queries.append(query)
         references.append(reference)
-    result = replace(example, queries=queries)
+    # validate_example checks query choices against each FieldSpec domain. Keep
+    # the artifact immutable, and extend only this request's typed field view
+    # with validated, schema-derived category labels. Multiple schema queries
+    # over one output field retain their own ordered choices for decoding.
+    request_domains: dict[str, list[str]] = {}
+    for query, reference in zip(queries, references):
+        if (
+            reference
+            and query.get("choices")
+            and specs[query["field"]].kind == "category"
+        ):
+            domain = request_domains.setdefault(query["field"], [])
+            for value in query["choices"]:
+                if not isinstance(value, str):
+                    raise ValueError("Categorical schema choices must be strings")
+                if value not in domain:
+                    domain.append(value)
+    request_fields = [
+        replace(
+            field,
+            categories=tuple(
+                dict.fromkeys((*field.categories, *request_domains.get(field.name, [])))
+            ),
+        )
+        if field.kind == "category" and field.name in request_domains
+        else field
+        for field in example.fields
+    ]
+    result = replace(example, queries=queries, fields=request_fields)
     validate_example(result)
     return result, references
 
 
-def predict_example(state, metadata, example, *, model=None, assessment_instances=None):
+def predict_example(
+    state,
+    metadata,
+    example,
+    *,
+    model=None,
+    assessment_instances=None,
+    assessment_inventory="complete",
+):
     """Use exactly the shared training encoder, then decode every typed query."""
     import torch
 
@@ -167,7 +212,9 @@ def predict_example(state, metadata, example, *, model=None, assessment_instance
     from .training import _prepare
 
     example, references = bind_schema_queries(
-        example, assessment_instances=assessment_instances
+        example,
+        assessment_instances=assessment_instances,
+        assessment_inventory=assessment_inventory,
     )
     if example.labels:
         raise ValueError("Inference requests must not include future labels")
@@ -295,6 +342,15 @@ def predict_record(
         raise ValueError("Unsupported inference adapter version")
     grading, evaluation = payload["grading_system"], payload["evaluation_criteria"]
     compile_schema_context(grading, evaluation)
+    task_contract = payload.get("task_contract") or {}
+    if not isinstance(task_contract, dict):
+        raise ValueError("Task contract must be an object")
+    assessment_inventory = task_contract.get("assessment_inventory", "complete")
+    if not isinstance(assessment_inventory, str) or assessment_inventory not in (
+        "partial",
+        "complete",
+    ):
+        raise ValueError("Assessment inventory must be 'partial' or 'complete'")
     fields = field_specs(metadata)
     by_name = {field.name: field for field in fields}
     primary = metadata.get("target_field")
@@ -346,7 +402,7 @@ def predict_record(
         min(100, standing.get("maximum", 100)),
     )
     queries = [{"field": primary, "horizon": 1, "minimum": lower, "maximum": upper}]
-    allowed = set((payload.get("task_contract") or {}).get("allowed_outputs", []))
+    allowed = set(task_contract.get("allowed_outputs", []))
     instances = payload.get("assessment_instances") or []
     scored = {
         item.get("assessment_ref")
@@ -426,7 +482,12 @@ def predict_record(
         schema={"gradingSystem": grading, "evaluationCriteria": evaluation},
     )
     outputs = predict_example(
-        state, metadata, example, model=model, assessment_instances=instances
+        state,
+        metadata,
+        example,
+        model=model,
+        assessment_instances=instances,
+        assessment_inventory=assessment_inventory,
     )["predictions"]
     first = outputs[0]
     result = {

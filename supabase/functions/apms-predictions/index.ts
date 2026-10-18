@@ -1,13 +1,15 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4'
 import { anonymizeAcademicData, anonymizeEvaluationValues, anonymizeSchemaRepresentation, opaqueRecordRef, restoreSchemaCategory, shuffleForProvider } from '../_shared/aiPrivacy.ts'
-import { AIServiceError, aiServiceConfigurationFromEnvironment, createAIServiceConnector, finalizeCustomServiceUsage, reserveCustomServiceUsage, type AIServiceConfiguration, type AIServiceProbe, type CustomUsageClient } from '../_shared/aiService.ts'
+import { aiServiceConfigurationFromEnvironment, createAIServiceConnector, finalizeCustomServiceUsage, reserveCustomServiceUsage, safeAIServiceFailure, type AIServiceConfiguration, type AIServiceProbe, type CustomUsageClient } from '../_shared/aiService.ts'
 import { persistableAIScores } from '../_shared/persistableAIScores.ts'
 import defaultGradingSystem from '../_shared/defaultGradingSystem.json' with { type: 'json' }
 import defaultEvaluationSystem from '../_shared/defaultEvaluationSystem.json' with { type: 'json' }
+import { addRequestTrace, BoundedRequestError, BoundedResponseError, createRequestTrace, logRequestTrace, PROVIDER_RESPONSE_LIMIT_BYTES, readBodyThenAuthenticate, readBoundedResponseText, requestBoundFetch, RequestAuthorizationError, RequestDeadlineError, setRequestStage, withinRequestDeadline, type RequestTrace } from '../_shared/requestLifecycle.ts'
 
 const corsHeaders = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'authorization, x-client-info, apikey, content-type',
+  'Access-Control-Expose-Headers': 'X-APMS-Error-Code, X-APMS-Request-ID',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
 }
 
@@ -27,36 +29,26 @@ type RequestBody = {
   inputs: PredictionInput[]
 }
 
-const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), {
+const json = (body: unknown, status = 200, errorCode?: string) => new Response(JSON.stringify(errorCode ? { ...(body as Record<string, unknown>), code: errorCode } : body), {
   status,
-  headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store' },
+  headers: { ...corsHeaders, 'Content-Type': 'application/json', 'Cache-Control': 'private, no-store', ...(errorCode ? { 'X-APMS-Error-Code': errorCode } : {}) },
 })
 
-class InvalidRequestBody extends Error {
-  constructor(readonly tooLarge = false) { super(tooLarge ? 'too_large' : 'invalid_json') }
-}
-
-async function readRequestJsonLimited(request: Request, maximumBytes: number): Promise<unknown> {
-  const declaredLength = Number(request.headers.get('content-length'))
-  if (Number.isFinite(declaredLength) && declaredLength > maximumBytes) throw new InvalidRequestBody(true)
-  if (!request.body) throw new InvalidRequestBody()
-  const reader = request.body.getReader()
-  const chunks: Uint8Array[] = []
-  let total = 0
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    total += value.byteLength
-    if (total > maximumBytes) {
-      await reader.cancel()
-      throw new InvalidRequestBody(true)
-    }
-    chunks.push(value)
+function safeCustomProviderFailure(error: unknown, trace: RequestTrace): Response {
+  const failure = safeAIServiceFailure(error)
+  trace.failureCode = failure.code
+  trace.upstreamStatus = failure.upstreamStatus
+  const messages: Record<typeof failure.code, string> = {
+    provider_authentication_failed: 'The prediction provider rejected its configured credentials',
+    provider_request_rejected: 'The prediction provider rejected the prediction request',
+    provider_busy: 'The prediction provider is busy; try again later',
+    provider_unavailable: 'The prediction provider is unavailable',
+    provider_connection_failed: 'The prediction provider could not be reached',
+    provider_timeout: 'The prediction provider timed out',
+    invalid_response: 'The prediction provider returned an invalid response',
+    request_too_large: 'The anonymized custom-model request exceeds the service request limit',
   }
-  const bytes = new Uint8Array(total)
-  let offset = 0
-  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
-  try { return JSON.parse(new TextDecoder().decode(bytes)) } catch { throw new InvalidRequestBody() }
+  return json({ error: messages[failure.code], ...(failure.upstreamStatus ? { upstream_status: failure.upstreamStatus } : {}) }, failure.status, failure.code)
 }
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
@@ -204,14 +196,15 @@ function validateAssessmentPredictions(raw: unknown, instances: Record<string, a
     if (existingAssessmentRefs.has(ref)) return { ...empty, error: 'The provider predicted a score for an assessment that already has a recorded result.' }
     seen.add(ref)
     const scoring = instance.scoring
+    const hasNestedResult = prediction.result != null
+    const hasFlatEncoding = prediction.kind != null || prediction.numeric_value != null || prediction.categorical_value != null || prediction.maximum != null
+    if (hasNestedResult && hasFlatEncoding) return { ...empty, error: `Assessment ${ref} mixes result encodings.` }
     const result = prediction.result ?? (prediction.kind === 'numeric'
       ? { kind: 'numeric', value: prediction.numeric_value, maximum: prediction.maximum }
       : prediction.kind === 'categorical'
         ? { kind: 'categorical', value: prediction.categorical_value }
         : null)
-    if (result && !prediction.result) prediction.result = result
     if (!result || typeof result !== 'object') return { ...empty, error: `Assessment ${ref} has no valid result.` }
-    if (prediction.result && (prediction.kind != null || prediction.numeric_value != null || prediction.categorical_value != null || prediction.maximum != null)) return { ...empty, error: `Assessment ${ref} mixes result encodings.` }
     if (Object.keys(result).some((key) => !['kind', 'value', 'maximum'].includes(key))) return { ...empty, error: `Assessment ${ref} contains fields outside the result contract.` }
     if (scoring.mode === 'value_mapping') {
       if (prediction.kind === 'numeric' || prediction.numeric_value != null || prediction.maximum != null) return { ...empty, error: `Assessment ${ref} contains numeric fields for categorical scoring.` }
@@ -230,19 +223,19 @@ function validateAssessmentPredictions(raw: unknown, instances: Record<string, a
     }
     if (prediction.confidence != null && (typeof prediction.confidence !== 'number' || !Number.isFinite(prediction.confidence) || prediction.confidence < 0 || prediction.confidence > 1)) return { ...empty, error: `Assessment ${ref} confidence must be from 0 to 1.` }
     if (prediction.evidence != null && (!Array.isArray(prediction.evidence) || prediction.evidence.length > 8 || prediction.evidence.some((item: unknown) => typeof item !== 'string' || item.length > 500))) return { ...empty, error: `Assessment ${ref} evidence is invalid.` }
-    values.push(prediction)
+    values.push({ ...prediction, result })
   }
   for (const instance of instances) if (!instance.optional && !existingAssessmentRefs.has(instance.assessment_ref) && !seen.has(instance.assessment_ref)) return { ...empty, error: `A result prediction is missing for required assessment ${instance.assessment_ref}.` }
   return { values, error: null }
 }
 
-function validateAssessmentInstanceCounts(grading: Record<string, any>, instances: Record<string, any>[], mapRef: (value: string) => string | undefined) {
+function validateAssessmentInstanceCounts(grading: Record<string, any>, instances: Record<string, any>[], mapRef: (value: string) => string | undefined, inventory: 'complete' | 'partial' = 'complete') {
   for (const component of grading.components ?? []) {
     const definition = component.assessmentDefinition
     if (!definition?.count) continue
     const typeRef = mapRef(definition.typeId)
     const matching = instances.filter((instance) => instance.assessment_type_ref === typeRef)
-    const violates = (scope: any[]) => (definition.count.min != null && scope.length < definition.count.min) || (definition.count.max != null && scope.length > definition.count.max)
+    const violates = (scope: any[]) => (inventory === 'complete' && definition.count.min != null && scope.length < definition.count.min) || (definition.count.max != null && scope.length > definition.count.max)
     const scopeType = definition.count.scope?.type ?? 'overall'
     if (scopeType === 'overall' && violates(matching)) return `Assessment count for ${definition.typeId} violates the active overall count constraint.`
     if (scopeType === 'per_period') for (const period of grading.periods ?? []) {
@@ -320,33 +313,41 @@ async function loadAppliedDefinitions(adminClient: any, userClient: any, classId
   return { grading, evaluation }
 }
 
-Deno.serve(async (request) => {
+async function handlePredictionRequest(request: Request, trace: RequestTrace): Promise<Response> {
   if (request.method === 'OPTIONS') return new Response('ok', { headers: corsHeaders })
   if (request.method !== 'POST') return json({ error: 'Method not allowed' }, 405)
-  const authorization = request.headers.get('Authorization')
-  if (!authorization?.startsWith('Bearer ')) return json({ error: 'Authentication required' }, 401)
 
-  const token = authorization.slice('Bearer '.length)
-  const userClient = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
-    auth: { persistSession: false },
-    global: { headers: { Authorization: authorization } },
-  })
-  const { data: caller, error: callerError } = await userClient.auth.getUser(token)
-  if (callerError || !caller.user) return json({ error: 'Invalid session' }, 401)
-
-  let parsedBody: unknown
-  try { parsedBody = await readRequestJsonLimited(request, 1_000_000) }
+  // Reject oversized bodies before auth or database network work. The caller
+  // still has to provide a syntactically valid bearer header.
+  let requestContext: { authorization: string; body: unknown; authentication: { userClient: any; caller: any; callerError: any } }
+  try {
+    requestContext = await readBodyThenAuthenticate(request, 1_000_000, trace, async (token, authorization) => {
+      const userClient = createClient(Deno.env.get('SUPABASE_URL') ?? '', Deno.env.get('SUPABASE_ANON_KEY') ?? '', {
+        auth: { persistSession: false },
+        global: { headers: { Authorization: authorization }, fetch: requestBoundFetch(trace) },
+      })
+      const { data: caller, error: callerError } = await userClient.auth.getUser(token)
+      return { userClient, caller, callerError }
+    })
+  }
   catch (error) {
-    if (error instanceof InvalidRequestBody && error.tooLarge) return json({ error: 'Prediction request exceeds the 1 MB limit' }, 413)
+    if (error instanceof RequestAuthorizationError) return json({ error: 'Authentication required' }, 401)
+    if (error instanceof BoundedRequestError && error.tooLarge) return json({ error: 'Prediction request exceeds the 1 MB limit' }, 413, 'request_too_large')
+    if (error instanceof RequestDeadlineError) throw error
     return json({ error: 'Invalid JSON body' }, 400)
   }
+  const parsedBody = requestContext.body
   if (!isObjectRecord(parsedBody)) return json({ error: 'Invalid prediction request' }, 400)
   const body = parsedBody as unknown as RequestBody
+  trace.recordCount = Array.isArray(body.inputs) ? body.inputs.length : undefined
+  const { userClient, caller, callerError } = requestContext.authentication
+  if (callerError || !caller.user) return json({ error: 'Invalid session' }, 401)
   if (typeof body.class_id !== 'string' || !body.class_id.trim() || !isObjectRecord(body.grading_system) || !isObjectRecord(body.evaluation_criteria) || !Array.isArray(body.inputs) || !body.inputs.length) return json({ error: 'Class, schema snapshots, and at least one student record are required' }, 400)
   if (body.inputs.length > 100) return json({ error: 'A maximum of 100 students can be predicted per request' }, 400)
   if (body.inputs.some((item) => !isObjectRecord(item) || typeof item.enrollment_id !== 'string' || !item.enrollment_id.trim() || !isObjectRecord(item.evaluation_values) || !isObjectRecord(item.records))) return json({ error: 'Each prediction needs an enrollment, schema-derived factor values, and student record context' }, 400)
   if (new Set(body.inputs.map((item) => item.enrollment_id)).size !== body.inputs.length) return json({ error: 'Each enrollment may appear only once in a prediction request' }, 400)
 
+  setRequestStage(trace, 'database_authorization')
   const { error: permissionError } = await userClient.rpc('faculty_assert_ai_access', { p_class_record_id: body.class_id, p_feature: 'predictions' })
   if (permissionError) return json({ error: 'You are not authorized to run predictions for this class' }, 403)
 
@@ -359,12 +360,13 @@ Deno.serve(async (request) => {
 
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY')
   if (!serviceKey) return json({ error: 'AI privacy controls are unavailable' }, 503)
-  const adminClient = createClient(Deno.env.get('SUPABASE_URL') ?? '', serviceKey, { auth: { persistSession: false } })
+  const adminClient = createClient(Deno.env.get('SUPABASE_URL') ?? '', serviceKey, { auth: { persistSession: false }, global: { fetch: requestBoundFetch(trace) } })
+  setRequestStage(trace, 'database_context')
   let applied: { grading: Record<string, any>; evaluation: Record<string, any> }
   try { applied = await loadAppliedDefinitions(adminClient, userClient, body.class_id, caller.user.id) }
   catch (error) { return json({ error: error instanceof Error ? error.message : 'Applied class schemas could not be resolved' }, 409) }
   if (stableJson(body.grading_system) !== stableJson(applied.grading) || stableJson(body.evaluation_criteria) !== stableJson(applied.evaluation)) {
-    return json({ error: 'The applied grading or evaluation schema changed. Refresh the class and try again.' }, 409)
+    return json({ error: 'The applied grading or evaluation schema changed. Refresh the class and try again.' }, 409, 'applied_schema_changed')
   }
   const gradingSystem = applied.grading
   const evaluationCriteria = applied.evaluation
@@ -450,6 +452,12 @@ Deno.serve(async (request) => {
       const component = resolveDefinition(row)
       const maximum = Number(row.maximum_score)
       if (!component?.assessmentDefinition || !Number.isFinite(maximum) || maximum <= 0 || maximum > 100000) return json({ error: 'An assessment instance does not conform to the active grading-system definition' }, 409)
+      const countScope = component.assessmentDefinition.count?.scope
+      if (countScope?.type === 'per_period' && typeof row.grading_period_id !== 'string') return json({ error: 'An assessment instance needs a grading period required by the active count constraint' }, 409, 'assessment_count_constraint')
+      if (countScope?.type === 'per_group') {
+        const scopedGroup = typeof row.grading_group_id === 'string' ? gradingSystem.groups?.find((group: any) => group.id === row.grading_group_id) : undefined
+        if (!scopedGroup || scopedGroup.typeId !== countScope.groupTypeId) return json({ error: 'An assessment instance needs a grading group of the type required by the active count constraint' }, 409, 'assessment_count_constraint')
+      }
       const assessmentRef = opaqueRecordRef().replace(/^record_/, 'assessment_')
       assessmentRefs.set(row.id, assessmentRef)
       assessmentIdsByRef.set(assessmentRef, row.id)
@@ -510,15 +518,24 @@ Deno.serve(async (request) => {
   if (inputFeatures.has('assessment_instance_details')) providerInput.assessment_instances = safeAssessmentInstances
   if (outputFields.has('assessment_score_predictions') && !allowAssessmentData) return json({ error: 'Assessment score predictions require System Admin approval to share anonymous assessment data.' }, 403)
   if (outputFields.has('assessment_score_predictions') && safeAssessmentInstances.length === 0) return json({ error: 'Assessment score predictions require at least one active assessment instance.' }, 409)
-  if (outputFields.has('assessment_score_predictions')) {
-    const countError = validateAssessmentInstanceCounts(gradingSystem, safeAssessmentInstances as Record<string, any>[], mapKnownStructuralRef)
-    if (countError) return json({ error: countError }, 409)
+  let incompleteAssessmentInventory = false
+  // The inventory may still be included as model input when predictions for
+  // future assessment scores are disabled. Validate every attached instance
+  // and mark below-minimum snapshots as partial so the worker uses the same
+  // count semantics for standing/risk-only forecasts.
+  if (inputFeatures.has('assessment_instance_details') && safeAssessmentInstances.length > 0) {
+    const assessmentInstances = safeAssessmentInstances as Record<string, any>[]
+    const partialError = validateAssessmentInstanceCounts(gradingSystem, assessmentInstances, mapKnownStructuralRef, 'partial')
+    if (partialError) return json({ error: partialError }, 409, 'assessment_count_constraint')
+    const completeError = validateAssessmentInstanceCounts(gradingSystem, assessmentInstances, mapKnownStructuralRef, 'complete')
+    incompleteAssessmentInventory = completeError !== null
   }
   const serializedInput = JSON.stringify(providerInput)
   if (new TextEncoder().encode(serializedInput).byteLength > 700_000) return json({ error: 'The applied schemas and student data exceed the prediction request limit' }, 413)
 
   const configuredProvider = String(aiConfig.provider ?? 'Gemini').trim().toLowerCase()
   if (['custom', 'custom model', 'apms custom'].includes(configuredProvider)) {
+    trace.provider = 'custom'
     let configuration: AIServiceConfiguration
     try { configuration = aiServiceConfigurationFromEnvironment((name) => Deno.env.get(name)) }
     catch {
@@ -526,6 +543,27 @@ Deno.serve(async (request) => {
     }
     if (!configuration.configured) return json({ error: 'The selected custom AI service is not configured' }, 503)
     const model = configuration.model ?? 'custom-model'
+    const connector = createAIServiceConnector(configuration, requestBoundFetch(trace))
+    let probedWorkerStatus: AIServiceProbe | null = null
+    if (incompleteAssessmentInventory) {
+      trace.phase = 'status'
+      setRequestStage(trace, 'provider_status')
+      try { probedWorkerStatus = await connector.probe() }
+      catch (error) {
+        const failure = safeAIServiceFailure(error)
+        trace.failureCode = failure.code
+        trace.upstreamStatus = failure.upstreamStatus
+        return json({ error: 'The custom AI service status check failed; no prediction request was sent', ...(failure.upstreamStatus ? { upstream_status: failure.upstreamStatus } : {}) }, failure.status, failure.code)
+      }
+      if (!probedWorkerStatus.ready) {
+        trace.failureCode = 'provider_unavailable'
+        return json({ error: 'The custom AI service is not ready; no prediction request was sent.' }, 503, trace.failureCode)
+      }
+      if (probedWorkerStatus.capabilities.partial_assessment_inventory !== true) {
+        return json({ error: 'The custom model does not advertise support for partial assessment inventories. Update the runtime image or disable Assessment score predictions for this test.' }, 409, 'partial_inventory_unsupported')
+      }
+    }
+    setRequestStage(trace, 'database_quota')
     const reservation = await reserveCustomServiceUsage(adminClient as unknown as CustomUsageClient, {
       actorId: caller.user.id,
       classRecordId: body.class_id,
@@ -535,12 +573,20 @@ Deno.serve(async (request) => {
     if (reservation.status === 'unavailable') return json({ error: 'AI usage limits could not be checked; the service request was not sent' }, 503)
     if (reservation.status === 'limit') return json({ error: 'The custom AI service has reached its monthly request limit.' }, 429)
 
-    const connector = createAIServiceConnector(configuration)
     let workerStatus: AIServiceProbe
     let workerResults: Record<string, unknown>[]
     try {
-      workerStatus = await connector.probe()
-      if (!workerStatus.ready || !workerStatus.model_version) return json({ error: 'The selected custom AI service is not ready' }, 503)
+      if (!probedWorkerStatus) {
+        trace.phase = 'status'
+        setRequestStage(trace, 'provider_status')
+        workerStatus = await connector.probe()
+      } else workerStatus = probedWorkerStatus
+      if (!workerStatus.ready || !workerStatus.model_version) {
+        trace.failureCode = 'provider_unavailable'
+        return json({ error: 'The selected custom AI service is not ready' }, 503, trace.failureCode)
+      }
+      trace.phase = 'prediction'
+      setRequestStage(trace, 'provider')
       const requests = safeInputs.map((input) => ({
         record_id: input.record_ref,
         grading_system: safeGrading,
@@ -550,6 +596,7 @@ Deno.serve(async (request) => {
           assessment_predictions: outputFields.has('assessment_score_predictions')
             ? 'Return assessment_predictions using only request assessment_ref values that have no recorded result for this student. Never forecast a scored instance. Include every required unscored instance. Use numeric_value with exact maximum for numeric scoring, or categorical_value from the anonymized allowed mapping for categorical scoring.'
             : undefined,
+          ...(incompleteAssessmentInventory ? { assessment_inventory: 'partial' } : {}),
           evaluation_scores: outputFields.has('evaluation_scores')
             ? 'Return only active AI-generated factor references and values matching each factor type, range, and category.'
             : undefined,
@@ -560,24 +607,36 @@ Deno.serve(async (request) => {
       }))
       workerResults = await connector.predictBatch(requests)
     } catch (error) {
-      if (error instanceof AIServiceError && error.code === 'request_too_large') return json({ error: 'The anonymized custom-model request exceeds the service request limit' }, 413)
-      if (error instanceof AIServiceError && error.code === 'timeout') return json({ error: 'The custom AI service timed out' }, 504)
-      return json({ error: 'The configured prediction provider could not return a valid response' }, 502)
+      return safeCustomProviderFailure(error, trace)
     }
-    if (workerResults.length !== safeInputs.length) return json({ error: 'The configured prediction provider returned an incomplete response' }, 502)
+    if (workerResults.length !== safeInputs.length) {
+      trace.failureCode = 'invalid_response'
+      return json({ error: 'The configured prediction provider returned an incomplete response' }, 502, trace.failureCode)
+    }
     const predictions = []
     for (let index = 0; index < body.inputs.length; index++) {
       const result: any = workerResults[index]
       const expectedRef = safeInputs[index].record_ref
       const echoedRef = result.record_id ?? result.record_ref
-      if (typeof echoedRef !== 'string' || echoedRef !== expectedRef || (result.record_id != null && result.record_id !== expectedRef) || (result.record_ref != null && result.record_ref !== expectedRef)) return json({ error: 'The configured prediction provider returned a mismatched anonymous record reference' }, 502)
-      result.ai_risk_level = restoreSchemaCategory(result.ai_risk_level ?? result.risk_level, schemaPrivacyMap)
+      if (typeof echoedRef !== 'string' || echoedRef !== expectedRef || (result.record_id != null && result.record_id !== expectedRef) || (result.record_ref != null && result.record_ref !== expectedRef)) {
+        trace.failureCode = 'invalid_response'
+        return json({ error: 'The configured prediction provider returned a mismatched anonymous record reference' }, 502, trace.failureCode)
+      }
+      if (Object.prototype.hasOwnProperty.call(result, 'ai_risk_level') || Object.prototype.hasOwnProperty.call(result, 'risk_level')) {
+        result.ai_risk_level = restoreSchemaCategory(result.ai_risk_level ?? result.risk_level, schemaPrivacyMap)
+      }
       result.trend = restoreSchemaCategory(result.trend, schemaPrivacyMap)
       const validationError = validatePrediction(result, evaluationCriteria, 'anonymized_schema_context', outputFields, schemaPrivacyMap)
-      if (validationError) return json({ error: `The configured prediction provider returned an invalid prediction: ${validationError}` }, 502)
+      if (validationError) {
+        trace.failureCode = 'invalid_response'
+        return json({ error: `The configured prediction provider returned an invalid prediction: ${validationError}` }, 502, trace.failureCode)
+      }
       const existingRefs = new Set<string>((((safeInputs[index].records as any)?.assessment_results ?? []).filter((item: any) => item?.score !== undefined || item?.percentage !== undefined || item?.categorical_value !== undefined).map((item: any) => String(item.assessment_ref))) as string[])
       const assessmentValidation = validateAssessmentPredictions(result.assessment_predictions, safeAssessmentInstances as Record<string, any>[], outputFields, schemaPrivacyMap, existingRefs)
-      if (assessmentValidation.error) return json({ error: `The configured prediction provider returned an invalid prediction: ${assessmentValidation.error}` }, 502)
+      if (assessmentValidation.error) {
+        trace.failureCode = 'invalid_response'
+        return json({ error: `The configured prediction provider returned an invalid prediction: ${assessmentValidation.error}` }, 502, trace.failureCode)
+      }
       predictions.push({
         enrollment_id: body.inputs[safeInputs[index].original_index].enrollment_id,
         predicted_standing: result.predicted_standing,
@@ -591,8 +650,11 @@ Deno.serve(async (request) => {
     }
     const modelVersion = workerStatus.model_version
     let runId: string
+    setRequestStage(trace, 'prediction_validation')
+    setRequestStage(trace, 'database_persistence')
     try { runId = await saveRun('custom', model, modelVersion, 'anonymized_schema_context', predictions) }
     catch (error) { return json({ error: error instanceof Error ? error.message : 'Prediction run could not be saved' }, 500) }
+    setRequestStage(trace, 'database_usage')
     if (!await finalizeCustomServiceUsage(adminClient as unknown as CustomUsageClient, reservation.id)) return json({ error: 'The prediction run was saved, but custom-service usage could not be finalized. Contact an administrator before retrying.', run_id: runId }, 503)
     return json({ run_id: runId, provider: 'custom', model, model_version: modelVersion, data_basis: 'anonymized_schema_context', advisory_only: true, predictions })
   }
@@ -683,12 +745,14 @@ Deno.serve(async (request) => {
     `Return only the fields permitted by ai.outputFields (${[...outputFields].join(', ')}). For this task, return one result per record_ref with predicted_standing from 0 to 100 within its active factor range, trend selected from the supplied allowed values${outputFields.has('risk_probability') ? ', and risk_probability from 0 to 1 within its active factor range' : ''}${outputFields.has('risk_level') ? ', and ai_risk_level selected from its supplied category references' : ''}${outputFields.has('evaluation_scores') ? '. evaluation_scores must use only the supplied anonymous AI factor references and each value must satisfy its declared type, range, or category' : ''}${outputFields.has('assessment_score_predictions') ? '. assessment_predictions must use the supplied assessment_ref values only; for numeric results return kind=numeric, numeric_value and the exact maximum; for categorical results return kind=categorical and categorical_value from the active mapping' : ''}. Add factors only when permitted. Do not invent evidence or treat missing records as zero unless the grading schema says so.`,
     'Inputs are shuffled and contain only anonymized numeric evidence. Never infer or request any student, class, subject, or assessment identity. Refer to records and factors only by their opaque reference or generic factor number.',
     'When assessment_predictions are enabled, predict only instances with no recorded result for that specific record_ref. Never return a forecast for a scored instance. Return one valid result for every required unscored instance.',
+    ...(incompleteAssessmentInventory ? ['This request contains a partial inventory of currently existing assessments. Apply type, domain, reference, and maximum-count constraints, but do not reject or infer missing future instances from minimum-count constraints. Only forecast the supplied unscored instances.'] : []),
     'Risk probability is heuristic and unvalidated. Factors must cite concrete schema-defined inputs and values. These results are advisory only, never official grades or decisions.',
     serializedInput,
   ].join('\n\n')
   const responseSchema = { type: 'ARRAY', items: { type: 'OBJECT', properties, required } }
   const estimatedOutputTokens = Math.min(30_000, body.inputs.length * (256 + (outputFields.has('assessment_score_predictions') ? safeAssessmentInstances.length * 64 : 0)))
   const estimatedTokens = Math.ceil(prompt.length / 4) + estimatedOutputTokens
+  setRequestStage(trace, 'database_quota')
   const { data: usageReservation, error: reservationError } = await adminClient.rpc('ai_provider_reserve_usage', {
     p_actor_id: caller.user.id, p_class_record_id: body.class_id, p_scope_type: usageScope, p_scope_id: usageScopeId,
     p_provider: selectedProvider, p_model: model, p_feature: 'evaluation_and_assessment_prediction',
@@ -698,11 +762,20 @@ Deno.serve(async (request) => {
   if (!usageReservation) return json({ error: 'This provider key has reached a monthly request or token limit.' }, 429)
   // Each invocation sends one fresh, stateless request. No provider thread,
   // conversation, prompt cache, or cross-user context identifier is reused.
-  const response = openAiSelected
+  trace.provider = openAiSelected ? 'openai' : 'gemini'
+  setRequestStage(trace, 'provider')
+  let response: Response
+  const timeoutMs = Math.min(60_000, Math.max(1, trace.deadlineAt - Date.now()))
+  const providerTimeout = AbortSignal.timeout(timeoutMs)
+  const providerSignal = AbortSignal.any([trace.controller.signal, providerTimeout])
+  try {
+    const providerFetch = requestBoundFetch(trace)
+    response = openAiSelected
     ? await (async () => {
-      return await fetch('https://api.openai.com/v1/chat/completions', {
+      return await providerFetch('https://api.openai.com/v1/chat/completions', {
         method: 'POST',
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
+        signal: providerTimeout,
         body: JSON.stringify({
           model,
           temperature: 0,
@@ -716,9 +789,10 @@ Deno.serve(async (request) => {
       })
     })()
     : await (async () => {
-      return await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      return await providerFetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
         method: 'POST',
         headers: { 'x-goog-api-key': apiKey, 'Content-Type': 'application/json' },
+        signal: providerTimeout,
         body: JSON.stringify({
           systemInstruction: { parts: [{ text: 'Return only valid JSON matching the requested response schema.' }] },
           contents: [{ role: 'user', parts: [{ text: prompt }] }],
@@ -726,26 +800,58 @@ Deno.serve(async (request) => {
         }),
       })
     })()
+  } catch (error) {
+    const timedOut = error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')
+    trace.failureCode = timedOut ? 'provider_timeout' : 'provider_connection_failed'
+    return json({ error: timedOut ? 'The prediction provider timed out' : 'The prediction provider could not be reached' }, timedOut ? 504 : 502, trace.failureCode)
+  }
   if (!response) return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} API key is not configured` }, 503)
+  let responseText = ''
+  let responseTooLarge = false
+  let responseBodyTimedOut = false
+  try { responseText = await withinRequestDeadline(trace, readBoundedResponseText(response, PROVIDER_RESPONSE_LIMIT_BYTES, providerSignal)) }
+  catch (error) {
+    if (error instanceof RequestDeadlineError) throw error
+    if ((error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) || providerTimeout.aborted || trace.controller.signal.aborted) {
+      if (trace.controller.signal.aborted) throw new RequestDeadlineError()
+      responseBodyTimedOut = true
+    } else responseTooLarge = error instanceof BoundedResponseError
+  }
   let usagePayload: any = null
-  try { usagePayload = await response.clone().json() } catch { /* Some provider errors are not JSON. */ }
+  try { if (responseText) usagePayload = JSON.parse(responseText) } catch { /* Provider error bodies may not be JSON. */ }
   const usageInputTokens = Number(usagePayload?.usage?.prompt_tokens ?? usagePayload?.usageMetadata?.promptTokenCount ?? usagePayload?.usage?.input_tokens ?? 0)
   const usageOutputTokens = Number(usagePayload?.usage?.completion_tokens ?? usagePayload?.usageMetadata?.candidatesTokenCount ?? usagePayload?.usage?.output_tokens ?? 0)
   const recordedInputTokens = Number.isSafeInteger(usageInputTokens) && usageInputTokens > 0 ? usageInputTokens : estimatedTokens
+  setRequestStage(trace, 'database_usage')
   const { error: usageWriteError } = await adminClient.from('ai_model_usage').update({
     input_tokens: recordedInputTokens,
     output_tokens: Number.isSafeInteger(usageOutputTokens) && usageOutputTokens >= 0 ? usageOutputTokens : 0,
-    succeeded: response.ok,
+    succeeded: response.ok && !responseBodyTimedOut && !responseTooLarge,
   }).eq('id', usageReservation)
   if (usageWriteError) return json({ error: 'The provider ran, but usage could not be recorded. Contact an administrator before retrying.' }, 503)
-  if (!response.ok) {
-    await response.text()
-    console.error(`${openAiSelected ? 'OpenAI' : 'Gemini'} prediction request failed`, response.status)
-    return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} prediction request failed (${response.status})` }, 502)
+  if (responseBodyTimedOut) {
+    trace.failureCode = 'provider_timeout'
+    return json({ error: 'The prediction provider response timed out' }, 504, trace.failureCode)
   }
+  if (responseTooLarge) {
+    trace.failureCode = 'invalid_response'
+    return json({ error: 'The prediction provider returned an oversized response' }, 502, trace.failureCode)
+  }
+  if (!response.ok) {
+    trace.upstreamStatus = response.status
+    trace.failureCode = response.status === 401 || response.status === 403
+      ? 'provider_authentication_failed'
+      : response.status === 422
+        ? 'provider_request_rejected'
+        : response.status === 429
+          ? 'provider_busy'
+          : 'provider_unavailable'
+    return json({ error: 'The prediction provider returned an error response', upstream_status: response.status }, 502, trace.failureCode)
+  }
+  setRequestStage(trace, 'prediction_validation')
   let rawResults: any
   try {
-    const payload = await response.json()
+    const payload = usagePayload
     if (openAiSelected && payload?.choices?.[0]?.message?.refusal) return json({ error: 'OpenAI declined the prediction request' }, 502)
     const parsedOpenAiContent = openAiSelected ? parseJson(payload?.choices?.[0]?.message?.content ?? '') : null
     rawResults = openAiSelected
@@ -766,7 +872,9 @@ Deno.serve(async (request) => {
     const input = body.inputs[index]
     const result = predictionByIndex.get(index)
     result.trend = restoreSchemaCategory(result.trend, schemaPrivacyMap)
-    result.ai_risk_level = restoreSchemaCategory(result.ai_risk_level ?? result.risk_level, schemaPrivacyMap)
+    if (Object.prototype.hasOwnProperty.call(result, 'ai_risk_level') || Object.prototype.hasOwnProperty.call(result, 'risk_level')) {
+      result.ai_risk_level = restoreSchemaCategory(result.ai_risk_level ?? result.risk_level, schemaPrivacyMap)
+    }
     const validationError = validatePrediction(result, evaluationCriteria, 'applied_grading_and_evaluation_schemas', outputFields, schemaPrivacyMap)
     if (validationError) return json({ error: `${openAiSelected ? 'OpenAI' : 'Gemini'} returned an invalid prediction: ${validationError}` }, 502)
     const safeInput = safeByRef.get(result.record_ref)
@@ -787,7 +895,46 @@ Deno.serve(async (request) => {
   const provider = openAiSelected ? 'openai' : 'gemini'
   const modelVersion = String(aiConfig.modelVersion || `${model}-schema-context-v4`)
   let runId: string
+  setRequestStage(trace, 'database_persistence')
   try { runId = await saveRun(provider, model, modelVersion, 'applied_grading_and_evaluation_schemas', predictions) }
   catch (error) { return json({ error: error instanceof Error ? error.message : 'Prediction run could not be saved' }, 500) }
   return json({ run_id: runId, provider, model, model_version: modelVersion, data_basis: 'applied_grading_and_evaluation_schemas', advisory_only: true, predictions })
+}
+
+Deno.serve(async (request) => {
+  const trace = createRequestTrace()
+  if (request.method === 'OPTIONS') {
+    trace.status = 200
+    return addRequestTrace(new Response('ok', { headers: corsHeaders }), trace.id)
+  }
+  let response: Response
+  try {
+    setRequestStage(trace, 'request')
+    response = await withinRequestDeadline(trace, handlePredictionRequest(request, trace))
+  } catch (error) {
+    const timedOut = error instanceof RequestDeadlineError || (error instanceof Error && (error.name === 'AbortError' || error.name === 'TimeoutError'))
+    const timeoutCode = trace.stage === 'provider' || trace.stage === 'provider_status'
+      ? 'provider_timeout'
+      : trace.stage === 'authentication'
+        ? 'authentication_timeout'
+        : trace.stage.startsWith('database_')
+          ? 'database_timeout'
+          : 'request_timeout'
+    const timeoutMessage = timeoutCode === 'provider_timeout'
+      ? 'The prediction provider timed out'
+      : timeoutCode === 'authentication_timeout'
+        ? 'Authentication timed out'
+        : timeoutCode === 'database_timeout'
+          ? 'A required database operation timed out'
+          : 'The prediction request timed out'
+    response = json(
+      { error: timedOut ? timeoutMessage : 'The prediction request could not be completed' },
+      timedOut ? 504 : 500,
+      timedOut ? timeoutCode : 'internal_error',
+    )
+  }
+  trace.status = response.status
+  const traced = addRequestTrace(response, trace.id)
+  logRequestTrace(trace)
+  return traced
 })

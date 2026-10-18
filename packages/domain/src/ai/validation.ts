@@ -54,8 +54,10 @@ export function validateAiAssessmentScorePrediction(
   grading: GradingDefinition,
   assessments: readonly AiAssessmentConstraint[],
   output: AiAssessmentScorePredictionOutput,
+  inventory: 'complete' | 'partial' = 'complete',
 ): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
+  if (inventory !== 'complete' && inventory !== 'partial') return { valid: false, errors: ['Assessment inventory mode is invalid.'] };
   const gradingValidation = validateGradingSystem(grading);
   if (!gradingValidation.valid) return { valid: false, errors: gradingValidation.errors };
   if (!Array.isArray(output?.predictions)) return { valid: false, errors: ['Assessment predictions must be a list.'] };
@@ -80,6 +82,14 @@ export function validateAiAssessmentScorePrediction(
         parent = grading.groups.find((item: any) => item.id === parent.parentGroupId);
       }
       if (!period.groupIds.some((id: string) => groupAncestors.has(id))) errors.push(`Assessment ${assessment.assessmentRef} has a group outside its assigned period.`);
+    }
+    const countScope = scoring?.count?.scope;
+    if (scoring?.count && countScope?.type === 'per_period' && !assessment.periodId) {
+      errors.push(`Assessment ${assessment.assessmentRef} needs a grading period for the active per-period count constraint.`);
+    }
+    if (scoring?.count && countScope?.type === 'per_group') {
+      if (!assessment.groupId) errors.push(`Assessment ${assessment.assessmentRef} needs a grading group for the active per-group count constraint.`);
+      else if (!group || group.typeId !== countScope.groupTypeId) errors.push(`Assessment ${assessment.assessmentRef} must use a grading group of the type required by the active per-group count constraint.`);
     }
   }
   for (const prediction of output.predictions) {
@@ -118,7 +128,7 @@ export function validateAiAssessmentScorePrediction(
     if (!definition?.count) continue;
     const matching = assessments.filter((assessment) => assessment.typeId === definition.typeId);
     const countInScope = (scope: readonly AiAssessmentConstraint[]) =>
-      (definition.count.min != null && scope.length < definition.count.min) || (definition.count.max != null && scope.length > definition.count.max);
+      (inventory === 'complete' && definition.count.min != null && scope.length < definition.count.min) || (definition.count.max != null && scope.length > definition.count.max);
     const scopeType = definition.count.scope?.type ?? 'overall';
     if (scopeType === 'overall' && countInScope(matching)) errors.push(`Assessment count for ${definition.typeId} violates the active overall count constraint.`);
     else if (scopeType === 'per_period') for (const period of grading.periods ?? []) {

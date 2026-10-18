@@ -20,6 +20,7 @@ import { DEFAULT_EVALUATION_SYSTEM, evaluateStudentPerformanceDetailed, removeSt
 import * as XLSX from 'xlsx';
 
 import { supabase } from './supabase';
+import { forecastError, forecastRequestError } from './predictionErrors';
 
 const CLASS_WORKSPACE_PAGE_SIZE = 1000;
 async function fetchAllPages<T>(fetchPage: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown | null }>) {
@@ -1113,7 +1114,7 @@ export function summarizeEnrollmentStanding(workspace: ClassWorkspace, enrollmen
 
 export type PredictionInput = {
   enrollmentId: string;
-  currentStanding: number;
+  currentStanding: number | null;
   recentScores: number[];
   attendanceRate: number | null;
   missingAssessmentCount: number;
@@ -1136,10 +1137,19 @@ export type PredictionResult = {
   dataBasis: string;
 };
 
+export function encodePredictionInput(input: PredictionInput, evaluationCriteria: EvaluationDefinition) {
+  return {
+    enrollment_id: input.enrollmentId,
+    evaluation_values: input.evaluationValues,
+    evaluated_risk_level: evaluateStudentPerformanceDetailed(evaluationCriteria, input.evaluationValues).severity,
+    records: input.recordContext,
+  };
+}
+
 export async function runAiPredictions(classId: string, gradingSystem: GradingDefinition, evaluationCriteria: EvaluationDefinition, inputs: PredictionInput[], assessmentInstances: AiAssessmentConstraint[] = []) {
-  if (!inputs.length) throw new Error('At least one student needs scores before prediction can run.');
-  if (!validateGradingSystem(gradingSystem).valid) throw new Error('The applied grading system is invalid. Fix it before running predictions.');
-  if (!validateEvaluationSystem(evaluationCriteria).valid) throw new Error('The applied evaluation criteria are invalid. Fix them before running predictions.');
+  if (!inputs.length) throw forecastError('no_eligible_students');
+  if (!validateGradingSystem(gradingSystem).valid) throw forecastError('invalid_grading');
+  if (!validateEvaluationSystem(evaluationCriteria).valid) throw forecastError('invalid_criteria');
   const rawPredictions: { input: PredictionInput; predictedStanding: number; riskProbability: number | null; aiRiskLevel: string | null; trend: PredictionResult['trend']; factors: string[]; provider: string; model: string; modelVersion: string; evaluationScores?: EvaluationValue; assessmentPredictions?: PredictionResult['assessmentPredictions']; dataBasis: string }[] = [];
   let savedRunId = '';
   {
@@ -1148,24 +1158,17 @@ export async function runAiPredictions(classId: string, gradingSystem: GradingDe
         class_id: classId,
         grading_system: gradingSystem,
         evaluation_criteria: evaluationCriteria,
-        inputs: inputs.map((input) => ({
-          enrollment_id: input.enrollmentId,
-          evaluation_values: input.evaluationValues,
-          evaluated_risk_level: evaluateStudentPerformanceDetailed(evaluationCriteria, input.evaluationValues).severity,
-          records: input.recordContext,
-        })),
+        inputs: inputs.map((input) => encodePredictionInput(input, evaluationCriteria)),
       },
+      // Bound intermittent connection stalls; an aborted request still has an
+      // unconfirmed save state, so the existing error path never retries it.
+      timeout: 110_000,
     });
     if (error) {
-      let detail = '';
       const functionError = error as typeof error & { context?: Response };
-      if (functionError.context) {
-        try {
-          const body = await functionError.context.clone().json() as { error?: string; message?: string };
-          detail = body.error ?? body.message ?? '';
-        } catch { /* Use the SDK error when the response is not JSON. */ }
-      }
-      throw new Error(detail || error.message || 'AI prediction could not run. Student records remain available.');
+      // Response bodies and SDK error messages can contain private data. Only show
+      // a fixed category based on the response status, never arbitrary server text.
+      throw forecastRequestError(functionError.context);
     }
     const payload = data as { run_id?: string; predictions?: any[]; provider?: string; model?: string; model_version?: string; data_basis?: string };
     if (!payload.run_id || !['custom', 'gemini', 'openai'].includes(payload.provider ?? '') || !payload.model || !payload.model_version) throw new Error('Prediction response is missing saved-run or AI provider provenance.');
@@ -1197,7 +1200,7 @@ export async function runAiPredictions(classId: string, gradingSystem: GradingDe
         const studentAssessmentInstances = assessmentInstances.map((item) => ({ ...item, hasResult: recordedAssessmentRefs.has(item.assessmentRef) }));
         const assessmentValidation = validateAiAssessmentScorePrediction(gradingSystem, studentAssessmentInstances, {
           predictions: rawAssessmentPredictions.map((item: any) => ({ assessmentRef: item.assessment_id, result: item.result, confidence: item.confidence, evidence: item.evidence })),
-        });
+        }, 'partial');
         if (!assessmentValidation.valid) throw new Error(`AI assessment results do not match the active grading system or assessment instances: ${assessmentValidation.errors.join(' ')}`);
       }
       rawPredictions.push({

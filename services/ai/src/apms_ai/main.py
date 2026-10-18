@@ -360,7 +360,11 @@ def status(authorization: str | None = Header(default=None)):
             "max_request_bytes": int(os.getenv("APMS_AI_MAX_REQUEST_BYTES", "1048576")),
             "max_concurrent_requests": int(os.getenv("APMS_AI_MAX_CONCURRENT_REQUESTS", "2")),
         },
-        "capabilities": {"v1_predictions": True, "v2_forecasts": True},
+        "capabilities": {
+            "v1_predictions": True,
+            "v2_forecasts": True,
+            "partial_assessment_inventory": True,
+        },
     }
 
 

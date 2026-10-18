@@ -6,6 +6,7 @@ import {
   finalizeCustomServiceUsage,
   reserveCustomServiceUsage,
   readAIServiceConfiguration,
+  safeAIServiceFailure,
 } from '../../../../supabase/functions/_shared/aiService'
 
 function configuration(overrides: Record<string, unknown> = {}) {
@@ -97,6 +98,66 @@ describe('private AI service gateway', () => {
     await expect(oversized.predictOne({})).rejects.toMatchObject({ code: 'response_too_large' })
   })
 
+  it('keeps upstream HTTP status while dropping private error bodies and credentials', async () => {
+    for (const [status, code] of [
+      [401, 'provider_authentication_failed'],
+      [403, 'provider_authentication_failed'],
+      [422, 'provider_request_rejected'],
+      [429, 'provider_busy'],
+      [503, 'provider_unavailable'],
+    ] as const) {
+      const connector = createAIServiceConnector(configuration(), vi.fn(async () => new Response(
+        JSON.stringify({ error: 'private provider payload includes student=record-123 secret=provider-key' }),
+        { status, headers: { 'Content-Type': 'application/json' } },
+      )) as typeof fetch)
+      let caught: unknown
+      try { await connector.probe() } catch (error) { caught = error }
+      const safe = safeAIServiceFailure(caught)
+      expect(safe).toEqual({ status: 502, code, upstreamStatus: status })
+      expect(JSON.stringify(safe)).not.toMatch(/private provider|record-123|provider-key|student=|secret=/i)
+    }
+
+    const networkFailure = safeAIServiceFailure(new AIServiceError('upstream_error'))
+    expect(networkFailure).toEqual({ status: 502, code: 'provider_connection_failed' })
+    expect(safeAIServiceFailure(new AIServiceError('timeout')).code).toBe('provider_timeout')
+    expect(safeAIServiceFailure(new AIServiceError('response_too_large')).code).toBe('invalid_response')
+  })
+
+  it('classifies an abort or never-ending body after HTTP 200 as a provider timeout', async () => {
+    let stalledCancelCalled = false
+    const stalled = createAIServiceConnector(configuration({ requestTimeoutMs: 100 }), vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(new TextEncoder().encode('{"ready":true')) },
+        cancel() {
+          stalledCancelCalled = true
+          // Simulate a transport whose cleanup promise never settles.
+          return new Promise<void>(() => undefined)
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )) as typeof fetch)
+    let stalledError: unknown
+    try { await stalled.probe() } catch (error) { stalledError = error }
+    expect(stalledError).toMatchObject({ code: 'timeout' })
+    expect(safeAIServiceFailure(stalledError)).toEqual({ status: 504, code: 'provider_timeout' })
+    expect(stalledCancelCalled).toBe(true)
+
+    const abortedBody = createAIServiceConnector(configuration({ requestTimeoutMs: 1_000 }), vi.fn(async () => new Response(
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"ready":'))
+          setTimeout(() => controller.error(new DOMException('opaque transport detail', 'AbortError')), 1)
+        },
+      }),
+      { status: 200, headers: { 'Content-Type': 'application/json' } },
+    )) as typeof fetch)
+    let abortError: unknown
+    try { await abortedBody.probe() } catch (error) { abortError = error }
+    expect(abortError).toMatchObject({ code: 'timeout' })
+    expect(safeAIServiceFailure(abortError)).toEqual({ status: 504, code: 'provider_timeout' })
+    expect(JSON.stringify(safeAIServiceFailure(abortError))).not.toContain('opaque transport detail')
+  })
+
   it('enforces request bytes, per-request deadlines, and one overall batch deadline', async () => {
     const tooSmall = createAIServiceConnector(configuration({ maxRequestBytes: 4 }), vi.fn() as typeof fetch)
     await expect(tooSmall.predictOne({ too: 'large' })).rejects.toMatchObject({ code: 'request_too_large' })
@@ -151,7 +212,7 @@ describe('private AI service gateway', () => {
       device: 'cpu',
       synthetic_demo: false,
       institutionally_validated: false,
-      capabilities: { v1_predictions: true, v2_forecasts: true },
+      capabilities: { v1_predictions: true, v2_forecasts: true, partial_assessment_inventory: false },
       latency_ms: 13,
     })
     expect(JSON.stringify(probe)).not.toContain('must-not-escape')

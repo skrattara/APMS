@@ -26,6 +26,11 @@ def _schema_files():
     }
 
 
+def _newline_normalized_schema(raw: bytes) -> bytes:
+    """Normalize only CRLF to LF; preserve all other schema bytes exactly."""
+    return raw.replace(b"\r\n", b"\n")
+
+
 def seed_everything(seed: int) -> None:
     random.seed(seed)
     try:
@@ -132,15 +137,39 @@ def load_bundle(directory: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
     for name, source in _schema_files().items():
         expected = meta.get("schema_sha256", {}).get(name)
         bundled = path / "schemas" / name
-        if (
-            not expected
-            or not bundled.is_file()
-            or hashlib.sha256(bundled.read_bytes()).hexdigest() != expected
-        ):
-            raise ValueError("Artifact schema digest mismatch")
-        if hashlib.sha256(source.read_bytes()).hexdigest() != expected:
+        if not expected or not bundled.is_file():
             raise ValueError(
-                "Installed schema contract differs from the trained artifact"
+                f"Artifact schema digest mismatch for {name}: expected bundled "
+                f"SHA-256 {expected or '<missing>'}; the bundle is incomplete or corrupt."
+            )
+
+        # First verify the bundled bytes against the exact digest recorded when
+        # the artifact was created. This remains strict even when platform
+        # line endings could otherwise normalize to the same content.
+        bundled_raw = bundled.read_bytes()
+        bundled_digest = hashlib.sha256(bundled_raw).hexdigest()
+        if bundled_digest != expected:
+            raise ValueError(
+                f"Artifact schema digest mismatch for {name}: expected bundled "
+                f"SHA-256 {expected}, got {bundled_digest}; the bundle may be corrupt."
+            )
+
+        installed_raw = source.read_bytes()
+        installed_digest = hashlib.sha256(installed_raw).hexdigest()
+        if installed_digest == expected:
+            continue
+
+        # Windows commonly stores JSON schemas with CRLF while Linux wheels
+        # contain the same bytes with LF. Accept only that byte-level newline
+        # conversion; JSON-equivalent content or other whitespace is not enough.
+        if _newline_normalized_schema(installed_raw) != _newline_normalized_schema(
+            bundled_raw
+        ):
+            raise ValueError(
+                f"Installed schema contract differs from the trained artifact for {name}: "
+                f"artifact SHA-256 {expected}, installed SHA-256 {installed_digest}. "
+                "Use the matching APMS AI schema package or retrain and repackage "
+                "after an intentional schema change."
             )
     return torch.load(path / "weights.pt", map_location="cpu", weights_only=True), meta
 

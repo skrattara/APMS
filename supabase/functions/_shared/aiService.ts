@@ -39,6 +39,38 @@ export class AIServiceError extends Error {
   }
 }
 
+export type SafeAIServiceFailure = {
+  status: 413 | 502 | 504
+  code: 'provider_authentication_failed' | 'provider_request_rejected' | 'provider_busy' | 'provider_unavailable' | 'provider_connection_failed' | 'provider_timeout' | 'invalid_response' | 'request_too_large'
+  upstreamStatus?: number
+}
+
+/** Convert connector failures to a fixed, non-sensitive public diagnostic. */
+export function safeAIServiceFailure(error: unknown): SafeAIServiceFailure {
+  if (!(error instanceof AIServiceError)) {
+    return { status: 502, code: 'provider_unavailable' }
+  }
+  if (error.code === 'timeout') return { status: 504, code: 'provider_timeout' }
+  if (error.code === 'request_too_large') return { status: 413, code: 'request_too_large' }
+  if (error.code === 'invalid_response' || error.code === 'response_too_large') {
+    return { status: 502, code: 'invalid_response' }
+  }
+  if (error.code === 'upstream_error') {
+    const upstreamStatus = Number.isInteger(error.status) && error.status! >= 100 && error.status! <= 599 ? error.status : undefined
+    const code = upstreamStatus === 401 || upstreamStatus === 403
+      ? 'provider_authentication_failed'
+      : upstreamStatus === 422
+        ? 'provider_request_rejected'
+        : upstreamStatus === 429
+          ? 'provider_busy'
+          : upstreamStatus === undefined
+            ? 'provider_connection_failed'
+            : 'provider_unavailable'
+    return { status: 502, code, ...(upstreamStatus === undefined ? {} : { upstreamStatus }) }
+  }
+  return { status: 502, code: 'provider_unavailable' }
+}
+
 export type CustomUsageClient = {
   rpc: (name: string, args: Record<string, unknown>) => PromiseLike<{ data: unknown; error: unknown }>
   from: (table: string) => {
@@ -191,7 +223,7 @@ type WorkerStatus = {
   device: string | null
   synthetic_demo: boolean
   institutionally_validated: false
-  capabilities: { v1_predictions: boolean; v2_forecasts: boolean }
+  capabilities: { v1_predictions: boolean; v2_forecasts: boolean; partial_assessment_inventory: boolean }
 }
 
 export type AIServiceProbe = WorkerStatus & { latency_ms: number }
@@ -231,34 +263,58 @@ function sanitizeWorkerStatus(value: unknown): Omit<WorkerStatus, 'reachable'> {
     capabilities: {
       v1_predictions: capabilities.v1_predictions === true,
       v2_forecasts: capabilities.v2_forecasts === true,
+      partial_assessment_inventory: capabilities.partial_assessment_inventory === true,
     },
   }
 }
 
-async function readBoundedJson(response: Response, maximumBytes: number): Promise<unknown> {
+async function readBoundedJson(response: Response, maximumBytes: number, signal: AbortSignal): Promise<unknown> {
   const declaredSize = Number(response.headers.get('content-length'))
   if (Number.isFinite(declaredSize) && declaredSize > maximumBytes) {
-    await response.body?.cancel()
+    void response.body?.cancel().catch(() => undefined)
     throw new AIServiceError('response_too_large')
   }
   const contentType = response.headers.get('content-type')?.split(';', 1)[0].trim().toLowerCase() ?? ''
   if (!(contentType === 'application/json' || contentType.endsWith('+json'))) {
-    await response.body?.cancel()
+    void response.body?.cancel().catch(() => undefined)
     throw new AIServiceError('invalid_response')
   }
   if (!response.body) throw new AIServiceError('invalid_response')
   const reader = response.body.getReader()
+  const cancel = () => { void reader.cancel().catch(() => undefined) }
+  if (signal.aborted) cancel()
+  else signal.addEventListener('abort', cancel, { once: true })
   const chunks: Uint8Array[] = []
   let total = 0
-  while (true) {
-    const { done, value } = await reader.read()
-    if (done) break
-    total += value.byteLength
-    if (total > maximumBytes) {
-      await reader.cancel()
-      throw new AIServiceError('response_too_large')
+  let timeoutReject: (error: AIServiceError) => void = () => undefined
+  const rejectTimeout = () => timeoutReject(new AIServiceError('timeout'))
+  const timeout = new Promise<never>((_, reject) => {
+    timeoutReject = reject
+    if (signal.aborted) rejectTimeout()
+    else signal.addEventListener('abort', rejectTimeout, { once: true })
+  })
+  try {
+    while (true) {
+      let item: ReadableStreamReadResult<Uint8Array>
+      try { item = await Promise.race([reader.read(), timeout]) }
+      catch (error) {
+        if (error instanceof AIServiceError) throw error
+        if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) throw new AIServiceError('timeout')
+        throw new AIServiceError('invalid_response')
+      }
+      if (signal.aborted) throw new AIServiceError('timeout')
+      const { done, value } = item
+      if (done) break
+      total += value.byteLength
+      if (total > maximumBytes) {
+        cancel()
+        throw new AIServiceError('response_too_large')
+      }
+      chunks.push(value)
     }
-    chunks.push(value)
+  } finally {
+    signal.removeEventListener('abort', cancel)
+    signal.removeEventListener('abort', rejectTimeout)
   }
   const bytes = new Uint8Array(total)
   let offset = 0
@@ -295,6 +351,7 @@ export function createAIServiceConnector(
       throw new AIServiceError('request_too_large')
     }
     const timeoutMs = Math.max(1, Math.min(configuration.requestTimeoutMs, remaining))
+    const requestTimeout = AbortSignal.timeout(timeoutMs)
     const headers: Record<string, string> = {
       Authorization: `Bearer ${configuration.apiKey}`,
       Accept: 'application/json',
@@ -311,7 +368,7 @@ export function createAIServiceConnector(
         headers,
         body: requestBody,
         redirect: 'manual',
-        signal: AbortSignal.timeout(timeoutMs),
+        signal: requestTimeout,
       })
     } catch (error) {
       if (error instanceof Error && (error.name === 'TimeoutError' || error.name === 'AbortError')) {
@@ -320,22 +377,22 @@ export function createAIServiceConnector(
       throw new AIServiceError('upstream_error')
     }
     if (response.status >= 300 && response.status < 400) {
-      await response.body?.cancel()
+      void response.body?.cancel().catch(() => undefined)
       throw new AIServiceError('upstream_error', response.status)
     }
     if (!response.ok) {
-      await response.body?.cancel()
+      void response.body?.cancel().catch(() => undefined)
       throw new AIServiceError('upstream_error', response.status)
     }
     if (path === '/v1/predictions' && expectedWorkerIdentity) {
       const artifactId = response.headers.get('X-APMS-Artifact-ID')
       const modelVersion = response.headers.get('X-APMS-Model-Version')
       if (artifactId !== expectedWorkerIdentity.artifactId || modelVersion !== expectedWorkerIdentity.modelVersion) {
-        await response.body?.cancel()
+        void response.body?.cancel().catch(() => undefined)
         throw new AIServiceError('invalid_response')
       }
     }
-    return await readBoundedJson(response, configuration.maxResponseBytes)
+    return await readBoundedJson(response, configuration.maxResponseBytes, requestTimeout)
   }
 
   async function predictOne(payload: unknown): Promise<Record<string, unknown>> {
@@ -373,7 +430,7 @@ export function failedAIServiceProbe(): AIServiceProbe {
     device: null,
     synthetic_demo: false,
     institutionally_validated: false,
-    capabilities: { v1_predictions: false, v2_forecasts: false },
+    capabilities: { v1_predictions: false, v2_forecasts: false, partial_assessment_inventory: false },
     latency_ms: 0,
   }
 }

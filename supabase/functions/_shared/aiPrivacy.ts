@@ -26,19 +26,38 @@ const SAFE_SCHEMA_KEYS = new Set([
   'resultType', 'formula', 'aggregationType', 'missingValuePolicy', 'optional', 'enabled', 'required', 'calculationType',
 ])
 
-const STRUCTURAL_ENUM_KEYS = new Set(['type', 'source', 'mode', 'kind', 'strategy', 'aggregation', 'operator', 'comparison', 'direction', 'rounding', 'missingPolicy', 'resultType', 'inputType', 'mappingPolicy', 'periodStrategy', 'scope', 'severity', 'match', 'origin', 'unit', 'valueType', 'colorScheme', 'inputFeatures', 'outputFields', 'supportedScenarios'])
-const STRUCTURAL_ENUM_VALUES = new Set([
-  'number', 'number_array', 'boolean', 'category', 'percentage', 'probability', 'count', 'points', 'letter', 'pass_fail',
-  'academic_record', 'derived', 'ai_prediction', 'current_standing', 'recent_scores', 'recent_score_average', 'recent_trend',
-  'attendance', 'attendance_rate', 'missing_assessment_count', 'predicted_standing', 'risk_probability', 'ai_risk_level', 'trend',
-  'grading_component', 'grading_group', 'average', 'highest', 'lowest', 'weighted', 'equal', 'points', 'linear', 'numeric_mapping', 'value_mapping',
-  'exact', 'threshold', 'interpolate', 'assessments', 'components', 'groups', 'periods', 'period_formula', 'independent', 'cumulative', 'overall', 'per_period', 'per_group',
-  'below', 'at_most', 'above', 'at_least', 'equals', 'not_equals', 'in', 'not_in', 'contains', 'not_contains', 'is_true', 'is_false',
-  'all', 'any', 'priority', 'weighted', 'low', 'medium', 'high', 'passing', 'failing', 'incomplete', 'up', 'down', 'half_up', 'half_even',
-  'green_to_red', 'white_to_red', 'custom', 'improving', 'stable', 'declining', 'percentage', 'fraction', 'decimal', 'round', 'floor', 'ceil',
-  'minimum', 'maximum', 'latest', 'first', 'last', 'best', 'worst', 'sum', 'min', 'max', 'add', 'subtract', 'multiply', 'divide',
-  'minimum_pass', 'custom', 'risk_level', 'factors', 'model_version', 'generated_at', 'assessment_score_predictions', 'evaluation_scores', 'assessment_results', 'assessment_instance_details',
-])
+// These keys are constrained by the grading/evaluation contracts. Keep their
+// exact values: lowercasing a legal enum (or dropping an uncommon enum) can
+// turn an otherwise valid anonymized schema into a different, invalid schema.
+// Values are copied from the grading_system_schema.json and
+// evaluation_system_schema.json enum/const clauses. Unknown strings—even in
+// enum-bearing properties—are dropped rather than forwarded as free text.
+const STRUCTURAL_ENUM_VALUES: Record<string, ReadonlySet<string>> = {
+  type: new Set(['overall', 'per_group', 'per_period', 'assessment_count']),
+  source: new Set(['component', 'period_component', 'current_period', 'period_grade', 'current_standing', 'mastery', 'attendance', 'attendance_rate', 'recent_scores', 'recent_score_average', 'recent_trend', 'missing_assessment_count', 'predicted_standing', 'risk_probability', 'ai_risk_level', 'trend', 'model_confidence', 'prediction_available', 'prediction_age_hours', 'ai_factor_count', 'data_basis', 'grading_component', 'grading_group']),
+  mode: new Set(['linear', 'numeric_mapping', 'value_mapping', 'points', 'equal', 'weighted', 'assessments', 'independent', 'period_formula', 'cumulative', 'equal_interval', 'mapping', 'nearest', 'floor', 'ceiling']),
+  weightMode: new Set(['relative', 'absolute']),
+  operator: new Set(['eq', 'ne', 'lt', 'lte', 'gt', 'gte', 'below', 'at_most', 'above', 'at_least', 'equals', 'not_equals', 'contains', 'not_contains', 'in', 'not_in', 'is_true', 'is_false', 'is_available', 'is_unavailable']),
+  scope: new Set(['periods', 'groups', 'overall', 'per_period', 'per_group']),
+  strategy: new Set(['priority', 'weighted']),
+  severity: new Set(['low', 'medium', 'high']),
+  unmatchedSeverity: new Set(['low', 'medium', 'high']),
+  match: new Set(['any', 'all']),
+  origin: new Set(['academic_record', 'derived', 'ai_prediction']),
+  gradingAggregation: new Set(['average', 'highest', 'lowest']),
+  unit: new Set(['percentage', 'probability', 'count', 'category', 'boolean']),
+  valueType: new Set(['number', 'number_array', 'boolean', 'category']),
+  missingValuePolicy: new Set(['ignore_rule', 'treat_as_zero', 'unavailable', 'return_unavailable']),
+  missingPolicy: new Set(['ignore_rule', 'treat_as_zero', 'return_unavailable']),
+  colorScheme: new Set(['green_to_red', 'white_to_red', 'custom']),
+  supportedScenarios: new Set(['minimum', 'maximum', 'minimum_pass', 'stable', 'custom']),
+  inputFeatures: new Set(['current_standing', 'recent_scores', 'attendance_rate', 'missing_assessment_count', 'assessment_results', 'assessment_instance_details']),
+  outputFields: new Set(['predicted_standing', 'risk_probability', 'risk_level', 'trend', 'factors', 'model_version', 'data_basis', 'generated_at', 'assessment_score_predictions', 'evaluation_scores']),
+  riskProbabilityMeaning: new Set(['heuristic', 'calibrated']),
+  unavailablePolicy: new Set(['continue_with_available_rules', 'return_unavailable']),
+  explanationPolicy: new Set(['show_model_factors_as_advisory', 'hide_model_factors']),
+  roundingMode: new Set(['nearest', 'floor', 'ceiling']),
+}
 const PRIVATE_SCHEMA_KEYS = new Set([
   'name', 'label', 'short_code', 'description', 'title', 'student', 'student_id', 'student_number', 'class_number',
   'enrollment_id', 'class_id', 'class_record_id', 'subject', 'subject_name', 'section', 'year', 'academic_year',
@@ -55,7 +74,9 @@ export type SchemaPrivacyMap = { ids: Map<string, string>; categories: Map<strin
 /** Preserve grading/evaluation relationships while replacing all names, labels, IDs and categories with request-local tokens. */
 export function anonymizeSchemaRepresentation(value: unknown, privacyMap: SchemaPrivacyMap): unknown {
   const genericId = (value: string) => {
-    if (!privacyMap.ids.has(value)) privacyMap.ids.set(value, `ref_${crypto.randomUUID()}`)
+    // Domain schema identifiers are UUID-constrained. Keep tokens random and
+    // request-local while preserving that structural contract.
+    if (!privacyMap.ids.has(value)) privacyMap.ids.set(value, crypto.randomUUID())
     return privacyMap.ids.get(value)
   }
   const genericCategory = (value: string) => {
@@ -66,10 +87,10 @@ export function anonymizeSchemaRepresentation(value: unknown, privacyMap: Schema
     if (Array.isArray(item)) return item.map((entry, entryIndex) => visit(entry, key, entryIndex))
     if (!item || typeof item !== 'object') {
       if (typeof item === 'string') {
-        if (key === 'id' || /Id$/.test(key)) return genericId(item)
+        if (key === 'id' || /Ids?$/.test(key)) return genericId(item)
         if (key === 'name' || key === 'label' || key === 'shortCode') return `Item ${index + 1}`
         if (key === 'value' || key === 'threshold' || key === 'categories') return genericCategory(item)
-        return STRUCTURAL_ENUM_KEYS.has(key) && STRUCTURAL_ENUM_VALUES.has(item.toLowerCase()) ? item.toLowerCase() : undefined
+        return STRUCTURAL_ENUM_VALUES[key]?.has(item) ? item : undefined
       }
       return typeof item === 'number' || typeof item === 'boolean' ? item : undefined
     }
@@ -81,8 +102,13 @@ export function anonymizeSchemaRepresentation(value: unknown, privacyMap: Schema
         if (['name', 'label', 'short_code'].includes(normalizedKey)) output[childKey] = `Item ${index + 1}`
         continue
       }
-      if (childKey === 'id' || /Id$/.test(childKey)) {
+      if (childKey === 'officialRecordSystem') {
+        output[childKey] = 'Institutional record system'
+        continue
+      }
+      if (childKey === 'id' || /Ids?$/.test(childKey)) {
         if (typeof child === 'string') output[childKey] = genericId(child)
+        else if (Array.isArray(child) && /Ids$/.test(childKey)) output[childKey] = child.map((reference) => typeof reference === 'string' ? genericId(reference) : undefined)
         continue
       }
       if (childKey === 'categories' && Array.isArray(child)) {

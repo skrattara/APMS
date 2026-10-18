@@ -295,13 +295,19 @@ def _assessment_domain(
 
 
 def _validate_assessment_instances(
-    grading: dict[str, Any], instances: list[dict[str, Any]], *, enforce_counts: bool
+    grading: dict[str, Any],
+    instances: list[dict[str, Any]],
+    *,
+    enforce_counts: bool,
+    inventory: str = "complete",
 ) -> None:
     """Fail closed on assessment context before binding any model queries.
 
     The records are the privacy-projected gateway contract. Counts include all
     instances supplied, including ones whose result is already recorded.
     """
+    if not isinstance(inventory, str) or inventory not in ("partial", "complete"):
+        raise ValueError("Assessment inventory must be 'partial' or 'complete'")
     validate_grading(grading)
     if not isinstance(instances, list):
         raise ValueError("Assessment instances must be a list")
@@ -418,6 +424,23 @@ def _validate_assessment_instances(
             raise ValueError("Assessment instance references an unknown period")
         if group_ref is not None and group_ref not in groups:
             raise ValueError("Assessment instance references an unknown group")
+        count = definition.get("count")
+        if count:
+            scope = count.get("scope", {"type": "overall"})
+            scope_type = scope.get("type", "overall")
+            if scope_type == "per_period" and period_ref is None:
+                raise ValueError(
+                    "Assessment instance requires period_ref for per_period count scope"
+                )
+            if scope_type == "per_group":
+                if group_ref is None:
+                    raise ValueError(
+                        "Assessment instance requires group_ref for per_group count scope"
+                    )
+                if groups[group_ref]["typeId"] != scope["groupTypeId"]:
+                    raise ValueError(
+                        "Assessment instance group type differs from its per_group count scope"
+                    )
         if period_ref is not None and group_ref is not None:
             period, group = periods[period_ref], groups[group_ref]
             ancestors = {group_ref}
@@ -484,7 +507,13 @@ def _validate_assessment_instances(
         else:
             raise ValueError("Unsupported assessment count scope")
         for scoped in scopes:
-            if count.get("min") is not None and len(scoped) < count["min"]:
+            # Partial inventory is a prefix of the final inventory, so minima
+            # belong to the eventual complete snapshot; maxima always apply.
+            if (
+                inventory == "complete"
+                and count.get("min") is not None
+                and len(scoped) < count["min"]
+            ):
                 raise ValueError(
                     "Assessment instances violate the minimum count in scope"
                 )
@@ -495,10 +524,15 @@ def _validate_assessment_instances(
 
 
 def validate_assessment_instances(
-    grading: dict[str, Any], instances: list[dict[str, Any]]
+    grading: dict[str, Any],
+    instances: list[dict[str, Any]],
+    *,
+    inventory: str = "complete",
 ) -> None:
-    """Validate all supplied instances, including request-wide count limits."""
-    _validate_assessment_instances(grading, instances, enforce_counts=True)
+    """Validate supplied instances; partial mode relaxes minimum counts only."""
+    _validate_assessment_instances(
+        grading, instances, enforce_counts=True, inventory=inventory
+    )
 
 
 def compile_assessment_constraint(
