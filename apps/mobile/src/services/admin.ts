@@ -11,7 +11,7 @@ export type AdminWorkspace = {
   departments: DepartmentRecord[];
   programs: ProgramRecord[];
   terms: AcademicTermRecord[];
-  logs: { id: number; createdAt: string; action: string; entityType: string; actorId: string | null }[];
+  logs: { id: string; createdAt: string; action: string; entityType: string; entityId: string | null; actorId: string | null }[];
   backups: { id: string; scope: string; status: string; createdAt: string; completedAt: string | null }[];
   settings: { key: string; value: unknown; updatedAt: string }[];
 };
@@ -56,7 +56,7 @@ export async function loadAdminWorkspace(): Promise<AdminWorkspace> {
     supabase.from('departments').select('id,code,name,status').order('code'),
     supabase.from('programs').select('id,department_id,code,name,status').order('code'),
     supabase.from('academic_terms').select('id,academic_year,semester,starts_on,ends_on,status').order('starts_on', { ascending: false }),
-    supabase.from('audit_logs').select('id,created_at,action,entity_type,actor_id').order('created_at', { ascending: false }).limit(100),
+    supabase.from('audit_logs').select('id,created_at,action,entity_type,entity_id,actor_id').order('created_at', { ascending: false }).limit(100),
     supabase.from('backups').select('id,scope,status,created_at,completed_at').order('created_at', { ascending: false }).limit(25),
     supabase.from('system_settings').select('key,value,updated_at').order('key'),
   ]);
@@ -68,7 +68,7 @@ export async function loadAdminWorkspace(): Promise<AdminWorkspace> {
     departments: departments.data ?? [],
     programs: (programs.data ?? []).map((row) => ({ id: row.id, departmentId: row.department_id, code: row.code, name: row.name, status: row.status })),
     terms: (terms.data ?? []).map((row) => ({ id: row.id, academicYear: row.academic_year, semester: row.semester, startsOn: row.starts_on, endsOn: row.ends_on, status: row.status })),
-    logs: (logs.data ?? []).map((row) => ({ id: row.id, createdAt: row.created_at, action: row.action, entityType: row.entity_type, actorId: row.actor_id })),
+    logs: (logs.data ?? []).map((row) => ({ id: row.id, createdAt: row.created_at, action: row.action, entityType: row.entity_type, entityId: row.entity_id, actorId: row.actor_id })),
     backups: (backups.data ?? []).map((row) => ({ id: row.id, scope: row.scope, status: row.status, createdAt: row.created_at, completedAt: row.completed_at })),
     settings: (settings.data ?? []).map((row) => ({ key: row.key, value: row.value, updatedAt: row.updated_at })),
   };

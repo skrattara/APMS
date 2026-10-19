@@ -19,6 +19,7 @@ import {
   PageState,
   SearchFilter,
   SelectField,
+  useTablePaginationPreference,
   Tabs,
   useToast,
 } from "@/components/ui";
@@ -900,6 +901,7 @@ export function Settings({
   const [last, setLast] = useState(user?.lastName ?? "");
   const [phone, setPhone] = useState("+63 917 555 0142");
   const [gradebookAutosave, setGradebookAutosave] = useState(true);
+  const { enabled: tablePaginationEnabled, setEnabled: setTablePaginationEnabled, failingGradesRed, setFailingGradesRed } = useTablePaginationPreference();
   const [systemName, setSystemName] = useState(SYSTEM_DEFAULTS.systemName);
   const [institutionName, setInstitutionName] = useState(
     SYSTEM_DEFAULTS.institutionName,
@@ -944,6 +946,8 @@ export function Settings({
     last,
     phone,
     autosaveEnabled: gradebookAutosave,
+    tablePaginationEnabled,
+    failingGradesRed,
     sessionMinutes,
     systemName,
     institutionName,
@@ -1018,6 +1022,18 @@ export function Settings({
             detail="Save score edits automatically across your gradebooks. You can also turn autosave off for an individual gradebook page."
             value={gradebookAutosave}
             onChange={setGradebookAutosave}
+          />
+          <ToggleRow
+            title="Table pagination"
+            detail="Show long tables in 10-row pages. Turn this off to see all matching rows at once."
+            value={tablePaginationEnabled}
+            onChange={setTablePaginationEnabled}
+          />
+          <ToggleRow
+            title="Highlight failing scores and grades"
+            detail="Show scores below 80% and explicit failing grades in red across APMS. Gradebook formatting remains controlled by its own rules."
+            value={failingGradesRed}
+            onChange={setFailingGradesRed}
           />
           <SaveButton saving={saving} onPress={save} />
         </View>

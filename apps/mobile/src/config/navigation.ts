@@ -26,7 +26,7 @@ export const NAVIGATION: Record<Role, NavItem[]> = {
     { key: 'overview', label: 'Dashboard', icon: 'home' }, { key: 'units', label: 'Academic Units', icon: 'faculty' },
     { key: 'subjects', label: 'Subjects', icon: 'records' }, { key: 'classes', label: 'Classes Overview', icon: 'records' },
     { key: 'students', label: 'Student Monitoring', icon: 'students' }, { key: 'risk', label: 'At-Risk Overview', icon: 'evaluation' },
-    { key: 'criteria', label: 'Evaluation Criteria', icon: 'criteria' }, { key: 'analytics', label: 'Analytics & Reports', icon: 'analytics' },
+    { key: 'criteria', label: 'Evaluation Criteria', icon: 'criteria' }, { key: 'deadlines', label: 'Grade Deadlines', icon: 'grades' }, { key: 'analytics', label: 'Analytics & Reports', icon: 'analytics' },
     { key: 'settings', label: 'Settings', icon: 'settings' },
   ],
   system_admin: [

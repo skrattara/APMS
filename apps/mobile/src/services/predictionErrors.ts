@@ -18,6 +18,7 @@ export type ForecastErrorCode =
   | 'provider_connection_failed'
   | 'invalid_response'
   | 'network_unconfirmed'
+  | 'saved_response_invalid'
   | 'unexpected';
 
 export class SafeForecastError extends Error {
@@ -26,6 +27,20 @@ export class SafeForecastError extends Error {
   constructor(readonly code: ForecastErrorCode, readonly status?: number) {
     super(code);
   }
+}
+
+/** The gateway returned a saved-run ID, but this client could not validate its display payload. */
+export class SavedForecastResponseError extends Error {
+  readonly code = 'saved_response_invalid' as const;
+  readonly name = 'SavedForecastResponseError';
+
+  constructor(readonly savedRunId: string) {
+    super('A prediction run was saved but its response could not be validated locally.');
+  }
+}
+
+export function isSavedForecastResponseError(error: unknown): error is SavedForecastResponseError {
+  return error instanceof SavedForecastResponseError;
 }
 
 export function forecastError(code: Exclude<ForecastErrorCode, 'request_status' | 'network_unconfirmed' | 'unexpected'>): SafeForecastError {
@@ -69,6 +84,9 @@ const responseMessages: Record<number, string> = {
 
 /** Maps controlled failures to fixed copy; unknown Error.message values stay private. */
 export function formatForecastError(error: unknown): string {
+  if (error instanceof SavedForecastResponseError) {
+    return 'The forecast run was saved, but this screen could not verify the results. Refresh saved predictions before deciding whether to retry.';
+  }
   if (!(error instanceof SafeForecastError)) {
     return 'The forecast result could not be confirmed. Check saved predictions before retrying; student records remain available.';
   }

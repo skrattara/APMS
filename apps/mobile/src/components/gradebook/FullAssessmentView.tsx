@@ -12,7 +12,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { getErrorMessage } from '@/services/errors';
 import { useAuth } from '@/auth/AuthProvider';
 import { Badge, Button, Field, PageState, SelectField } from '@/components/ui';
-import { formatStudentId, normalizeStudentId } from '@/utils/studentId';
+import { formatImportedStudentId, formatStudentId, normalizeStudentId } from '@/utils/studentId';
 import { AppIcon, type AppIconName } from '@/components/Icon';
 import { colors } from '@/theme/tokens';
 import type { ClassWorkspace, FacultyAssessment, GradebookHistoryCursor, GradebookHistoryPage, RosterStudent } from '@/services/faculty';
@@ -1392,7 +1392,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
       const seenStudentIds = new Set<string>();
       const previewRows = rows.slice(1).flatMap((cells) => {
         const values = cells as unknown[];
-        const rawId = String(values[studentIdIndex] ?? '').trim();
+        const rawId = formatImportedStudentId(String(values[studentIdIndex] ?? '').trim());
         if (!rawId) return [];
         const normalizedId = normalizeStudentId(rawId);
         const student = studentById.get(normalizedId);

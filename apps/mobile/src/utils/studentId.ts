@@ -9,6 +9,16 @@ export function formatStudentId(value: string | null | undefined): string {
   return `${digits.slice(0, 2)}-${digits.slice(2, 6)}-${digits.slice(6)}`;
 }
 
+/** Restore the leading zero Excel/CSV may drop from a numeric 05-prefixed ID. */
+export function formatImportedStudentId(value: string | null | undefined): string {
+  const raw = (value ?? '').trim();
+  const digits = raw.replace(/\D/g, '');
+  // A complete 05-XXXX-XXXXXX ID has 12 digits. If Excel parsed it as a
+  // number, its leading zero is lost and the remaining 11 digits begin with 5.
+  if (/^5\d{10}$/.test(digits)) return formatStudentId(`0${digits}`);
+  return formatStudentId(raw);
+}
+
 /** Adds separators as a recognized 05-prefixed ID is typed, without validating it. */
 export function formatStudentIdInput(value: string): string {
   const unseparated = value.replace(/[\s-]/g, '');

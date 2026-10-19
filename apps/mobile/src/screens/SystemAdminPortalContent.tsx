@@ -4,7 +4,7 @@ import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
 
 import { useAuth } from '@/auth/AuthProvider';
 import { supabase } from '@/services/supabase';
-import { Button, Card, ConfirmDialog, DataTable, DateField, Field, MetricCard, PageState, RefreshIndicator, SelectField, useToast } from '@/components/ui';
+import { Badge, Button, Card, ConfirmDialog, DataTable, DateField, Field, MetricCard, PageState, RefreshIndicator, SelectField, Tabs, useToast } from '@/components/ui';
 import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
 import { ReportComposer } from '@/components/reports/ReportComposer';
 import { AIServiceSettings } from '@/components/AIServiceSettings';
@@ -62,6 +62,29 @@ type Props = { data: AdminWorkspace; refresh: () => void; userId: string; toast:
 function Heading({ title, subtitle, action }: { title: string; subtitle: string; action?: ReactNode }) { return <View style={styles.heading}><View style={styles.flex}><Text accessibilityRole="header" style={styles.title}>{title}</Text><Text style={styles.subtitle}>{subtitle}</Text></View>{action}</View>; }
 function displayRole(role: ManagedUser['role']) { return role === 'system_admin' ? 'System Admin' : role === 'academic_admin' ? 'Academic Admin' : role === 'faculty' ? 'Faculty' : 'Unassigned'; }
 function date(value: string | null) { return value ? new Date(value).toLocaleString() : 'Never'; }
+function compactReference(value: string) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value.slice(0, 8) : value; }
+function auditActorLabel(actorId: string | null, data: AdminWorkspace) {
+  if (!actorId) return 'System';
+  const actor = data.users.find((user) => user.id === actorId);
+  return actor ? `${actor.firstName} ${actor.lastName}`.trim() || actor.email : `Unmatched account · ${compactReference(actorId)}`;
+}
+function auditEntityLabel(row: AdminWorkspace['logs'][number], data: AdminWorkspace) {
+  const entityId = row.entityId;
+  const entityType = row.entityType.replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
+  if (entityId) {
+    const user = data.users.find((item) => item.id === entityId);
+    if (user) return `User · ${user.firstName} ${user.lastName}`.trim();
+    const department = data.departments.find((item) => item.id === entityId);
+    if (department) return `Department · ${department.code}`;
+    const program = data.programs.find((item) => item.id === entityId);
+    if (program) return `Program · ${program.code}`;
+    const term = data.terms.find((item) => item.id === entityId);
+    if (term) return `Term · ${term.academicYear} ${term.semester}`;
+    const backup = data.backups.find((item) => item.id === entityId);
+    if (backup) return `Backup · ${backup.scope}`;
+  }
+  return entityType || 'System';
+}
 
 function Overview({ data }: Props) {
   const [roleFilter, setRoleFilter] = useState('all');
@@ -85,7 +108,7 @@ function Users({ data, refresh, toast }: Props) {
   const create = async () => { setSaving(true); try { await createManagedUser({ email, password, firstName, lastName, role, departmentId: role === 'system_admin' ? undefined : departmentId, employeeId: role === 'faculty' ? employeeId : undefined }); setCreateOpen(false); setEmail(''); setPassword(''); setFirstName(''); setLastName(''); setEmployeeId(''); toast.show('Account created and APMS role assigned.'); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Could not create the account. Check the details and try again.')); } finally { setSaving(false); } };
   const update = async (status?: ManagedUser['status']) => { if (!selected) return; setSaving(true); try { await updateManagedUser({ userId: selected.id, status, role: editRole, departmentId: editRole === 'system_admin' ? undefined : editDepartment, employeeId: editRole === 'faculty' ? editEmployeeId || undefined : undefined, password: editPassword || undefined }); setSelected(null); toast.show('Account role, scope, and status were updated.'); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Account update failed.')); } finally { setSaving(false); } };
   const activeDepartments = data.departments.filter((department) => department.status === 'active');
-  return <><Heading title="User Management" subtitle="Create and manage the three core APMS roles. Passwords are set through the protected server endpoint and are never displayed." action={<Button label="Create user" onPress={() => setCreateOpen(true)} />} /><Card>{data.users.length ? <DataTable columns={['Name', 'Email', 'Role', 'Scope', 'Last login', 'Manage', 'Status']} rows={data.users.map((user) => [`${user.firstName} ${user.lastName}`, user.email, displayRole(user.role), user.scopeType === 'global' ? 'Global' : data.departments.find((department) => department.id === user.scopeId)?.code ?? 'Unassigned', date(user.lastLoginAt), <Button key={user.id} label="Manage" variant="secondary" onPress={() => openManage(user)} />, `${user.status[0].toUpperCase()}${user.status.slice(1)}`])} /> : <PageState kind="empty" title="No APMS users" message="Create a System Admin, Academic Admin, or Faculty account." />}</Card>
+  return <><Heading title="User Management" subtitle="Create and manage the three core APMS roles. Passwords are set through the protected server endpoint and are never displayed." action={<Button label="Create user" onPress={() => setCreateOpen(true)} />} /><Card>{data.users.length ? <DataTable compact columns={['Name', 'Email', 'Role', 'Scope', 'Last login', 'Status', 'Manage']} rows={data.users.map((user) => [`${user.firstName} ${user.lastName}`, user.email, displayRole(user.role), user.scopeType === 'global' ? 'Global' : data.departments.find((department) => department.id === user.scopeId)?.code ?? 'Unassigned', date(user.lastLoginAt), `${user.status[0].toUpperCase()}${user.status.slice(1)}`, <Button compact key={user.id} label="Manage" variant="secondary" onPress={() => openManage(user)} />])} /> : <PageState kind="empty" title="No APMS users" message="Create a System Admin, Academic Admin, or Faculty account." />}</Card>
     <Dialog visible={createOpen} title="Create APMS account" onClose={() => setCreateOpen(false)}><View style={styles.formGrid}><Field label="First name" value={firstName} onChangeText={setFirstName} /><Field label="Last name" value={lastName} onChangeText={setLastName} /><Field label="Institutional email" value={email} keyboardType="email-address" onChangeText={setEmail} /><Field label="Temporary password (12+ characters)" value={password} secureTextEntry onChangeText={setPassword} /></View><SelectField label="Core role" value={role} options={roleOptions} onChange={(value) => setRole(value as CoreRole)} />{role !== 'system_admin' ? <SelectField label="Department scope" value={departmentId} options={activeDepartments.map((department) => ({ label: `${department.code} · ${department.name}`, value: department.id }))} onChange={setDepartmentId} /> : null}{role === 'faculty' ? <Field label="Employee ID" value={employeeId} onChangeText={setEmployeeId} /> : null}<Button label="Create account" loading={saving} disabled={!email.trim() || password.length < 12 || !firstName.trim() || !lastName.trim() || (role !== 'system_admin' && !departmentId) || (role === 'faculty' && !employeeId.trim())} onPress={() => void create()} /></Dialog>
     <Dialog visible={Boolean(selected)} title="Manage account" onClose={() => setSelected(null)}>{selected ? <><Text style={styles.cardTitle}>{selected.firstName} {selected.lastName}</Text><Text style={styles.help}>{selected.email}</Text><SelectField label="Core role" value={editRole} options={roleOptions} onChange={(value) => setEditRole(value as CoreRole)} />{editRole !== 'system_admin' ? <SelectField label="Department scope" value={editDepartment} options={activeDepartments.map((department) => ({ label: `${department.code} · ${department.name}`, value: department.id }))} onChange={setEditDepartment} /> : null}{editRole === 'faculty' && selected.role !== 'faculty' ? <Field label="Employee ID required for new Faculty role" value={editEmployeeId} onChangeText={setEditEmployeeId} /> : null}<Field label="New temporary password (optional)" value={editPassword} secureTextEntry onChangeText={setEditPassword} /><View style={styles.actions}><Button label="Save changes" loading={saving} disabled={editRole === 'faculty' && selected.role !== 'faculty' && !editEmployeeId.trim()} onPress={() => void update()} /><Button label={selected.status === 'active' ? 'Deactivate' : 'Activate'} variant="secondary" loading={saving} onPress={() => void update(selected.status === 'active' ? 'inactive' : 'active')} /></View></> : null}</Dialog>
   </>;
@@ -93,6 +116,7 @@ function Users({ data, refresh, toast }: Props) {
 
 type SetupDialog = 'department' | 'program' | 'term' | null;
 function AcademicSetup({ data, refresh, toast }: Props) {
+  const [section, setSection] = useState('Departments');
   const [dialog, setDialog] = useState<SetupDialog>(null);
   const [saving, setSaving] = useState(false);
   const [deletingProgram, setDeletingProgram] = useState<ProgramRecord | null>(null);
@@ -108,19 +132,36 @@ function AcademicSetup({ data, refresh, toast }: Props) {
   const save = async () => { setSaving(true); try { if (dialog === 'department') await saveDepartment({ id: department?.id, code, name, status }); if (dialog === 'program') await saveProgram({ id: program?.id, departmentId, code, name, status }); if (dialog === 'term') await saveAcademicTerm({ id: term?.id, academicYear, semester, startsOn, endsOn, status: termStatus }); toast.show('Academic setup saved.'); close(); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Academic setup could not be saved.')); } finally { setSaving(false); } };
   const removeProgram = async () => { if (!deletingProgram) return; setSaving(true); try { await deleteProgram(deletingProgram.id); toast.show('Program deleted.'); setDeletingProgram(null); close(); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Program could not be deleted.')); } finally { setSaving(false); } };
   const activeDepartments = data.departments.filter((item) => item.status === 'active');
-  return <><Heading title="Academic Setup" subtitle="Create the departments, programs, and academic terms used for account scope and academic records." action={<Button label="Add department" onPress={() => openDepartment()} />} />
-    <Card><View style={styles.sectionHeader}><View><Text style={styles.sectionTitle}>Departments</Text><Text style={styles.sectionHelp}>Departments define the scope available to Academic Admin and Faculty accounts.</Text></View></View>{data.departments.length ? <DataTable columns={['Code', 'Department', 'Status', 'Manage']} rows={data.departments.map((item) => [item.code, item.name, item.status[0].toUpperCase() + item.status.slice(1), <Button key={item.id} label="Edit" variant="secondary" onPress={() => openDepartment(item)} />])} /> : <PageState kind="empty" title="No departments yet" message="Use Add department above to create the first department." />}</Card>
-    <Card><View style={styles.sectionHeader}><View><Text style={styles.sectionTitle}>Programs</Text><Text style={styles.sectionHelp}>Programs are grouped under a department and can be activated or archived.</Text></View><Button label="Add program" variant="secondary" disabled={!activeDepartments.length} onPress={() => openProgram()} /></View>{data.programs.length ? <DataTable columns={['Code', 'Program', 'Department', 'Status', 'Manage']} rows={data.programs.map((item) => [item.code, item.name, data.departments.find((department) => department.id === item.departmentId)?.code ?? 'Unassigned', item.status[0].toUpperCase() + item.status.slice(1), <Button key={item.id} label="Edit" variant="secondary" onPress={() => openProgram(item)} />])} /> : <PageState kind="empty" title="No programs yet" message="Programs are optional, but useful for organizing department reports." action={<Button label="Create program" disabled={!activeDepartments.length} onPress={() => openProgram()} />} />}</Card>
-    <Card><View style={styles.sectionHeader}><View><Text style={styles.sectionTitle}>Academic terms</Text><Text style={styles.sectionHelp}>Terms must exist before Faculty can create monitoring classes.</Text></View><Button label="Add term" variant="secondary" onPress={() => openTerm()} /></View>{data.terms.length ? <DataTable columns={['Academic year', 'Semester', 'Starts', 'Ends', 'Status', 'Manage']} rows={data.terms.map((item) => [item.academicYear, item.semester, item.startsOn, item.endsOn, item.status[0].toUpperCase() + item.status.slice(1), <Button key={item.id} label="Edit" variant="secondary" onPress={() => openTerm(item)} />])} /> : <PageState kind="empty" title="No academic terms yet" message="Create the current academic term before setting up classes." action={<Button label="Create term" onPress={() => openTerm()} />} />}</Card>
+  const sectionAction = section === 'Departments'
+    ? <Button label="Add department" onPress={() => openDepartment()} />
+    : section === 'Programs'
+      ? <Button label="Add program" disabled={!activeDepartments.length} onPress={() => openProgram()} />
+      : <Button label="Add term" onPress={() => openTerm()} />;
+  return <><Heading title="Academic Setup" subtitle="Create the departments, programs, and academic terms used for account scope and academic records." action={sectionAction} />
+    <Tabs values={['Departments', 'Programs', 'Academic terms']} selected={section} onSelect={setSection} />
+    <View style={{ gap: 16 }}>
+      {section === 'Departments' ? <>
+        <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Departments</Text><Text style={styles.sectionHelp}>Departments define the scope available to Academic Admin and Faculty accounts.</Text></View>
+        {data.departments.length ? <DataTable columns={['Code', 'Department', 'Programs', 'Status', 'Actions']} rows={data.departments.map((item) => [item.code, item.name, String(data.programs.filter((program) => program.departmentId === item.id).length), item.status[0].toUpperCase() + item.status.slice(1), <Button compact key={item.id} label="Edit" variant="secondary" onPress={() => openDepartment(item)} />])} columnWidths={[96, 300, 88, 92, 96]} widthMode="content" /> : <PageState kind="empty" title="No departments yet" message="Use Add department above to create the first department." />}
+      </> : null}
+      {section === 'Programs' ? <>
+        <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Programs</Text><Text style={styles.sectionHelp}>Programs are grouped under a department and can be activated or archived.</Text></View>
+        {data.programs.length ? <DataTable columns={['Code', 'Program', 'Department', 'Status', 'Actions']} rows={data.programs.map((item) => [item.code, item.name, data.departments.find((department) => department.id === item.departmentId)?.name ?? 'Unassigned', item.status[0].toUpperCase() + item.status.slice(1), <View key={item.id} style={{ flexDirection: 'row', gap: 6 }}><Button compact label="Edit" variant="secondary" onPress={() => openProgram(item)} /><Button compact label="Delete" variant="danger" onPress={() => setDeletingProgram(item)} /></View>])} columnWidths={[92, 320, 220, 92, 172]} widthMode="content" /> : <PageState kind="empty" title="No programs yet" message="Programs are optional, but useful for organizing department reports." action={<Button label="Create program" disabled={!activeDepartments.length} onPress={() => openProgram()} />} />}
+      </> : null}
+      {section === 'Academic terms' ? <>
+        <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Academic terms</Text><Text style={styles.sectionHelp}>Terms must exist before Faculty can create monitoring classes.</Text></View>
+        {data.terms.length ? <DataTable columns={['Academic year', 'Semester', 'Starts', 'Ends', 'Status', 'Actions']} rows={data.terms.map((item) => [item.academicYear, item.semester, item.startsOn, item.endsOn, item.status[0].toUpperCase() + item.status.slice(1), <Button compact key={item.id} label="Edit" variant="secondary" onPress={() => openTerm(item)} />])} columnWidths={[120, 120, 112, 112, 92, 96]} widthMode="content" /> : <PageState kind="empty" title="No academic terms yet" message="Create the current academic term before setting up classes." action={<Button label="Create term" onPress={() => openTerm()} />} />}
+      </> : null}
+    </View>
     <Dialog visible={dialog === 'department'} title={department ? 'Edit department' : 'Create department'} onClose={close}><Field label="Department code" value={code} onChangeText={setCode} placeholder="e.g. CIT" /><Field label="Department name" value={name} onChangeText={setName} placeholder="e.g. College of Information Technology" /><SelectField label="Status" value={status} options={[{ label: 'Active', value: 'active' }, { label: 'Inactive', value: 'inactive' }]} onChange={(value) => setStatus(value as 'active' | 'inactive')} /><Button label="Save department" loading={saving} disabled={!code.trim() || !name.trim()} onPress={() => void save()} /></Dialog>
-    <Dialog visible={dialog === 'program'} title={program ? 'Edit program' : 'Create program'} onClose={close}><SelectField label="Department" value={departmentId} options={activeDepartments.map((item) => ({ label: `${item.code} · ${item.name}`, value: item.id }))} onChange={setDepartmentId} /><Field label="Program code" value={code} onChangeText={setCode} placeholder="e.g. BSIT" /><Field label="Program name" value={name} onChangeText={setName} placeholder="e.g. Bachelor of Science in Information Technology" /><SelectField label="Status" value={status} options={[{ label: 'Active', value: 'active' }, { label: 'Inactive', value: 'inactive' }]} onChange={(value) => setStatus(value as 'active' | 'inactive')} /><View style={styles.dialogActions}>{program ? <Button label="Delete permanently" variant="danger" disabled={saving} onPress={() => setDeletingProgram(program)} /> : null}<Button label="Save program" loading={saving} disabled={!departmentId || !code.trim() || !name.trim()} onPress={() => void save()} /></View></Dialog>
+    <Dialog visible={dialog === 'program'} title={program ? 'Edit program' : 'Create program'} onClose={close}><SelectField label="Department" value={departmentId} options={activeDepartments.map((item) => ({ label: `${item.code} · ${item.name}`, value: item.id }))} onChange={setDepartmentId} /><View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}><Field containerStyle={{ flex: 1, minWidth: 120, maxWidth: 180 }} label="Program code" value={code} onChangeText={setCode} placeholder="e.g. BSIT" /><Field containerStyle={{ flex: 3, minWidth: 220 }} label="Program name" value={name} onChangeText={setName} placeholder="e.g. Bachelor of Science in Information Technology" /></View><SelectField label="Status" value={status} options={[{ label: 'Active', value: 'active' }, { label: 'Inactive', value: 'inactive' }]} onChange={(value) => setStatus(value as 'active' | 'inactive')} /><View style={styles.dialogActions}>{program ? <Button label="Delete permanently" variant="danger" disabled={saving} onPress={() => setDeletingProgram(program)} /> : null}<Button label="Save program" loading={saving} disabled={!departmentId || !code.trim() || !name.trim()} onPress={() => void save()} /></View></Dialog>
     <Dialog visible={dialog === 'term'} title={term ? 'Edit academic term' : 'Create academic term'} onClose={close}><Text style={styles.dialogIntro}>Set the teaching period used when Faculty creates monitoring classes. Select dates from the calendar.</Text><Field label="Academic year" value={academicYear} onChangeText={setAcademicYear} placeholder="e.g. 2026-2027" autoCapitalize="none" /><Field label="Semester" value={semester} onChangeText={setSemester} placeholder="e.g. First Semester" /><View style={styles.dateGrid}><DateField containerStyle={styles.dateField} label="Start date" value={startsOn} onChange={setStartsOn} /><DateField containerStyle={styles.dateField} label="End date" value={endsOn} onChange={setEndsOn} /></View><Text style={styles.fieldHint}>Choose the first and last day of the academic term. The dates are saved as YYYY-MM-DD.</Text><SelectField label="Status" value={termStatus} options={['planned', 'active', 'closed', 'archived'].map((value) => ({ label: value[0].toUpperCase() + value.slice(1), value }))} onChange={(value) => setTermStatus(value as AcademicTermRecord['status'])} /><View style={styles.dialogActions}><Button label="Cancel" variant="secondary" onPress={close} /><Button label="Save academic term" loading={saving} disabled={!academicYear.trim() || !semester.trim() || !startsOn || !endsOn} onPress={() => void save()} /></View></Dialog>
     <ConfirmDialog visible={Boolean(deletingProgram)} title="Delete program permanently?" message={deletingProgram ? `Delete ${deletingProgram.code} · ${deletingProgram.name}? This cannot be undone. If students are linked, deletion will be blocked and you should mark the program Inactive instead.` : ''} confirmLabel="Delete program" cancelLabel="Keep program" danger pending={saving} onClose={() => { if (!saving) setDeletingProgram(null); }} onConfirm={() => void removeProgram()} />
   </>;
 }
 function Roles({ data }: Props) { return <><Heading title="Roles & Permissions" subtitle="The revised APMS role model contains exactly System Admin, Academic Admin, and Faculty; Super Admin is merged and Grader is removed." /><Card><DataTable columns={['Role', 'Key', 'Assigned users', 'Permissions', 'Scope']} rows={data.roles.filter((role) => ['system_admin', 'academic_admin', 'faculty'].includes(role.key)).map((role) => [role.name, role.key, String(role.users), String(role.permissions), role.key === 'system_admin' ? 'Global' : 'Department / assigned classes'])} /></Card></>; }
 function Backups({ data, refresh, userId, toast }: Props) { const [saving, setSaving] = useState(false); const queue = async () => { setSaving(true); try { await queueBackup(userId); toast.show('Backup request queued. Completion requires the configured protected backup worker.'); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Backup could not be queued.')); } finally { setSaving(false); } }; return <><Heading title="System & Backup Status" subtitle="Queue and monitor protected backup requests without exposing database credentials." action={<Button label="Queue full backup" loading={saving} onPress={() => void queue()} />} /><Card>{data.backups.length ? <DataTable columns={['Created', 'Scope', 'Completed', 'Status']} rows={data.backups.map((row) => [date(row.createdAt), row.scope, date(row.completedAt), `${row.status[0].toUpperCase()}${row.status.slice(1)}`])} /> : <PageState kind="empty" title="No backup requests" message="Queue a backup after an institutional backup worker and protected destination are configured." />}</Card></>; }
-function Logs({ data }: Props) { return <><Heading title="Access & System Logs" subtitle="Immutable audit trail for account, data, criteria, and administrative operations." /><Card>{data.logs.length ? <DataTable columns={['ID', 'Timestamp', 'Action', 'Entity', 'Actor', 'Status']} rows={data.logs.map((row) => [String(row.id), date(row.createdAt), row.action, row.entityType, row.actorId ?? 'System', 'Recorded'])} /> : <PageState kind="empty" title="No logs" message="No audit records are visible." />}</Card></>; }
+function Logs({ data }: Props) { return <><Heading title="Access & System Logs" subtitle="Immutable audit trail for account, data, criteria, and administrative operations." />{data.logs.length ? <DataTable columns={['Log ref', 'Timestamp', 'Action', 'Entity', 'Actor', 'Status']} rows={data.logs.map((row) => [`Log ${compactReference(row.id)}`, date(row.createdAt), row.action, auditEntityLabel(row, data), auditActorLabel(row.actorId, data), 'Recorded'])} columnWidths={[112, 160, 240, 220, 170, 100]} columnFlex={[0.5, 0.7, 1, 1, 0.8, 0.3]} widthMode="container" /> : <PageState kind="empty" title="No logs" message="No audit records are visible." />}</>; }
 function SystemReports({ data }: Props) {
   const rows = useMemo(() => [
     ...data.users.map((user) => ({ recordType: 'User', status: user.status, role: user.roleName ?? user.role ?? 'Unassigned', scope: user.scopeType ?? 'Global', date: user.lastLoginAt ?? 'No sign-in', identifier: user.id })),
@@ -130,6 +171,8 @@ function SystemReports({ data }: Props) {
   return <><Heading title="System Reports" subtitle="Formatted operational reports for account, audit, and backup administration. Academic records are outside the System Admin reporting scope." /><ReportComposer title="System Operations Report" scopeLabel="System administration" description="Operational account status, role assignment, audit activity, and backup status. Report data is drawn from the System Admin workspace." rows={rows} /></>;
 }
 function SystemSettings({ data, refresh, userId, toast }: Props) {
+  const [category, setCategory] = useState('Core services');
+  const settingsCategories = ['Core services', 'Forecasting service', 'AI provider usage', 'Feedback email', 'Backup policy', 'Grading defaults', 'Grade deadlines'];
   const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(data.settings.map((row) => [row.key, typeof row.value === 'string' ? row.value : JSON.stringify(row.value)])));
   const storedFeedbackFromEmail = data.settings.find((row) => row.key === 'FEEDBACK_FROM_EMAIL')?.value;
   const [feedbackFromEmail, setFeedbackFromEmail] = useState(typeof storedFeedbackFromEmail === 'string' ? storedFeedbackFromEmail : '');
@@ -198,6 +241,12 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
   return <>
     <Heading title="System Settings" subtitle="Manage the global services and policies that keep APMS running." action={<Button label="Save all changes" loading={saving} onPress={() => void saveAll()} />} />
     <View style={styles.settingsLayout}>
+      <View accessibilityRole="tablist" style={styles.settingsCategoryNav}>
+        {settingsCategories.map((item) => <Pressable key={item} accessibilityRole="tab" accessibilityState={{ selected: category === item }} onPress={() => setCategory(item)} style={[styles.settingsCategoryTab, category === item && styles.settingsCategoryTabActive]}>
+          <Text style={[styles.settingsCategoryText, category === item && styles.settingsCategoryTextActive]}>{item}</Text>
+        </Pressable>)}
+      </View>
+      {category === 'Core services' ? <>
       <Card style={styles.settingsIntro}><Text style={styles.cardTitle}>Configuration overview</Text><Text style={styles.help}>These settings affect the whole APMS installation. Changes are permission-checked and recorded in the audit log.</Text><View style={styles.summaryRow}><Text style={styles.summaryLabel}>Last configuration update</Text><Text style={styles.summaryValue}>{date(data.settings.map((row) => row.updatedAt).sort().at(-1) ?? null)}</Text></View></Card>
       <Card style={styles.settingsCard}>
         <Text style={styles.sectionTitle}>Core services</Text>
@@ -207,7 +256,9 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
         <View style={styles.settingRow}><View style={styles.settingCopy}><Text style={styles.settingLabel}>Share anonymous attendance data with AI</Text><Text style={styles.help}>Off by default. When enabled, AI may receive numeric attendance rates without student or class identifiers.</Text></View><Pressable accessibilityRole="switch" accessibilityState={{ checked: boolValue('ai.attendance_data.enabled') }} onPress={() => update('ai.attendance_data.enabled', String(!boolValue('ai.attendance_data.enabled')))} style={[styles.switch, boolValue('ai.attendance_data.enabled') && styles.switchOn]}><View style={[styles.switchThumb, boolValue('ai.attendance_data.enabled') && styles.switchThumbOn]} /></Pressable></View>
         <View style={styles.settingRow}><View style={styles.settingCopy}><Text style={styles.settingLabel}>Validate student ID format</Text><Text style={styles.help}>When enabled, student ID fields accept a 12-digit number or the formatted 05-XXXX-XXXXXX pattern. Disabled by default because some existing institutional IDs use other formats.</Text></View><Pressable accessibilityRole="switch" accessibilityState={{ checked: studentIdValidation }} onPress={() => setStudentIdValidation((enabled) => !enabled)} style={[styles.switch, studentIdValidation && styles.switchOn]}><View style={[styles.switchThumb, studentIdValidation && styles.switchThumbOn]} /></Pressable></View>
       </Card>
-      <AIServiceSettings />
+      </> : null}
+      {category === 'Forecasting service' ? <AIServiceSettings /> : null}
+      {category === 'AI provider usage' ? <>
       <Card style={styles.settingsCard}>
         <Text style={styles.sectionTitle}>AI provider keys and usage</Text>
         <Text style={styles.sectionHelp}>System-provided keys stay in Supabase Edge Function Secrets (OPENAI_API_KEY and GEMINI_API_KEY). Department keys can override them for authorized classes. A shared key does not share prompts or student context: each request is authorized and sent as a fresh, stateless call. Usage records contain billing metadata, not prompts or context.</Text>
@@ -226,6 +277,8 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
         <Text style={styles.help}>All scopes this month: {providerStatus?.adminUsage?.requests ?? 0} requests · {(providerStatus?.adminUsage?.inputTokens ?? 0).toLocaleString()} input tokens · {(providerStatus?.adminUsage?.outputTokens ?? 0).toLocaleString()} output tokens.</Text>
         {providerStatus?.adminUsageByScope?.length ? <DataTable columns={['Key scope', 'Reference', 'Provider', 'Model', 'Requests', 'Input tokens', 'Output tokens']} rows={providerStatus.adminUsageByScope.map((row: any) => [row.scope_type === 'user' ? 'Legacy personal key' : row.scope_type, row.scope_id ? `${String(row.scope_id).slice(0, 8)}…` : 'System', row.provider, row.model, String(row.requests), Number(row.input_tokens).toLocaleString(), Number(row.output_tokens).toLocaleString()])} /> : null}
       </Card>
+      </> : null}
+      {category === 'Feedback email' ? <>
       <Card style={styles.settingsCard}>
         <Text style={styles.sectionTitle}>Feedback email</Text>
         <Text style={styles.sectionHelp}>Set the sender name and address used when Faculty emails feedback to a student.</Text>
@@ -233,21 +286,113 @@ function SystemSettings({ data, refresh, userId, toast }: Props) {
         <Field label="Sender email (FEEDBACK_FROM_EMAIL)" value={feedbackFromEmail} onChangeText={setFeedbackFromEmail} placeholder="feedback@your-verified-domain.edu" keyboardType="email-address" autoCapitalize="none" />
         <Text style={styles.help}>Save the address here. Keep only RESEND_API_KEY in Edge Function Secrets. Resend must verify the sender’s domain before emails can be sent.</Text>
       </Card>
+      </> : null}
+      {category === 'Backup policy' ? <>
       <Card style={styles.settingsCard}>
         <Text style={styles.sectionTitle}>Backup policy</Text><Text style={styles.sectionHelp}>Set how long completed backup artifacts should be retained.</Text>
         <View style={styles.inlineField}><Field label="Retention period" value={values['backup.retention_days'] ?? ''} onChangeText={(value) => update('backup.retention_days', value.replace(/\D/g, '').slice(0, 3))} keyboardType="number-pad" containerStyle={styles.retentionField} /><Text style={styles.unit}>days</Text></View>
         <Text style={styles.help}>Minimum 1 day. Backup execution still requires the configured protected worker.</Text>
       </Card>
+      </> : null}
+      {category === 'Grading defaults' ? <>
       <Card style={styles.settingsCard}>
         <View style={styles.sectionHeader}><View><Text style={styles.sectionTitle}>Default grading system</Text><Text style={styles.sectionHelp}>Choose which saved grading definition is used when a class has no explicitly applied system.</Text></View><Text style={styles.badge}>DEFAULT</Text></View>
         <SelectField label="Default grading system" value={defaultSystemId} options={gradingSystems.map((system) => ({ label: system.name, value: system.id }))} onChange={setDefaultSystemId} />
         <Text style={styles.help}>Grading definitions are created and edited by Academic Admins. This setting selects the system-wide fallback; class-specific grading systems continue to take precedence.</Text>
       </Card>
+      </> : null}
+      {category === 'Grade deadlines' ? <SystemGradeDeadlines data={data} userId={userId} toast={toast} /> : null}
       <Text style={styles.updatedNote}>Settings last loaded from Supabase. {data.settings.length} configuration entries.</Text>
     </View>
+  </>;
+}
+
+const gradeDeadlinePeriods = [{ key: 'overall', label: 'Overall encoding' }, { key: 'p1', label: 'Period 1' }, { key: 'p2', label: 'Period 2' }, { key: 'p3', label: 'Period 3' }];
+function deadlineValue(date: string) { return `${date}T23:59:59+08:00`; }
+function SystemGradeDeadlines({ data, userId, toast }: Pick<Props, 'data' | 'userId' | 'toast'>) {
+  const [deadlines, setDeadlines] = useState<Record<string, string>>({ overall: '', p1: '', p2: '', p3: '' });
+  const [configuredDeadlines, setConfiguredDeadlines] = useState<any[]>([]);
+  const [requests, setRequests] = useState<any[]>([]);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    if (!supabase) return;
+    const [deadlineResult, requestResult] = await Promise.all([
+      supabase.from('grade_encoding_deadlines').select('scope_type,department_id,program_id,year_level,period_key,deadline_at'),
+      supabase.from('grade_encoding_deadline_requests').select('id,department_id,scope_type,program_id,year_level,requested_deadlines,rationale,status,created_at').order('created_at', { ascending: false }).limit(100),
+    ]);
+    const error = deadlineResult.error ?? requestResult.error;
+    if (error) throw error;
+    const next = { overall: '', p1: '', p2: '', p3: '' } as Record<string, string>;
+    const configured = deadlineResult.data ?? [];
+    for (const row of configured) if (row.scope_type === 'system' && row.period_key in next) next[row.period_key] = String(row.deadline_at).slice(0, 10);
+    setDeadlines(next);
+    setConfiguredDeadlines(configured);
+    setRequests(requestResult.data ?? []);
+  }, []);
+  useEffect(() => { void load().catch((cause) => toast.show(getErrorMessage(cause, 'Grade deadlines could not be loaded.'))); }, [load, toast]);
+  const save = async () => {
+    if (!supabase) return toast.show('APMS is not connected to Supabase.');
+    setBusy(true);
+    try {
+      const values = Object.fromEntries(gradeDeadlinePeriods.map(({ key }) => [key, deadlines[key] ? deadlineValue(deadlines[key]) : null]));
+      const { error } = await supabase.rpc('save_system_grade_encoding_deadlines', { p_deadlines: values });
+      if (error) throw error;
+      toast.show('System-wide grade deadlines saved.');
+      await load();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Grade deadlines could not be saved.')); }
+    finally { setBusy(false); }
+  };
+  const review = async (requestId: string, status: 'approved' | 'rejected') => {
+    if (!supabase) return toast.show('APMS is not connected to Supabase.');
+    setBusy(true);
+    try {
+      const { error } = await supabase.from('grade_encoding_deadline_requests').update({ status, reviewed_by: userId, reviewed_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', requestId);
+      if (error) throw error;
+      toast.show(status === 'approved' ? 'Deadline request approved and applied.' : 'Deadline request declined.');
+      await load();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'The deadline request could not be reviewed.')); }
+    finally { setBusy(false); }
+  };
+  const displayDeadline = (value: unknown) => {
+    if (typeof value !== 'string' || !value) return 'No deadline set';
+    const date = value.match(/^\d{4}-\d{2}-\d{2}/)?.[0];
+    return date ? new Date(`${date}T12:00:00`).toLocaleDateString() : new Date(value).toLocaleDateString();
+  };
+  const currentDeadlineFor = (request: any, periodKey: string) => {
+    const scope = request.scope_type === 'program'
+      ? configuredDeadlines.find((row) => row.scope_type === 'program' && row.program_id === request.program_id && row.period_key === periodKey)
+      : configuredDeadlines.find((row) => row.scope_type === 'year_level' && row.department_id === request.department_id && row.year_level === request.year_level && row.period_key === periodKey);
+    const system = configuredDeadlines.find((row) => row.scope_type === 'system' && row.period_key === periodKey);
+    return scope?.deadline_at ?? system?.deadline_at;
+  };
+  return <>
+    <Card style={styles.settingsCard}>
+      <Text style={styles.sectionTitle}>System-wide encoding deadlines</Text>
+      <Text style={styles.sectionHelp}>These deadlines apply to every program unless an approved program or year-level request overrides them. Once a deadline passes, grade scores for that period cannot be added, edited, cleared, or restored.</Text>
+      <View style={styles.dateGrid}>{[...gradeDeadlinePeriods.filter(({ key }) => key !== 'overall'), ...gradeDeadlinePeriods.filter(({ key }) => key === 'overall')].map(({ key, label }) => <DateField key={key} label={`${label} deadline`} value={deadlines[key] ?? ''} onChange={(value) => setDeadlines((current) => ({ ...current, [key]: value }))} containerStyle={styles.dateField} />)}</View>
+      <View style={[styles.actions, styles.deadlineSaveActions]}><Button label="Save system-wide deadlines" loading={busy} disabled={busy} onPress={() => void save()} /></View>
+    </Card>
+    <Card style={styles.settingsCard}>
+      <Text style={styles.sectionTitle}>Academic Admin requests</Text>
+      <Text style={styles.sectionHelp}>Review requests to change deadlines for a program or a year level within a department.</Text>
+      {requests.length ? <View style={{ gap: 8 }}>{requests.map((request) => {
+        const department = data.departments.find((item) => item.id === request.department_id);
+        const program = data.programs.find((item) => item.id === request.program_id);
+        const statusTone = request.status === 'approved' ? 'success' : request.status === 'rejected' ? 'danger' : 'warning';
+        return <View key={request.id} style={[styles.settingRow, styles.deadlineRequestRow]}>
+          <View style={styles.deadlineRequestContent}>
+            <View style={styles.deadlineRequestHeader}><Text style={styles.settingLabel}>{request.scope_type === 'program' ? `${program?.code ?? 'Program'} · ${program?.name ?? ''}` : `Year ${request.year_level}`} · ${department?.code ?? 'Department'}</Text><Badge tone={statusTone}>{request.status}</Badge></View>
+            <Text style={styles.help}>Requested {new Date(request.created_at).toLocaleString()}</Text>
+            <View style={styles.deadlineChanges}>{gradeDeadlinePeriods.map(({ key, label }) => request.requested_deadlines?.[key] !== undefined ? <Text key={key} style={styles.help}>{label}: {displayDeadline(currentDeadlineFor(request, key))} → {displayDeadline(request.requested_deadlines[key])}</Text> : null)}</View>
+            <View style={styles.deadlineReason}><Text style={styles.deadlineReasonLabel}>Reason for request</Text><Text style={styles.help}>{request.rationale}</Text></View>
+          </View>
+          {request.status === 'pending' ? <View style={styles.actions}><Button compact label="Approve" disabled={busy} onPress={() => void review(request.id, 'approved')} /><Button compact label="Decline" variant="secondary" disabled={busy} onPress={() => void review(request.id, 'rejected')} /></View> : null}
+        </View>;
+      })}</View> : <Text style={styles.help}>No deadline requests have been submitted.</Text>}
+    </Card>
   </>;
 }
 function PolicyItem({ label, value }: { label: string; value: string }) { return <View style={styles.policyItem}><Text style={styles.policyValue}>{value}</Text><Text style={styles.policyLabel}>{label}</Text></View>; }
 function Info({ onMessage }: { onMessage: (message: string) => void }) { return <><Heading title="Account settings" subtitle="Manage your profile, password, MFA, and notification preferences." /><AccountSettings role="system_admin" screen="settings" onMessage={onMessage} /></>; }
 function Dialog({ visible, title, onClose, children }: { visible: boolean; title: string; onClose: () => void; children: ReactNode }) { return <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}><View style={styles.overlay}><Card style={styles.dialog}><View style={styles.heading}><Text accessibilityRole="header" style={styles.dialogTitle}>{title}</Text><Pressable accessibilityLabel="Close dialog" onPress={onClose}><Text style={styles.close}>×</Text></Pressable></View><View style={styles.dialogBody}>{children}</View></Card></View></Modal>; }
-const styles = StyleSheet.create({ screen: { gap: 16 }, heading: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12 }, flex: { flex: 1 }, title: { color: colors.text, fontSize: 22, lineHeight: 30, fontWeight: '700' }, subtitle: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginTop: 3 }, metrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, cardTitle: { color: colors.text, fontSize: 15, fontWeight: '700', marginBottom: 8 }, help: { color: colors.textMuted, fontSize: 12, lineHeight: 18 }, formGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, dateGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, dateField: { flex: 1, minWidth: 220 }, userChartFilters: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, filter: { flexGrow: 1, flexBasis: 180, minWidth: 160 }, chartCount: { color: colors.textMuted, fontSize: 11, marginTop: -10 }, analyticsCharts: { flexDirection: 'row', flexWrap: 'wrap', gap: 14 }, fieldHint: { color: colors.textMuted, fontSize: 11, marginTop: -6 }, dialogIntro: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginBottom: 2 }, actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, dialogActions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8, marginTop: 4 }, overlay: { flex: 1, backgroundColor: '#00000066', alignItems: 'center', justifyContent: 'center', padding: 24 }, dialog: { width: '100%', maxWidth: 760, maxHeight: '90%', padding: 22 }, dialogTitle: { color: colors.text, fontSize: 19, fontWeight: '700' }, dialogBody: { gap: 14, marginTop: 16 }, close: { color: colors.textMuted, fontSize: 28 }, setting: { maxWidth: 920, gap: 12 }, settingsLayout: { gap: 14, maxWidth: 980 }, settingsIntro: { gap: 10, padding: 20 }, settingsCard: { gap: 10, padding: 20 }, summaryRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, borderTopWidth: 1, borderColor: colors.border, paddingTop: 12, marginTop: 4 }, summaryLabel: { color: colors.textMuted, fontSize: 12 }, summaryValue: { color: colors.text, fontSize: 12, fontWeight: '600' }, sectionTitle: { color: colors.text, fontSize: 16, fontWeight: '700' }, sectionHelp: { color: colors.textMuted, fontSize: 12, lineHeight: 18, marginTop: 3 }, settingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 16, paddingVertical: 12, borderTopWidth: 1, borderColor: colors.border, marginTop: 6 }, settingCopy: { flex: 1 }, settingLabel: { color: colors.text, fontSize: 14, fontWeight: '700' }, switch: { width: 46, height: 26, borderRadius: 14, padding: 3, justifyContent: 'center', backgroundColor: '#D0D5DD' }, switchOn: { backgroundColor: colors.brand }, switchThumb: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#FFF' }, switchThumbOn: { alignSelf: 'flex-end' }, inlineField: { flexDirection: 'row', alignItems: 'flex-end', gap: 10 }, retentionField: { width: 180 }, unit: { color: colors.textMuted, fontSize: 13, paddingBottom: 12 }, sectionHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }, badge: { color: colors.success, backgroundColor: '#DCFCE7', fontSize: 10, fontWeight: '800', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999 }, policyGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 6 }, policyItem: { minWidth: 130, flex: 1, backgroundColor: colors.canvas, borderRadius: 10, padding: 12 }, policyValue: { color: colors.brand, fontSize: 18, fontWeight: '800' }, policyLabel: { color: colors.textMuted, fontSize: 11, marginTop: 3 }, jsonField: { minHeight: 108, textAlignVertical: 'top' }, updatedNote: { color: colors.textMuted, fontSize: 11, textAlign: 'center', paddingBottom: 10 } });
+const styles = StyleSheet.create({ screen: { gap: 16 }, heading: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12 }, flex: { flex: 1 }, title: { color: colors.text, fontSize: 22, lineHeight: 30, fontWeight: '700' }, subtitle: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginTop: 3 }, metrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, cardTitle: { color: colors.text, fontSize: 15, fontWeight: '700', marginBottom: 8 }, help: { color: colors.textMuted, fontSize: 12, lineHeight: 18 }, formGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, dateGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, dateField: { flex: 1, flexBasis: 180, minWidth: 180 }, userChartFilters: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, filter: { flexGrow: 1, flexBasis: 180, minWidth: 160 }, chartCount: { color: colors.textMuted, fontSize: 11, marginTop: -10 }, analyticsCharts: { flexDirection: 'row', flexWrap: 'wrap', gap: 14 }, fieldHint: { color: colors.textMuted, fontSize: 11, marginTop: -6 }, dialogIntro: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginBottom: 2 }, actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, deadlineSaveActions: { marginTop: 5 }, dialogActions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8, marginTop: 4 }, overlay: { flex: 1, backgroundColor: '#00000066', alignItems: 'center', justifyContent: 'center', padding: 24 }, dialog: { width: '100%', maxWidth: 760, maxHeight: '90%', padding: 22 }, dialogTitle: { color: colors.text, fontSize: 19, fontWeight: '700' }, dialogBody: { gap: 14, marginTop: 16 }, close: { color: colors.textMuted, fontSize: 28 }, setting: { maxWidth: 920, gap: 12 }, settingsLayout: { gap: 10, maxWidth: 980 }, settingsCategoryNav: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, borderBottomWidth: 1, borderColor: colors.border }, settingsCategoryTab: { paddingHorizontal: 11, paddingVertical: 9, borderBottomWidth: 2, borderBottomColor: 'transparent' }, settingsCategoryTabActive: { borderBottomColor: colors.brand }, settingsCategoryText: { color: colors.textMuted, fontSize: 12, fontWeight: '600' }, settingsCategoryTextActive: { color: colors.brand }, settingsIntro: { gap: 7, padding: 14 }, settingsCard: { gap: 7, padding: 14 }, summaryRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, borderTopWidth: 1, borderColor: colors.border, paddingTop: 8, marginTop: 2 }, summaryLabel: { color: colors.textMuted, fontSize: 12 }, summaryValue: { color: colors.text, fontSize: 12, fontWeight: '600' }, sectionTitle: { color: colors.text, fontSize: 16, fontWeight: '700' }, sectionHelp: { color: colors.textMuted, fontSize: 12, lineHeight: 18, marginTop: 2 }, settingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 14, paddingVertical: 8, borderTopWidth: 1, borderColor: colors.border, marginTop: 2 }, deadlineRequestRow: { alignItems: 'flex-start', paddingVertical: 12 }, deadlineRequestContent: { flex: 1, gap: 5 }, deadlineRequestHeader: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 }, deadlineChanges: { gap: 2, marginTop: 3 }, deadlineReason: { gap: 4, padding: 10, marginTop: 5, backgroundColor: colors.canvas, borderRadius: 8 }, deadlineReasonLabel: { color: colors.text, fontSize: 12, fontWeight: '700' }, settingCopy: { flex: 1 }, settingLabel: { color: colors.text, fontSize: 14, fontWeight: '700' }, switch: { width: 42, height: 24, borderRadius: 14, padding: 2, justifyContent: 'center', backgroundColor: '#D0D5DD' }, switchOn: { backgroundColor: colors.brand }, switchThumb: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#FFF' }, switchThumbOn: { alignSelf: 'flex-end' }, inlineField: { flexDirection: 'row', alignItems: 'flex-end', gap: 10 }, retentionField: { width: 180 }, unit: { color: colors.textMuted, fontSize: 13, paddingBottom: 12 }, sectionHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }, badge: { color: colors.success, backgroundColor: '#DCFCE7', fontSize: 10, fontWeight: '800', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999 }, policyGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 6 }, policyItem: { minWidth: 130, flex: 1, backgroundColor: colors.canvas, borderRadius: 10, padding: 12 }, policyValue: { color: colors.brand, fontSize: 18, fontWeight: '800' }, policyLabel: { color: colors.textMuted, fontSize: 11, marginTop: 3 }, jsonField: { minHeight: 108, textAlignVertical: 'top' }, updatedNote: { color: colors.textMuted, fontSize: 11, textAlign: 'center', paddingBottom: 10 } });

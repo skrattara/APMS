@@ -34,6 +34,8 @@ export type SettingsValues = {
   maintenanceMode?: boolean;
   mfaRequired?: boolean;
   autosaveEnabled?: boolean;
+  tablePaginationEnabled?: boolean;
+  failingGradesRed?: boolean;
 };
 
 export async function loadAutosavePreference(userId?: string): Promise<boolean> {
@@ -43,12 +45,32 @@ export async function loadAutosavePreference(userId?: string): Promise<boolean> 
   return data?.gradebook_autosave ?? true;
 }
 
+export async function loadTablePaginationPreference(userId?: string): Promise<boolean> {
+  if (!userId || !supabase) return true;
+  const { data, error } = await supabase.from('profiles').select('table_pagination_enabled').eq('id', userId).maybeSingle();
+  if (error) throw error;
+  return data?.table_pagination_enabled ?? true;
+}
+
+export async function loadFailingGradesRedPreference(userId?: string): Promise<boolean> {
+  if (!userId || !supabase) return true;
+  const { data, error } = await supabase.from('profiles').select('failing_grades_red').eq('id', userId).maybeSingle();
+  if (error) throw error;
+  return data?.failing_grades_red ?? true;
+}
+
 export async function saveSettings(screen: string, user: AuthUser, demoMode: boolean, values: SettingsValues) {
   if (demoMode) return 'Settings simulated with fictional development data; no production record was written.';
   if (!supabase) throw new Error('APMS is not connected. No settings were changed.');
   if (screen === 'settings') {
-    const { error } = await supabase.from('profiles').update({ first_name: values.first.trim(), last_name: values.last.trim(), phone: values.phone.trim() || null, ...(values.autosaveEnabled === undefined ? {} : { gradebook_autosave: values.autosaveEnabled }) }).eq('id', user.id);
+    const { data: { user: authenticatedUser }, error: authError } = await supabase.auth.getUser();
+    if (authError) throw authError;
+    if (!authenticatedUser || authenticatedUser.id !== user.id) {
+      throw new Error('Your signed-in account does not match the profile being saved. Sign in again and retry.');
+    }
+    const { data, error } = await supabase.from('profiles').update({ first_name: values.first.trim(), last_name: values.last.trim(), phone: values.phone.trim() || null, ...(values.autosaveEnabled === undefined ? {} : { gradebook_autosave: values.autosaveEnabled }), ...(values.tablePaginationEnabled === undefined ? {} : { table_pagination_enabled: values.tablePaginationEnabled }), ...(values.failingGradesRed === undefined ? {} : { failing_grades_red: values.failingGradesRed }) }).eq('id', authenticatedUser.id).select('id').maybeSingle();
     if (error) throw error;
+    if (!data) throw new Error('Your profile was not updated. Refresh your session and try again.');
     return 'Profile settings saved.';
   }
   if (screen === 'notifications') {

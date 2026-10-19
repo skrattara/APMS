@@ -16,7 +16,7 @@ import {
 import { useAuth } from "@/auth/AuthProvider";
 import { NAVIGATION, ROLE_LABELS } from "@/config/navigation";
 import { AppIcon } from "@/components/Icon";
-import { Button, Card } from "@/components/ui";
+import { Button, Card, TablePaginationProvider } from "@/components/ui";
 import { useNotifications } from "@/services/notifications";
 import { colors, shadow } from "@/theme/tokens";
 
@@ -37,9 +37,10 @@ export function AppShell({
   hidePageHeader?: boolean;
 }>) {
   const router = useRouter();
-  const { user, signOut } = useAuth();
+  const { user, demoMode, signOut } = useAuth();
   const { width } = useWindowDimensions();
   const compact = width < 800;
+  const narrow = width < 560;
   const [menuOpen, setMenuOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
@@ -328,9 +329,10 @@ export function AppShell({
             </Pressable>
           </Card>
         ) : null}
+        <TablePaginationProvider userId={user?.id} demoMode={demoMode}>
         <ScrollView
           style={styles.content}
-          contentContainerStyle={styles.contentInner}
+          contentContainerStyle={[styles.contentInner, narrow && styles.contentInnerNarrow, !compact && width < 1100 && styles.contentInnerMedium]}
         >
           {!hidePageHeader ? (
             <View style={styles.pageHeader}>
@@ -351,6 +353,7 @@ export function AppShell({
           ) : null}
           {children}
         </ScrollView>
+        </TablePaginationProvider>
       </View>
     </View>
   );
@@ -363,7 +366,7 @@ const styles = StyleSheet.create({
     backgroundColor: colors.canvas,
     minHeight: Platform.OS === "web" ? ("100vh" as never) : undefined,
   },
-  sidebar: { width: 208, backgroundColor: "#4A1E15", paddingTop: 16 },
+  sidebar: { width: 216, backgroundColor: "#351B17", paddingTop: 14 },
   sidebarCollapsed: { width: 68 },
   mobileSidebar: { height: "100%", ...shadow },
   drawerOverlay: { flex: 1, backgroundColor: "#00000055" },
@@ -401,7 +404,7 @@ const styles = StyleSheet.create({
   nav: { paddingHorizontal: 8, paddingVertical: 4, gap: 8 },
   sidebarSpacer: { flex: 1 },
   navItem: {
-    minHeight: 36,
+    minHeight: 34,
     flexDirection: "row",
     alignItems: "center",
     gap: 10,
@@ -477,8 +480,8 @@ const styles = StyleSheet.create({
   },
   aiPillText: { color: "#C76518", fontSize: 11 },
   iconButton: {
-    width: 36,
-    height: 36,
+    width: 34,
+    height: 34,
     alignItems: "center",
     justifyContent: "center",
     borderRadius: 10,
@@ -597,11 +600,13 @@ const styles = StyleSheet.create({
     width: "100%",
     maxWidth: 1500,
     alignSelf: "center",
-    paddingHorizontal: 19,
-    paddingTop: 20,
-    paddingBottom: 2,
-    gap: 20,
+    paddingHorizontal: 22,
+    paddingTop: 18,
+    paddingBottom: 20,
+    gap: 16,
   },
+  contentInnerMedium: { paddingHorizontal: 16 },
+  contentInnerNarrow: { paddingHorizontal: 12, paddingTop: 14, paddingBottom: 16, gap: 13 },
   pageHeader: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -612,9 +617,9 @@ const styles = StyleSheet.create({
   pageTitleRow: { flexDirection: "row", alignItems: "center", gap: 8 },
   pageTitle: {
     color: colors.text,
-    fontSize: 20,
-    lineHeight: 28,
-    fontWeight: "500",
+    fontSize: 21,
+    lineHeight: 27,
+    fontWeight: "600",
   },
   monitoringPill: {
     height: 19,

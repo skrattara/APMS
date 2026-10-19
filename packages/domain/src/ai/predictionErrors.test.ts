@@ -3,9 +3,18 @@ import {
   forecastError,
   forecastRequestError,
   formatForecastError,
+  SavedForecastResponseError,
 } from '../../../../apps/mobile/src/services/predictionErrors';
 
 describe('safe forecast errors', () => {
+  it('identifies a valid saved run whose client response could not be verified', () => {
+    const error = new SavedForecastResponseError('b8b7f36e-4346-4be0-bd32-1df42dd2d643');
+    const message = formatForecastError(error);
+    expect(message).toContain('forecast run was saved');
+    expect(message).toContain('Refresh saved predictions');
+    expect(message).not.toContain(error.savedRunId);
+  });
+
   it('explains the local no-eligible-students precondition', () => {
     expect(formatForecastError(forecastError('no_eligible_students')))
       .toContain('enable Recent scores to forecast before a final standing is available');

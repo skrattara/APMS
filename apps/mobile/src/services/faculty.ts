@@ -20,7 +20,9 @@ import { DEFAULT_EVALUATION_SYSTEM, evaluateStudentPerformanceDetailed, removeSt
 import * as XLSX from 'xlsx';
 
 import { supabase } from './supabase';
-import { forecastError, forecastRequestError } from './predictionErrors';
+import { forecastError, forecastRequestError, SavedForecastResponseError } from './predictionErrors';
+import { projectPredictionValuesToAIFactors } from './predictionEvaluation';
+import { formatImportedStudentId, normalizeStudentId } from '@/utils/studentId';
 
 const CLASS_WORKSPACE_PAGE_SIZE = 1000;
 async function fetchAllPages<T>(fetchPage: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown | null }>) {
@@ -158,6 +160,7 @@ export type FeedbackRecord = {
   category: string;
   status: 'draft' | 'ready' | 'sent' | 'published' | 'failed' | 'archived';
   createdAt: string;
+  updatedAt: string;
 };
 
 export type ClassWorkspace = {
@@ -508,7 +511,7 @@ export function normalizeRosterRows(rows: Record<string, string>[]) {
     const nameParts = fullName.split(/\s+/).filter(Boolean);
     return {
       ...row,
-      institutional_id: get('institutional_id'),
+      institutional_id: formatImportedStudentId(get('institutional_id')),
       first_name: get('first_name') || nameParts.shift() || '',
       last_name: get('last_name') || nameParts.join(' '),
       email: get('email'),
@@ -535,7 +538,7 @@ function validateRosterRows(rows: Record<string, string>[]) {
     if (!section) errors.push('section is required');
     return {
       errors,
-      duplicateKey: institutionalId?.toLowerCase(),
+      duplicateKey: institutionalId ? normalizeStudentId(institutionalId) : undefined,
       value: errors.length ? undefined : { institutionalId, firstName, lastName, email, yearLevel, section } as RosterCsvValue,
     };
   });
@@ -549,7 +552,9 @@ export function previewRosterExcel(fileData: ArrayBuffer) {
   const workbook = XLSX.read(fileData, { type: 'array', cellDates: false });
   const sheet = workbook.Sheets[workbook.SheetNames[0] ?? ''];
   if (!sheet) throw new Error('Excel workbook must contain at least one worksheet.');
-  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' }).map((row) =>
+  const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' }).filter((row) =>
+    Object.values(row).some((value) => String(value ?? '').trim().length > 0),
+  ).map((row) =>
     Object.fromEntries(Object.entries(row).map(([key, value]) => [key.trim().toLowerCase(), String(value ?? '').trim()])),
   );
   if (!rows.length) throw new Error('The first Excel worksheet does not contain any student rows.');
@@ -704,7 +709,7 @@ async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSy
     includeAttendance && sessionIds.length ? fetchAllForIds(sessionIds, (ids, from, to) => client.from('attendance_records').select('attendance_session_id,enrollment_id,status').in('attendance_session_id', ids).order('attendance_session_id').order('enrollment_id').range(from, to), 25) : Promise.resolve({ data: [], error: null }),
     includeEvaluations && enrollmentIds.length ? fetchAllForIds(enrollmentIds, (ids, from, to) => client.from('performance_evaluations').select('enrollment_id,score,risk_level,explanation').in('enrollment_id', ids).order('enrollment_id').range(from, to)) : Promise.resolve({ data: [], error: null }),
     includeEvaluations && enrollmentIds.length ? fetchRecentForIds(enrollmentIds, (ids) => client.from('performance_predictions').select('enrollment_id,predicted_score,risk_level,trend,confidence,explanation,created_at,prediction_run:prediction_runs(model_version:model_versions(provider,name,version))').in('enrollment_id', ids).order('created_at', { ascending: false }).order('id', { ascending: false }).range(0, 999)) : Promise.resolve({ data: [], error: null }),
-    includeFeedback && enrollmentIds.length ? fetchAllForIds(enrollmentIds, (ids, from, to) => client.from('feedback_records').select('id,enrollment_id,body,category,status,created_at').in('enrollment_id', ids).order('created_at', { ascending: false }).order('id', { ascending: false }).range(from, to)) : Promise.resolve({ data: [], error: null }),
+    includeFeedback && enrollmentIds.length ? fetchAllForIds(enrollmentIds, (ids, from, to) => client.from('feedback_records').select('id,enrollment_id,body,category,status,created_at,updated_at').in('enrollment_id', ids).order('updated_at', { ascending: false }).order('id', { ascending: false }).range(from, to)) : Promise.resolve({ data: [], error: null }),
   ]);
   const secondaryError = results.error ?? attendance.error ?? evaluations.error ?? predictions.error ?? feedback.error;
   if (secondaryError) throw secondaryError;
@@ -744,6 +749,7 @@ async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSy
       category: row.category,
       status: row.status as FeedbackRecord['status'],
       createdAt: row.created_at,
+      updatedAt: row.updated_at ?? row.created_at,
     });
     feedbackMap[row.enrollment_id] = items;
   }
@@ -1152,6 +1158,7 @@ export async function runAiPredictions(classId: string, gradingSystem: GradingDe
   if (!validateEvaluationSystem(evaluationCriteria).valid) throw forecastError('invalid_criteria');
   const rawPredictions: { input: PredictionInput; predictedStanding: number; riskProbability: number | null; aiRiskLevel: string | null; trend: PredictionResult['trend']; factors: string[]; provider: string; model: string; modelVersion: string; evaluationScores?: EvaluationValue; assessmentPredictions?: PredictionResult['assessmentPredictions']; dataBasis: string }[] = [];
   let savedRunId = '';
+  try {
   {
     const { data, error } = await connected().functions.invoke('apms-predictions', {
       body: {
@@ -1171,8 +1178,9 @@ export async function runAiPredictions(classId: string, gradingSystem: GradingDe
       throw forecastRequestError(functionError.context);
     }
     const payload = data as { run_id?: string; predictions?: any[]; provider?: string; model?: string; model_version?: string; data_basis?: string };
-    if (!payload.run_id || !['custom', 'gemini', 'openai'].includes(payload.provider ?? '') || !payload.model || !payload.model_version) throw new Error('Prediction response is missing saved-run or AI provider provenance.');
+    if (typeof payload?.run_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(payload.run_id)) throw new Error('Prediction response is missing saved-run provenance.');
     savedRunId = payload.run_id;
+    if (!['custom', 'gemini', 'openai'].includes(payload.provider ?? '') || !payload.model || !payload.model_version) throw new Error('Prediction response is missing AI provider provenance.');
     if (!Array.isArray(payload.predictions) || payload.predictions.length !== inputs.length) throw new Error('Prediction response did not include exactly one result per student.');
     const resultByEnrollment = new Map<string, any>();
     for (const result of payload.predictions) {
@@ -1227,19 +1235,26 @@ export async function runAiPredictions(classId: string, gradingSystem: GradingDe
       risk_probability: riskProbability,
       // Risk probability estimates an adverse outcome; it is not prediction confidence.
       model_confidence: null,
-      prediction_available: true,
       trend: prediction.trend,
       recent_trend: prediction.trend,
       ai_risk_level: prediction.aiRiskLevel,
-      prediction_age_hours: 0,
       ai_factor_count: prediction.factors.length,
       data_basis: prediction.dataBasis,
       ...(prediction.evaluationScores ?? {}),
     };
-    const configuredModelValues = Object.fromEntries(Object.entries(modelValues).filter(([key]) => evaluationCriteria.factors.some((factor) => factor.source === key || factor.id === key)));
-    const evaluationValidation = validateAiEvaluationScores(evaluationCriteria, configuredModelValues);
+    const scoreIds = Object.keys(prediction.evaluationScores ?? {});
+    const aiOwnedModelValues = projectPredictionValuesToAIFactors(evaluationCriteria, modelValues, scoreIds);
+    if (!aiOwnedModelValues) throw new Error('The prediction response includes an unknown or non-AI evaluation factor.');
+    const evaluationValidation = validateAiEvaluationScores(evaluationCriteria, aiOwnedModelValues);
     if (!evaluationValidation.valid) throw new Error(`AI evaluation values do not match the active evaluation criteria: ${evaluationValidation.errors.join(' ')}`);
-    const values: EvaluationValue = { ...prediction.input.evaluationValues, ...evaluationValidation.values };
+    // These two status fields are computed locally after a successful response;
+    // they are evaluation context, not values returned by the model.
+    const values: EvaluationValue = {
+      ...prediction.input.evaluationValues,
+      prediction_available: true,
+      prediction_age_hours: 0,
+      ...evaluationValidation.values,
+    };
     const evaluation = evaluateStudentPerformanceDetailed(evaluationCriteria, values);
     return {
       enrollmentId: prediction.input.enrollmentId,
@@ -1257,6 +1272,10 @@ export async function runAiPredictions(classId: string, gradingSystem: GradingDe
     };
   });
   return { runId: savedRunId, predictions };
+  } catch (error) {
+    if (savedRunId) throw new SavedForecastResponseError(savedRunId);
+    throw error;
+  }
 }
 
 export async function saveFacultyFeedback(enrollmentId: string, body: string, category: string, status: 'draft' | 'published', feedbackId?: string) {
@@ -1293,9 +1312,9 @@ export async function sendFacultyFeedbackEmail(enrollmentId: string, body: strin
   return result;
 }
 
-export async function generateFacultyFeedbackDraft(classId: string, enrollmentId: string, records: Record<string, unknown>) {
+export async function generateFacultyFeedbackDraft(classId: string, enrollmentId: string, records: Record<string, unknown>, styleInstructions?: string) {
   const { data, error } = await connected().functions.invoke('apms-feedback-draft', {
-    body: { class_id: classId, enrollment_id: enrollmentId, records },
+    body: { class_id: classId, enrollment_id: enrollmentId, records, style_instructions: styleInstructions?.trim() || undefined },
   });
   if (error) {
     let detail = '';
@@ -1316,7 +1335,23 @@ export async function generateFacultyFeedbackDraft(classId: string, enrollmentId
   }
   const draft = (data as { body?: unknown } | null)?.body;
   if (typeof draft !== 'string' || !draft.trim()) throw new Error('Gemini returned an empty feedback draft.');
-  return draft.trim();
+  const safeDraft = draft.trim()
+    .replace(new RegExp(enrollmentId.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '')
+    .replace(/\brecord_[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, '')
+    .replace(/\b[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b/gi, '')
+    .replace(/(?<!\d)\d{2}[- ]\d{4}[- ]\d{6}(?!\d)/g, '')
+    .replace(/(?<!\d)\d{12}(?!\d)/g, '')
+    .replace(/(?<!\d)5\d{10}(?!\d)/g, '')
+    .replace(/\b(?:this|the)\s+draft(?:ed)?\s+(?:feedback|message|response)\b[^.!?\n]*[.!?]?/gi, '')
+    .replace(/\b(?:this|the\s+response|the\s+text)\s+(?:is|was)\s+(?:an?\s+)?draft\b[^.!?\n]*[.!?]?/gi, '')
+    .replace(/\b(?:the\s+)?instructor\s+will\s+(?:review|edit|publish)[^.!?\n]*[.!?]?/gi, '')
+    .replace(/\bplease\s+note\s+this\s+is\s+not\s+an\s+official\s+SIS\s+grade[^.!?\n]*[.!?]?/gi, '')
+    .replace(/\[(?:reference|identifier|student ID) removed\]/gi, '')
+    .replace(/\b(?:based on|for)\s+(?:record|reference|student|enrollment)(?:\s+(?:ID|reference|ref))?\b/gi, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .replace(/\s+([.,;:!?])/g, '$1')
+    .trim();
+  return safeDraft;
 }
 
 export function exportClassCsv(workspace: ClassWorkspace) {

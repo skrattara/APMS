@@ -1,5 +1,5 @@
 import { getErrorMessage } from '@/services/errors';
-import { forecastError, formatForecastError } from '@/services/predictionErrors';
+import { forecastError, formatForecastError, isSavedForecastResponseError } from '@/services/predictionErrors';
 import { buildRecordedAssessmentColumns, formatForecastAggregate, formatRecordedAssessmentScore, isForecastOutputEnabled } from '@/services/forecastGradeColumns';
 import { buildForecastEvidence } from '@/services/forecastEligibility';
 import { planPredictionRequestBatches, predictionBatchItemLimit } from '@/services/predictionBatching';
@@ -11,7 +11,7 @@ import * as DocumentPicker from 'expo-document-picker';
 import { useAuth } from '@/auth/AuthProvider';
 import { AppIcon } from '@/components/Icon';
 import { supabase } from '@/services/supabase';
-import { Badge, Button, Card, ConfirmDialog, DataTable, Field, MetricCard, PageState, RangeSlider, RefreshIndicator, SearchFilter, SelectField, Tabs, useToast } from '@/components/ui';
+import { Badge, Button, Card, ConfirmDialog, DataTable, DateField, Field, MetricCard, PageState, RangeSlider, RefreshIndicator, SearchFilter, SelectField, TablePageSizeSelect, Tabs, useTablePaginationPreference, useToast } from '@/components/ui';
 import { formatStudentId, normalizeStudentId } from '@/utils/studentId';
 import { isValidStudentId } from '@/utils/studentId';
 import { useStudentIdValidation, useYearLevels } from '@/hooks/useAcademicOptions';
@@ -329,6 +329,7 @@ export function FacultyLivePortalContent({ screen }: { screen: string }) {
   const predictionRunLock = useRef(false);
   const mounted = useRef(true);
   const selectedClassRef = useRef(state.selectedClassId);
+  const [showAiAssessmentPredictions, setShowAiAssessmentPredictions] = useState(false);
   useEffect(() => { mounted.current = true; return () => { mounted.current = false; }; }, []);
   useEffect(() => { selectedClassRef.current = state.selectedClassId; setPredictionRunError(null); }, [state.selectedClassId]);
   const runClassPredictions = useCallback(async () => {
@@ -366,17 +367,33 @@ export function FacultyLivePortalContent({ screen }: { screen: string }) {
         invalidateFacultyClassWorkspaceCache(state.userId, classId);
       }
       if (mounted.current) {
+        if (selectedClassRef.current === classId
+          && (screen === 'gradebook' || screen === 'records')
+          && evaluationDefinition.ai?.outputFields?.includes('assessment_score_predictions')) {
+          setShowAiAssessmentPredictions(true);
+        }
         state.refresh();
         toast.show(`Saved advisory forecasts for all ${completed} eligible students in ${classLabel}. Each batch is a separate run.`);
       }
     } catch (cause) {
-      const message = completed > 0
+      const savedButUnverified = isSavedForecastResponseError(cause);
+      const message = savedButUnverified
+        ? `${completed > 0 ? `Confirmed forecasts were saved for ${completed} earlier students in ${classLabel}. ` : `${classLabel}: `}${formatForecastError(cause)}`
+        : completed > 0
         ? `Confirmed forecasts saved for ${completed} of ${requested} eligible students in ${classLabel}. The next request failed; later batches were not sent. Check saved predictions before retrying in case the interrupted request was saved. ${formatForecastError(cause)}`
         : `${classLabel}: ${formatForecastError(cause)}`;
       invalidateFacultyClassWorkspaceCache(state.userId, classId);
       if (mounted.current && selectedClassRef.current === classId) setPredictionRunError(message);
-      if (completed > 0) {
-        if (mounted.current) { state.refresh(); toast.show(message); }
+      if (completed > 0 || savedButUnverified) {
+        if (mounted.current) {
+          if (completed > 0 && selectedClassRef.current === classId
+            && (screen === 'gradebook' || screen === 'records')) {
+            const evaluationDefinition = state.workspace.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
+            if (evaluationDefinition.ai?.outputFields?.includes('assessment_score_predictions')) setShowAiAssessmentPredictions(true);
+          }
+          state.refresh();
+          toast.show(message);
+        }
       } else {
         if (mounted.current) toast.show(message);
       }
@@ -385,8 +402,7 @@ export function FacultyLivePortalContent({ screen }: { screen: string }) {
       predictionRunLock.current = false;
       if (mounted.current) setPredictionRunning(false);
     }
-  }, [state.classes, state.refresh, state.selectedClassId, state.workspace, toast]);
-  const [showAiAssessmentPredictions, setShowAiAssessmentPredictions] = useState(false);
+  }, [screen, state.classes, state.refresh, state.selectedClassId, state.workspace, toast]);
   const aiPredictionOverlays = useMemo(() => {
     if (!showAiAssessmentPredictions || (screen !== 'gradebook' && screen !== 'records')) return [];
     const gradingDefinition = state.workspace.criteria?.gradingSystemDefinition ?? state.workspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
@@ -530,6 +546,7 @@ type DashboardOverviewRecord = {
   risk: string;
   classification: string;
   severity: string;
+  riskColor?: string;
   calculated: ReturnType<typeof calculateEnrollmentGrade>;
   attendance: number | null;
   category: string;
@@ -662,6 +679,7 @@ function useDashboardOverviewRecords(workspace: ClassWorkspace, definition: Eval
           risk: evaluationRiskValue(definition, evaluation.result),
           classification: evaluation.calculated.remarks,
           severity: evaluation.result.severity,
+          riskColor: evaluation.definition.levels.find((level) => level.id === evaluation.result.matchedLevelId)?.color,
           calculated: evaluation.calculated,
           attendance: evaluation.values.attendance as number | null,
           category: student.section || 'Class',
@@ -780,7 +798,7 @@ function DashboardOverviewModule(props: StateProps) {
   const atRisk = useMemo(() => filters.filtered.filter((record) => record.severity !== 'low').flatMap((record) => {
     const student = studentsById.get(record.id);
     const forecast = student ? props.workspace.evaluations[student.enrollmentId] : undefined;
-    return student ? [{ student, calculated: record.calculated, attendance: record.attendance, severity: record.severity, forecast }] : [];
+    return student ? [{ student, calculated: record.calculated, attendance: record.attendance, severity: record.severity, riskColor: record.riskColor, forecast }] : [];
   }), [filters.filtered, props.workspace.evaluations, studentsById]);
   const standings = useMemo(() => filters.filtered.map((item) => item.score), [filters.filtered]);
   const average = useMemo(() => standings.length ? standings.reduce((sum, value) => sum + value, 0) / standings.length : 0, [standings]);
@@ -810,9 +828,9 @@ function DashboardOverviewModule(props: StateProps) {
       {filters.controls}
       <View style={styles.analyticsCharts}><Suspense fallback={<Card><Text style={styles.cardTitle}>Preparing dashboard charts…</Text></Card>}><LazyVisualizationPanel title="Class score trend" description="Average assessment percentage in the selected class." data={trend} type="line" suffix="%" controls={<Tabs values={['day', 'week', 'group', 'assessment instance']} selected={trendGrouping} onSelect={(value) => setTrendGrouping(value as TrendGrouping)} />} /><LazyVisualizationPanel title="Risk distribution" description="Current advisory risk across the class roster." data={riskCounts} type="pie" /></Suspense></View>
       <Card><Text style={styles.cardTitle}>Students Requiring Attention</Text>{atRisk.length ? <>
-      <DataTable columns={['Student', 'P3 Effort', 'Mastery', 'Final', 'Attendance', 'Applied risk', 'AI risk probability', 'Reason']} rows={visibleAttentionRows.map(({ student, calculated, attendance, severity, forecast }) => {
-      return [student.name, calculated.periods.p3 == null ? 'Missing' : `${calculated.periods.p3.toFixed(1)}%`, calculated.components.mg == null ? 'Missing' : `${calculated.components.mg.toFixed(1)}%`, calculated.finalGrade == null ? 'Incomplete' : `${calculated.finalGrade.toFixed(1)}%`, attendance == null ? 'No sessions' : `${attendance.toFixed(0)}%`, `${severity[0].toUpperCase()}${severity.slice(1)} Risk`, forecast?.riskProbability == null ? 'Unavailable' : `${(forecast.riskProbability * 100).toFixed(1)}%`, calculated.remarks === 'failing' ? 'Below SWUNEXT passing rule' : attendance != null && attendance < 80 ? 'Attendance pattern' : 'Missing assessments'];
-      })} />
+      <DataTable columns={['Student', 'P3 Effort', 'Mastery', 'Final', 'Attendance', 'Applied risk', 'AI risk probability', 'Reason']} rows={visibleAttentionRows.map(({ student, calculated, attendance, severity, riskColor, forecast }) => {
+      return [student.name, calculated.periods.p3 == null ? 'Missing' : `${calculated.periods.p3.toFixed(1)}%`, calculated.components.mg == null ? 'Missing' : `${calculated.components.mg.toFixed(1)}%`, calculated.finalGrade == null ? 'Incomplete' : `${calculated.finalGrade.toFixed(1)}%`, attendance == null ? 'No sessions' : `${attendance.toFixed(0)}%`, <Badge color={riskColor ?? '#64748B'}>{`${severity[0].toUpperCase()}${severity.slice(1)} Risk`}</Badge>, forecast?.riskProbability == null ? 'Unavailable' : `${(forecast.riskProbability * 100).toFixed(1)}%`, calculated.remarks === 'failing' ? 'Below SWUNEXT passing rule' : attendance != null && attendance < 80 ? 'Attendance pattern' : 'Missing assessments'];
+      })} columnFlex={[1.1, 0.3, 0.3, 0.3, 0.45, 0.5, 0.2, 1.7]} />
       {attentionPageCount > 1 ? <View style={styles.pagination}><Button label="Previous" variant="secondary" disabled={visibleAttentionPage === 0} onPress={() => setAttentionPage(visibleAttentionPage - 1)} /><Text style={styles.paginationText}>Showing {visibleAttentionPage * attentionPageSize + 1}–{Math.min((visibleAttentionPage + 1) * attentionPageSize, atRisk.length)} of {atRisk.length} students</Text><Button label="Next" variant="secondary" disabled={visibleAttentionPage >= attentionPageCount - 1} onPress={() => setAttentionPage(visibleAttentionPage + 1)} /></View> : null}
       </> : <PageState kind="empty" title="No current alerts" message="Students will appear here when scores, missing work, attendance, or AI indicators require attention." />}</Card>
       </View> : null}
@@ -918,8 +936,7 @@ function Classes(props: StateProps) {
         }
       />
 
-      <Card>
-        {props.classes.length ? (
+      {props.classes.length ? (
           <DataTable
             columns={['Subject', 'Title', 'Section', 'Term', 'Lecture units', 'Laboratory units', 'Students', 'Status']}
             rows={props.classes.map((item) => [
@@ -932,6 +949,8 @@ function Classes(props: StateProps) {
               String(item.studentCount),
               'Active',
             ])}
+            columnFlex={[0.5, 2.4, 0, 0.5, 0, 0, 0.4, 0]}
+            widthMode="container"
           />
         ) : (
           <PageState
@@ -941,7 +960,6 @@ function Classes(props: StateProps) {
             action={<Button label="Request Class" onPress={() => setOpen(true)} />}
           />
         )}
-      </Card>
 
       {classRequests.length ? (
         <Card>
@@ -1040,6 +1058,7 @@ function Classes(props: StateProps) {
 
 function Students(props: StateProps) {
   const validateStudentId = useStudentIdValidation();
+  const { enabled: tablePaginationEnabled } = useTablePaginationPreference();
   const [query, setQuery] = useState('');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
   const [open, setOpen] = useState(false);
@@ -1055,6 +1074,7 @@ function Students(props: StateProps) {
   const [deleteSelectedOpen, setDeleteSelectedOpen] = useState(false);
   const [aiPromptOpen, setAiPromptOpen] = useState(false);
   const [page, setPage] = useState(1);
+  const [selectedPageSize, setSelectedPageSize] = useState(10);
   const [rosterFile, setRosterFile] = useState<{ name: string; kind: 'csv' | 'excel'; text?: string; data?: ArrayBuffer } | null>(null);
   const preview = useMemo(() => {
     if (!rosterFile) return [];
@@ -1077,10 +1097,11 @@ function Students(props: StateProps) {
         return left.name.localeCompare(right.name) * direction;
       });
   }, [props.workspace.students, query, sortOrder]);
-  const pageSize = 10;
+  const pageSize = tablePaginationEnabled ? selectedPageSize : Math.max(1, filtered.length);
   const pageCount = Math.max(1, Math.ceil(filtered.length / pageSize));
   const pageStudents = filtered.slice((page - 1) * pageSize, page * pageSize);
-  useEffect(() => { setPage(1); }, [query, sortOrder, props.selectedClassId, props.workspace.students.length]);
+  useEffect(() => { setPage(1); }, [query, sortOrder, props.selectedClassId, props.workspace.students.length, tablePaginationEnabled]);
+  useEffect(() => { setSelectedEnrollmentIds([]); }, [props.selectedClassId]);
 
   const resetForm = () => {
     setForm(emptyStudentForm);
@@ -1141,10 +1162,14 @@ function Students(props: StateProps) {
   };
 
   const toggleStudentSelection = (enrollmentId: string) => setSelectedEnrollmentIds((current) => current.includes(enrollmentId) ? current.filter((id) => id !== enrollmentId) : [...current, enrollmentId]);
+  const pageSelectionState = pageStudents.length && pageStudents.every((student) => selectedEnrollmentIds.includes(student.enrollmentId))
+    ? 'all'
+    : pageStudents.some((student) => selectedEnrollmentIds.includes(student.enrollmentId)) ? 'some' : 'none';
   const selectVisibleStudents = () => setSelectedEnrollmentIds((current) => {
     const visibleIds = pageStudents.map((student) => student.enrollmentId);
     return visibleIds.every((id) => current.includes(id)) ? current.filter((id) => !visibleIds.includes(id)) : Array.from(new Set([...current, ...visibleIds]));
   });
+  const selectAllFilteredStudents = () => setSelectedEnrollmentIds((current) => Array.from(new Set([...current, ...filtered.map((student) => student.enrollmentId)])));
   const deleteSelected = async () => {
     if (!props.selectedClassId || !selectedEnrollmentIds.length) return;
     setSaving(true);
@@ -1166,9 +1191,16 @@ function Students(props: StateProps) {
       const workbook = XLSX.utils.book_new();
       const worksheet = XLSX.utils.aoa_to_sheet([
         ['institutional_id', 'first_name', 'last_name', 'email', 'year_level', 'section'],
-        ['2024-0001', 'Juan', 'Dela Cruz', 'juan.delacruz@phinmaed.com', 3, 'BSIT-3A'],
-        ['2024-0002', 'Maria', 'Santos', 'maria.santos@phinmaed.com', 3, 'BSIT-3A'],
+        [52324123456, 'Juan', 'Dela Cruz', 'juan.delacruz@phinmaed.com', 3, 'BSIT-3A'],
+        [52324123457, 'Maria', 'Santos', 'maria.santos@phinmaed.com', 3, 'BSIT-3A'],
       ]);
+      const institutionalIdFormat = '00-0000-000000';
+      worksheet.A2.z = institutionalIdFormat;
+      worksheet.A3.z = institutionalIdFormat;
+      for (let row = 4; row <= 1001; row += 1) {
+        worksheet[`A${row}`] = { t: 's', v: '', z: institutionalIdFormat };
+      }
+      worksheet['!ref'] = 'A1:F1001';
       XLSX.utils.book_append_sheet(workbook, worksheet, 'Roster');
       const output = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
       const url = URL.createObjectURL(new Blob([output], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
@@ -1254,7 +1286,6 @@ Requirements:
           <View style={styles.actions}>
             <Button label="Download Excel template" variant="ghost" onPress={() => void downloadRosterTemplate()} />
             <Button label="Import roster" variant="secondary" onPress={() => setCsvOpen(true)} />
-            <Button label={pageStudents.length && pageStudents.every((student) => selectedEnrollmentIds.includes(student.enrollmentId)) ? 'Clear page' : 'Select page'} variant="ghost" disabled={!pageStudents.length} onPress={selectVisibleStudents} />
             <Button label={selectedEnrollmentIds.length ? `Remove selected (${selectedEnrollmentIds.length})` : 'Remove selected'} variant="danger" disabled={!selectedEnrollmentIds.length} onPress={() => setDeleteSelectedOpen(true)} />
             <Button label="Add student" onPress={openAdd} />
           </View>
@@ -1271,11 +1302,17 @@ Requirements:
           containerStyle={styles.sortField}
         />
       </View>
-      <Card>
-        {filtered.length ? (
+      <View style={styles.rosterSelectionBar}>
+        <Text style={styles.rosterSelectionCount}>{selectedEnrollmentIds.length} selected</Text>
+        <View style={styles.rosterSelectionActions}>
+          <Button label={`Select all${filtered.length ? ` (${filtered.length})` : ''}`} variant="ghost" disabled={!filtered.length || filtered.every((student) => selectedEnrollmentIds.includes(student.enrollmentId))} onPress={selectAllFilteredStudents} />
+          <Button label="Clear all" variant="ghost" disabled={!selectedEnrollmentIds.length} onPress={() => setSelectedEnrollmentIds([])} />
+        </View>
+      </View>
+      {filtered.length ? (
           <>
           <DataTable
-            columns={['Select', 'Student ID', 'Name', 'Email', 'Program', 'Year', 'Edit', 'Status']}
+            columns={['Select', 'Student ID', 'Name', 'Email', 'Program', 'Year', 'Status', 'Edit']}
             rows={pageStudents.map((student) => [
               <Pressable key={`select-${student.enrollmentId}`} accessibilityRole="checkbox" accessibilityState={{ checked: selectedEnrollmentIds.includes(student.enrollmentId) }} accessibilityLabel={`Select ${student.name}`} onPress={() => toggleStudentSelection(student.enrollmentId)} style={[styles.rosterCheckbox, selectedEnrollmentIds.includes(student.enrollmentId) && styles.rosterCheckboxSelected]}><Text style={styles.rosterCheckboxMark}>{selectedEnrollmentIds.includes(student.enrollmentId) ? '✓' : ''}</Text></Pressable>,
               student.institutionalId,
@@ -1283,16 +1320,24 @@ Requirements:
               student.email,
               student.program,
               String(student.yearLevel),
-              <Button key={`edit-${student.enrollmentId}`} label="Edit" variant="secondary" onPress={() => openEdit(student)} />,
               'Active',
+              <Button key={`edit-${student.enrollmentId}`} label="Edit" variant="secondary" onPress={() => openEdit(student)} />,
             ])}
+            columnWidths={[46, 145, 190, 250, 112, 80, 96, 104]}
+            columnFlex={[0, 0, 1.2, 1.8, 0, 0, 0, 0]}
+            columnHeaderContent={[
+              <Pressable accessibilityRole="checkbox" accessibilityLabel="Select all students on this page" accessibilityState={{ checked: pageSelectionState === 'all' }} accessibilityHint={pageSelectionState === 'some' ? 'Some students on this page are selected.' : undefined} onPress={selectVisibleStudents} style={[styles.rosterCheckbox, pageSelectionState === 'all' && styles.rosterCheckboxSelected]}>
+                <Text style={styles.rosterCheckboxMark}>{pageSelectionState === 'all' ? '✓' : pageSelectionState === 'some' ? '−' : ''}</Text>
+              </Pressable>,
+            ]}
+            paginationEnabled={false}
+            widthMode="container"
           />
-          {filtered.length > pageSize ? <View style={styles.pagination}><Button label="Previous" variant="secondary" disabled={page <= 1} onPress={() => setPage((current) => Math.max(1, current - 1))} /><Text style={styles.paginationText}>Page {page} of {pageCount} · {filtered.length} students</Text><Button label="Next" variant="secondary" disabled={page >= pageCount} onPress={() => setPage((current) => Math.min(pageCount, current + 1))} /></View> : null}
+          {tablePaginationEnabled && filtered.length ? <View style={styles.pagination}><Button label="Previous" variant="secondary" disabled={page <= 1} onPress={() => setPage((current) => Math.max(1, current - 1))} /><Text style={styles.paginationText}>Page {page} of {pageCount} · {filtered.length} students</Text><TablePageSizeSelect value={selectedPageSize} onChange={(value) => { setSelectedPageSize(value); setPage(1); }} /><Button label="Next" variant="secondary" disabled={page >= pageCount} onPress={() => setPage((current) => Math.min(pageCount, current + 1))} /></View> : null}
           </>
         ) : (
           <PageState kind="empty" title="No students in this class" message="Use Add student or Import roster to populate the selected class roster." />
         )}
-      </Card>
       <Dialog visible={open} title="Add student to class" onClose={() => { setOpen(false); resetForm(); }}>
         <SelectField label="Program" value={programId} options={props.references.programs.map((item) => ({ label: `${item.code} · ${item.name}`, value: item.id }))} onChange={setProgramId} />
         <View style={styles.formGrid}>
@@ -1433,7 +1478,7 @@ export function AssessmentDialog({ visible, title, form, saving, onChange, onClo
 }
 
 function Attendance(props: StateProps) {
-  const { user } = useAuth(); const [sessionId, setSessionId] = useState(props.workspace.attendanceSessions[0]?.id ?? ''); const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc'); const [statuses, setStatuses] = useState<Record<string, 'present' | 'absent' | 'late' | 'excused'>>({}); const [open, setOpen] = useState(false); const [date, setDate] = useState(new Date().toISOString().slice(0, 10)); const [label, setLabel] = useState('Class session'); const [saving, setSaving] = useState(false); const [page, setPage] = useState(1);
+  const { user } = useAuth(); const [sessionId, setSessionId] = useState(props.workspace.attendanceSessions[0]?.id ?? ''); const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc'); const [studentQuery, setStudentQuery] = useState(''); const [selectedAttendanceIds, setSelectedAttendanceIds] = useState<string[]>([]); const [statuses, setStatuses] = useState<Record<string, 'present' | 'absent' | 'late' | 'excused'>>({}); const [open, setOpen] = useState(false); const [date, setDate] = useState(new Date().toISOString().slice(0, 10)); const [label, setLabel] = useState('Class session'); const [saving, setSaving] = useState(false); const [page, setPage] = useState(1); const [pageSize, setPageSize] = useState(10);
   useEffect(() => { if (!props.workspace.attendanceSessions.some((item) => item.id === sessionId)) setSessionId(props.workspace.attendanceSessions[0]?.id ?? ''); }, [props.workspace.attendanceSessions, sessionId]);
   const sortedStudents = useMemo(() => {
     const direction = sortOrder === 'asc' ? 1 : -1;
@@ -1447,16 +1492,53 @@ function Attendance(props: StateProps) {
       return left.name.localeCompare(right.name) * direction;
     });
   }, [props.workspace.students, sortOrder]);
-  const pageSize = 10;
-  const pageCount = Math.max(1, Math.ceil(sortedStudents.length / pageSize));
-  const pageStudents = sortedStudents.slice((page - 1) * pageSize, page * pageSize);
-  useEffect(() => { setPage(1); }, [sessionId, sortOrder, props.selectedClassId, props.workspace.students.length]);
-  const markAll = (status: 'present' | 'absent') => setStatuses((current) => ({ ...current, ...Object.fromEntries(sortedStudents.map((student) => [student.enrollmentId, status])) }));
+  const filteredStudents = useMemo(() => {
+    const query = studentQuery.trim().toLocaleLowerCase();
+    if (!query) return sortedStudents;
+    return sortedStudents.filter((student) => student.name.toLocaleLowerCase().includes(query) || student.institutionalId.toLocaleLowerCase().includes(query));
+  }, [sortedStudents, studentQuery]);
+  const pageCount = Math.max(1, Math.ceil(filteredStudents.length / pageSize));
+  const pageStudents = filteredStudents.slice((page - 1) * pageSize, page * pageSize);
+  useEffect(() => { setPage(1); setSelectedAttendanceIds([]); }, [sessionId, sortOrder, props.selectedClassId, props.workspace.students.length]);
+  useEffect(() => { setPage(1); }, [studentQuery]);
+  const pageIsSelected = pageStudents.length > 0 && pageStudents.every((student) => selectedAttendanceIds.includes(student.enrollmentId));
+  const toggleAttendancePage = () => setSelectedAttendanceIds((current) => pageIsSelected
+    ? current.filter((id) => !pageStudents.some((student) => student.enrollmentId === id))
+    : [...new Set([...current, ...pageStudents.map((student) => student.enrollmentId)])]);
+  const toggleAttendanceStudent = (id: string) => setSelectedAttendanceIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  const markAll = (status: 'present' | 'absent') => {
+    const targetIds = selectedAttendanceIds.length ? selectedAttendanceIds : sortedStudents.map((student) => student.enrollmentId);
+    setStatuses((current) => ({ ...current, ...Object.fromEntries(targetIds.map((id) => [id, status])) }));
+  };
   const create = async () => { if (!user || !props.selectedClassId) return; setSaving(true); try { const id = await createAttendanceSession(props.selectedClassId, user.id, date, label); setSessionId(id); setOpen(false); props.toast.show('Attendance session created.'); props.refresh(); } catch (cause) { props.toast.show(getErrorMessage(cause, 'Session creation failed.')); } finally { setSaving(false); } };
   const save = async () => { if (!user || !sessionId) return; const rows = sortedStudents.map((student) => ({ enrollmentId: student.enrollmentId, status: statuses[student.enrollmentId] ?? props.workspace.attendance[`${sessionId}:${student.enrollmentId}`] ?? 'present' as const })); setSaving(true); try { await saveAttendance(user.id, sessionId, rows); props.toast.show('Attendance saved.'); props.refresh(); } catch (cause) { props.toast.show(getErrorMessage(cause, 'Could not save attendance. Try again.')); } finally { setSaving(false); } };
   return <>
-    <Heading title="Attendance" subtitle="Create a dated session, batch mark the roster, and save authorized attendance records." action={<Button label="Create session" onPress={() => setOpen(true)} />} /><ClassSelect {...props} /><View style={styles.filterRow}><SelectField label="Attendance session" value={sessionId} options={props.workspace.attendanceSessions.map((item) => ({ label: `${item.date} · ${item.label}`, value: item.id }))} onChange={(value) => { setSessionId(value); setStatuses({}); }} containerStyle={styles.classSelect} /><SelectField label="Sort by last name" value={sortOrder} options={[{ label: 'A to Z', value: 'asc' }, { label: 'Z to A', value: 'desc' }]} onChange={(value) => setSortOrder(value as 'asc' | 'desc')} containerStyle={styles.sortField} /></View>
-    <Card>{sessionId ? <><View style={styles.attendanceToolbar}><View style={styles.flex}><Text style={styles.cardTitle}>Mark attendance</Text><Text style={styles.help}>Everyone defaults to Present. Mark exceptions, then save once.</Text></View><View style={styles.actions}><Button label="All present" variant="secondary" onPress={() => markAll('present')} /><Button label="All absent" variant="danger" onPress={() => markAll('absent')} /></View></View>{pageStudents.map((student) => <View key={student.enrollmentId} style={styles.attendanceRow}><View style={styles.flex}><Text style={styles.rowTitle}>{student.name}</Text><Text style={styles.help}>{formatStudentId(student.institutionalId)}</Text></View><SelectField label="Status" value={statuses[student.enrollmentId] ?? props.workspace.attendance[`${sessionId}:${student.enrollmentId}`] ?? 'present'} options={['present', 'absent', 'late', 'excused'].map((value) => ({ label: value[0].toUpperCase() + value.slice(1), value }))} onChange={(value) => setStatuses((current) => ({ ...current, [student.enrollmentId]: value as typeof statuses[string] }))} containerStyle={styles.attendanceStatusField} /></View>)}{sortedStudents.length > pageSize ? <View style={styles.pagination}><Button label="Previous" variant="secondary" disabled={page <= 1} onPress={() => setPage((current) => Math.max(1, current - 1))} /><Text style={styles.paginationText}>Page {page} of {pageCount} · {sortedStudents.length} students</Text><Button label="Next" variant="secondary" disabled={page >= pageCount} onPress={() => setPage((current) => Math.min(pageCount, current + 1))} /></View> : null}<Button label="Save attendance" loading={saving} onPress={() => void save()} /></> : <PageState kind="empty" title="No attendance session" message="Create a session to begin roll call." />}</Card>
+    <Heading title="Attendance" subtitle="Create a dated session, batch mark the roster, and save authorized attendance records." action={<Button label="Create session" onPress={() => setOpen(true)} />} /><View style={styles.filterRow}><SelectField label="Class" value={props.selectedClassId} options={props.classes.map((item) => ({ label: `${item.code} · ${item.section}`, value: item.id }))} onChange={props.setSelectedClassId} containerStyle={{ flex: 1.1, minWidth: 180, maxWidth: 460 }} /><SelectField label="Attendance session" value={sessionId} options={props.workspace.attendanceSessions.map((item) => ({ label: `${item.date} · ${item.label}`, value: item.id }))} onChange={(value) => { setSessionId(value); setStatuses({}); }} searchable containerStyle={{ flex: 1, minWidth: 180 }} /><SelectField label="Sort by last name" value={sortOrder} options={[{ label: 'A to Z', value: 'asc' }, { label: 'Z to A', value: 'desc' }]} onChange={(value) => setSortOrder(value as 'asc' | 'desc')} containerStyle={{ flex: 0.8, minWidth: 160 }} /></View>
+    <Card>{sessionId ? <>
+      <View style={styles.attendanceToolbar}>
+        <View style={styles.flex}><Text style={styles.cardTitle}>Mark attendance</Text><Text style={styles.help}>Everyone defaults to Present. Mark exceptions, then save once.</Text></View>
+        <View style={styles.actions}>
+          <Button label={selectedAttendanceIds.length ? 'Selected present' : 'All present'} variant="secondary" onPress={() => markAll('present')} />
+          <Button label={selectedAttendanceIds.length ? 'Selected absent' : 'All absent'} variant="danger" onPress={() => markAll('absent')} />
+        </View>
+      </View>
+      <SearchFilter value={studentQuery} onChange={setStudentQuery} placeholder="Search students by name or ID" containerStyle={{ maxWidth: '100%', height: 44, paddingVertical: 8, paddingHorizontal: 12 }} />
+      <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 6 }}>
+        <Pressable accessibilityRole="checkbox" accessibilityLabel="Select students on this page" accessibilityState={{ checked: pageIsSelected }} onPress={toggleAttendancePage} style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          <View style={[styles.rosterCheckbox, pageIsSelected && styles.rosterCheckboxSelected]}><Text style={styles.rosterCheckboxMark}>{pageIsSelected ? '✓' : selectedAttendanceIds.some((id) => pageStudents.some((student) => student.enrollmentId === id)) ? '−' : ''}</Text></View>
+          <Text style={styles.help}>Select page</Text>
+        </Pressable>
+        {selectedAttendanceIds.length ? <Text style={styles.help}>{selectedAttendanceIds.length} selected</Text> : null}
+      </View>
+      {pageStudents.map((student) => <View key={student.enrollmentId} style={styles.attendanceRow}>
+        <Pressable accessibilityRole="checkbox" accessibilityLabel={`Select ${student.name}`} accessibilityState={{ checked: selectedAttendanceIds.includes(student.enrollmentId) }} onPress={() => toggleAttendanceStudent(student.enrollmentId)} style={[styles.rosterCheckbox, selectedAttendanceIds.includes(student.enrollmentId) && styles.rosterCheckboxSelected]}><Text style={styles.rosterCheckboxMark}>{selectedAttendanceIds.includes(student.enrollmentId) ? '✓' : ''}</Text></Pressable>
+        <View style={styles.flex}><Text style={styles.rowTitle}>{student.name}</Text><Text style={styles.help}>{formatStudentId(student.institutionalId)}</Text></View>
+        <SelectField label="Status" hideLabel value={statuses[student.enrollmentId] ?? props.workspace.attendance[`${sessionId}:${student.enrollmentId}`] ?? 'present'} options={['present', 'absent', 'late', 'excused'].map((value) => ({ label: value[0].toUpperCase() + value.slice(1), value }))} onChange={(value) => setStatuses((current) => ({ ...current, [student.enrollmentId]: value as typeof statuses[string] }))} containerStyle={styles.attendanceStatusField} />
+      </View>)}
+      {!pageStudents.length ? <Text style={styles.help}>No students match “{studentQuery}”.</Text> : null}
+      {filteredStudents.length > 0 ? <View style={styles.pagination}><Button label="Previous" variant="secondary" disabled={page <= 1} onPress={() => setPage((current) => Math.max(1, current - 1))} /><View style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}><Text style={styles.paginationText}>Page {page} of {pageCount} · {filteredStudents.length} students</Text><TablePageSizeSelect value={pageSize} onChange={(value) => { setPageSize(value); setPage(1); }} /></View><Button label="Next" variant="secondary" disabled={page >= pageCount} onPress={() => setPage((current) => Math.min(pageCount, current + 1))} /></View> : null}
+      <View style={{ marginTop: 12 }}><Button label="Save attendance" loading={saving} onPress={() => void save()} /></View>
+    </> : <PageState kind="empty" title="No attendance session" message="Create a session to begin roll call." />}</Card>
     <Dialog visible={open} title="Create attendance session" onClose={() => setOpen(false)}><Field label="Date" value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" /><Field label="Session label" value={label} onChangeText={setLabel} /><Button label="Create session" loading={saving} onPress={() => void create()} /></Dialog>
   </>;
 }
@@ -1568,7 +1650,6 @@ function FacultyEvaluationCriteria(props: StateProps) {
   return <>
     {!showBuilder ? <>
       <Heading title="My Evaluation Criteria" subtitle="Review saved evaluation criteria and the criteria currently used by your classes." action={<Button label="Create evaluation criteria" onPress={createNew} />} />
-      <ClassSelect {...props} />
       <Card style={{ gap: 14 }}>
         <View style={styles.savedSystemHeader}><View style={{ flex: 1 }}><Text style={styles.cardTitle}>Saved evaluation criteria</Text><Text style={styles.help}>Department criteria are read-only. Make a private copy to customize criteria for classes assigned to you.</Text></View></View>
         {departmentSystems.map((system) => <View key={system.id} style={{ flexDirection: 'row', alignItems: 'center', flexWrap: 'wrap', gap: 12, paddingVertical: 12, borderBottomWidth: 1, borderColor: colors.border }}>
@@ -1595,7 +1676,6 @@ function FacultyEvaluationCriteria(props: StateProps) {
       </Card>
     </> : <>
       <Heading title="Evaluation criteria builder" subtitle="Create or edit private criteria for classes assigned to you." action={<Button label="Back to saved criteria" variant="ghost" onPress={() => setShowBuilder(false)} />} />
-      <ClassSelect {...props} />
       <Card style={{ gap: 14 }}>
         <Text style={styles.help}>Saving applies this private definition only to the selected classes. Department criteria are never changed.</Text>
         <EvaluationSystemBuilderForm definition={definition} onChange={(next) => { setDefinition(next); setErrors([]); }} gradingSystem={currentGrading} />
@@ -1768,6 +1848,7 @@ function Risk(props: StateProps & { prediction: boolean }) {
     const decline = current != null && evaluation?.predictedStanding != null ? current - evaluation.predictedStanding : null;
     return { student, summary, current, calculated: context.calculated, assessmentScores: props.workspace.assessments.map((assessment) => storedAssessmentValue(props.workspace, student.enrollmentId, assessment.id)), predicted: evaluation?.predictedStanding ?? null, riskProbability: evaluation?.riskProbability ?? null, predictionGeneratedAt: evaluation?.predictionGeneratedAt ?? null, dataBasis: evaluation?.dataBasis ?? null, modelProvider: evaluation?.modelProvider ?? null, modelName: evaluation?.modelName ?? null, modelVersion: evaluation?.modelVersion ?? null, attendance, risk, riskValue: evaluationRiskValue(context.definition, context.result), levelId: level?.id ?? null, levelName: level?.name ?? (risk === 'unavailable' ? 'Unavailable' : 'No matching level'), levelColor: level?.color, missing, trend, concernKey, concernFactorIds, concern, decline };
   }), [props.workspace]);
+  const riskLevelBadge = (row: (typeof studentRows)[number]) => <Badge color={row.risk === 'unavailable' ? '#64748B' : row.levelColor ?? '#64748B'}>{row.levelName}</Badge>;
   const attentionCount = studentRows.filter((row) => row.risk === 'medium' || row.risk === 'high').length;
   const highCount = studentRows.filter((row) => row.risk === 'high').length;
   const mediumCount = studentRows.filter((row) => row.risk === 'medium').length;
@@ -1837,7 +1918,7 @@ function Risk(props: StateProps & { prediction: boolean }) {
     ...gradeCells(row),
     row.calculated.finalGrade == null ? '—' : `${row.calculated.finalGrade.toFixed(1)}%`,
     row.calculated.pointGrade == null ? '—' : `${row.calculated.pointGrade.toFixed(2)}${row.calculated.letterGrade ? ` / ${row.calculated.letterGrade}` : ''}`,
-    row.levelName,
+    riskLevelBadge(row),
     row.concern,
     ...(hasPredictedStandingOutput ? [row.predicted == null ? 'Unavailable' : `${row.predicted.toFixed(1)}%`] : []),
     row.riskProbability == null ? 'Unavailable' : `${(row.riskProbability * 100).toFixed(1)}%`,
@@ -1849,7 +1930,7 @@ function Risk(props: StateProps & { prediction: boolean }) {
     row.calculated.finalGrade == null ? '—' : `${row.calculated.finalGrade.toFixed(1)}%`,
     row.calculated.pointGrade == null ? '—' : `${row.calculated.pointGrade.toFixed(2)}${row.calculated.letterGrade ? ` / ${row.calculated.letterGrade}` : ''}`,
     ...(hasPredictedStandingOutput ? [row.predicted == null ? 'Unavailable' : `${row.predicted.toFixed(1)}%`] : []),
-    row.levelName,
+    riskLevelBadge(row),
     row.concern,
     row.riskProbability == null ? 'Unavailable' : `${(row.riskProbability * 100).toFixed(1)}%`,
     summarizeSavedForecast({ predictionGeneratedAt: row.predictionGeneratedAt }).generatedAt ? new Date(row.predictionGeneratedAt!).toLocaleString() : 'Not recorded',
@@ -1882,7 +1963,7 @@ function Risk(props: StateProps & { prediction: boolean }) {
         </View>
         <Text style={styles.help}>Grades use {gradingDefinition.name}; risk levels and matched rules use {evaluationDefinition.name}.</Text>
         {filteredRows.length ? (
-          <DataTable columns={attentionColumns} rows={attentionTableRows} onRowPress={(tableRow) => { const match = filteredRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === String(tableRow[0])); if (match) setSelected(match.student); }} columnWidths={[...visibleGradeColumnWidths, 104, 118, 132, 290, ...(hasPredictedStandingOutput ? [120] : []), 120]} />
+          <DataTable columns={attentionColumns} rows={attentionTableRows} onRowPress={(tableRow) => { const match = filteredRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === String(tableRow[0])); if (match) setSelected(match.student); }} highlightCell={(tableRow, columnIndex) => columnIndex === visibleGradeColumns.length + 2 && filteredRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === String(tableRow[0]))?.calculated.remarks === 'failing'} columnWidths={[...visibleGradeColumnWidths, 104, 118, 132, 290, ...(hasPredictedStandingOutput ? [120] : []), 120]} />
         ) : (
           <PageState kind="empty" title={riskFilter === 'attention' && !attentionCount ? 'No students currently require attention' : 'No students match the selected filters'} message={riskFilter === 'attention' && !attentionCount ? 'Based on the applied evaluation criteria and available records, no students in this class currently meet the attention criteria.' : 'Try clearing one or more filters.'} action={<Button label={riskFilter === 'attention' && !attentionCount ? 'View all students' : 'Clear filters'} variant="secondary" onPress={() => riskFilter === 'attention' && !attentionCount ? setRiskFilter('all') : clearFilters()} />} />
         )}
@@ -1902,7 +1983,7 @@ function Risk(props: StateProps & { prediction: boolean }) {
            <SelectField label="Grade columns" value={gradeColumnView} options={[{ label: 'Summary', value: 'summary' }, { label: 'Recorded details', value: 'recorded' }]} onChange={(value) => setGradeColumnView(value as typeof gradeColumnView)} containerStyle={styles.predictionFilter} />
          </View>
          <Text style={styles.predictionSectionLabel}>{gradeColumnView === 'summary' ? 'Summary keeps grading periods and forecast fields together. Choose Recorded details to review component totals, groups, and individual assessment scores.' : 'Recorded details show saved assessment scores and grading summaries. Missing values remain blank; AI forecast fields stay unavailable until a forecast is saved.'}</Text>
-         {predictionRows.length ? <DataTable columns={predictionColumns} rows={predictionTableRows} onRowPress={(tableRow) => { const match = predictionRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === tableRow[0]); if (match) setSelected(match.student); }} columnWidths={[...visibleGradeColumnWidths, 104, 118, ...(hasPredictedStandingOutput ? [120] : []), 132, 290, 120, 170, 230]} /> : <PageState kind="empty" title="No matching estimates" message="Try another student name or risk level." />}
+         {predictionRows.length ? <DataTable columns={predictionColumns} rows={predictionTableRows} onRowPress={(tableRow) => { const match = predictionRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === tableRow[0]); if (match) setSelected(match.student); }} highlightCell={(tableRow, columnIndex) => columnIndex === visibleGradeColumns.length + 2 && predictionRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === String(tableRow[0]))?.calculated.remarks === 'failing'} columnWidths={[...visibleGradeColumnWidths, 104, 118, ...(hasPredictedStandingOutput ? [120] : []), 132, 290, 120, 170, 230]} /> : <PageState kind="empty" title="No matching estimates" message="Try another student name or risk level." />}
          <Text style={styles.attentionCount}>{predictionRows.length} student{predictionRows.length === 1 ? '' : 's'} shown · select a student to review the underlying indicators</Text>
        </Card>
      </>}
@@ -1912,30 +1993,94 @@ function Risk(props: StateProps & { prediction: boolean }) {
 
 function Feedback(props: StateProps) {
   const [studentId, setStudentId] = useState(props.workspace.students[0]?.enrollmentId ?? '');
+  const [selectedStudentIds, setSelectedStudentIds] = useState<string[]>(props.workspace.students[0] ? [props.workspace.students[0].enrollmentId] : []);
   const [body, setBody] = useState('');
   const [status, setStatus] = useState<'draft' | 'ready'>('draft');
   const [editingFeedbackId, setEditingFeedbackId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState('Compose');
+  const [studentQuery, setStudentQuery] = useState('');
+  const [riskFilter, setRiskFilter] = useState('all');
+  const [historyStudentFilter, setHistoryStudentFilter] = useState('all');
+  const [historyRiskFilter, setHistoryRiskFilter] = useState('all');
+  const [historyStatusFilter, setHistoryStatusFilter] = useState('all');
+  const [historyUpdatedFrom, setHistoryUpdatedFrom] = useState('');
+  const [historyUpdatedTo, setHistoryUpdatedTo] = useState('');
+  const [stylePreset, setStylePreset] = useState('supportive');
+  const [styleInstructions, setStyleInstructions] = useState('');
+  const [generationProgress, setGenerationProgress] = useState('');
+  const [generationFailures, setGenerationFailures] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
   const [generating, setGenerating] = useState(false);
-  useEffect(() => { if (!props.workspace.students.some((student) => student.enrollmentId === studentId)) setStudentId(props.workspace.students[0]?.enrollmentId ?? ''); }, [props.workspace.students, studentId]);
+  const initializedFeedbackClass = useRef<string | null>(null);
+  useEffect(() => {
+    const available = props.workspace.students.map((item) => item.enrollmentId);
+    if (!available.length) return;
+    if (initializedFeedbackClass.current !== props.selectedClassId) {
+      initializedFeedbackClass.current = props.selectedClassId;
+      setSelectedStudentIds([available[0]]);
+      setStudentId(available[0]);
+      return;
+    }
+    setSelectedStudentIds((current) => current.filter((id) => available.includes(id)));
+    if (!available.includes(studentId)) setStudentId(available[0] ?? '');
+  }, [props.workspace.students, props.selectedClassId, studentId]);
   useEffect(() => { setBody(''); setStatus('draft'); setEditingFeedbackId(null); }, [props.selectedClassId, studentId]);
+  useEffect(() => { setHistoryStudentFilter('all'); setHistoryRiskFilter('all'); setHistoryStatusFilter('all'); setHistoryUpdatedFrom(''); setHistoryUpdatedTo(''); }, [props.selectedClassId]);
+  useEffect(() => { setGenerationFailures([]); setGenerationProgress(''); }, [props.selectedClassId, props.workspace.students]);
+  useEffect(() => { if (selectedStudentIds.length !== 1) setStatus('draft'); }, [selectedStudentIds.length]);
   const student = props.workspace.students.find((item) => item.enrollmentId === studentId);
   const grading = props.workspace.criteria?.gradingSystemDefinition ?? props.workspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
   const evaluationContext = student ? evaluationContextForStudent(props.workspace, student.enrollmentId) : null;
   const evaluationDefinition = evaluationContext?.definition ?? props.workspace.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
-  const buildRecordContext = () => {
-    if (!student || !evaluationContext) return {};
-    const grade = evaluationContext.calculated;
+  const studentsWithRisk = useMemo(() => props.workspace.students.map((item) => {
+    const context = evaluationContextForStudent(props.workspace, item.enrollmentId);
+    const level = context.definition.levels.find((candidate) => candidate.id === context.result.matchedLevelId);
+    const risk = level?.id ?? context.result.severity ?? 'unavailable';
+    const riskLabel = level?.name ?? (context.result.severity === 'unavailable' ? 'Unavailable' : `${context.result.severity[0].toUpperCase()}${context.result.severity.slice(1)} risk`);
+    return { student: item, risk, riskLabel };
+  }), [props.workspace]);
+  const riskOptions = useMemo(() => [
+    { label: 'All risk levels', value: 'all' },
+    ...[...new Map(studentsWithRisk.map((entry) => [entry.risk, entry.riskLabel])).entries()].map(([value, label]) => ({ value, label })),
+  ], [studentsWithRisk]);
+  const matchingStudents = useMemo(() => {
+    const query = studentQuery.trim().toLowerCase();
+    const normalizedQuery = normalizeStudentId(studentQuery);
+    return studentsWithRisk.filter(({ student: item, risk }) =>
+      (riskFilter === 'all' || risk === riskFilter)
+      && (!query || item.name.toLowerCase().includes(query) || item.email.toLowerCase().includes(query) || normalizeStudentId(item.institutionalId).includes(normalizedQuery)));
+  }, [studentsWithRisk, studentQuery, riskFilter]);
+  const stylePresetOptions = [
+    { label: 'Warm and supportive', value: 'supportive' },
+    { label: 'Encouraging and strengths-first', value: 'strengths' },
+    { label: 'Concise and direct', value: 'concise' },
+    { label: 'Formal and professional', value: 'formal' },
+    { label: 'Empathetic and reassuring', value: 'empathetic' },
+    { label: 'Motivational coaching', value: 'coaching' },
+  ];
+  const stylePresetInstructions: Record<string, string> = {
+    supportive: 'Use a warm, supportive, and professional tone.',
+    strengths: 'Lead with evidence-based strengths, then frame improvement areas constructively.',
+    concise: 'Be concise and direct. Use short sentences and prioritize the most useful next steps.',
+    formal: 'Use a formal, respectful academic tone with clear and precise wording.',
+    empathetic: 'Write warmly and directly to the student. Acknowledge the difficulty of the situation without judgment, blame, or assumptions; recognize specific effort or strengths when the records support them; reassure the student that progress is possible; and frame next steps as manageable support rather than commands. Sound human and encouraging, not clinical or report-like. Do not offer guarantees or invent feelings.',
+    coaching: 'Use a motivating coaching tone and frame practical next steps as achievable actions.',
+  };
+  const combinedStyleInstructions = [stylePresetInstructions[stylePreset], styleInstructions.trim()].filter(Boolean).join('\n');
+  const buildRecordContext = (targetStudent = student) => {
+    if (!targetStudent) return {};
+    const targetEvaluationContext = evaluationContextForStudent(props.workspace, targetStudent.enrollmentId);
+    const grade = targetEvaluationContext.calculated;
     const componentGrades = (grading.components ?? []).map((component: any) => ({ name: component.name, short_code: component.shortCode ?? null, percentage: grade.components[component.id] ?? null, source: component.assessmentDefinition?.typeId ?? component.calculation?.mode ?? 'calculated' }));
-    const factors = evaluationDefinition.factors.map((factor) => ({ name: factor.name, source: factor.source, origin: evaluationOriginLabel(factor.origin), value: evaluationFactorValue(factor, evaluationContext.values) ?? null, unit: factor.unit ?? null, weight: factor.weight ?? null, aggregation: factor.gradingAggregation ?? null }));
-    const assessments = props.workspace.assessments.map((assessment) => ({ title: assessment.title, type: assessment.gradingTypeId ?? assessment.component, date: assessment.assessmentDate, raw_score: storedAssessmentValue(props.workspace, student.enrollmentId, assessment.id), maximum_score: assessment.maximumScore, mapped_percentage: assessmentPercentForWorkspace(props.workspace, student.enrollmentId, assessment) }));
+    const factors = targetEvaluationContext.definition.factors.map((factor) => ({ name: factor.name, source: factor.source, origin: evaluationOriginLabel(factor.origin), value: evaluationFactorValue(factor, targetEvaluationContext.values) ?? null, unit: factor.unit ?? null, weight: factor.weight ?? null, aggregation: factor.gradingAggregation ?? null }));
+    const assessments = props.workspace.assessments.map((assessment) => ({ title: assessment.title, type: assessment.gradingTypeId ?? assessment.component, date: assessment.assessmentDate, raw_score: storedAssessmentValue(props.workspace, targetStudent.enrollmentId, assessment.id), maximum_score: assessment.maximumScore, mapped_percentage: assessmentPercentForWorkspace(props.workspace, targetStudent.enrollmentId, assessment) }));
     return {
       applied_grading_system: { name: grading.name, version: props.workspace.criteria?.version ?? null, definition: grading },
-      applied_evaluation_criteria: { name: evaluationDefinition.name, version: evaluationDefinition.definitionVersion ?? null, definition: evaluationDefinition },
+      applied_evaluation_criteria: { name: targetEvaluationContext.definition.name, version: targetEvaluationContext.definition.definitionVersion ?? null, definition: targetEvaluationContext.definition },
       grades: { periods: grade.periods, components: componentGrades, groups: grade.groups, raw_final_percentage: grade.rawFinal, final_percentage: grade.finalGrade, point_grade: grade.pointGrade, letter_grade: grade.letterGrade, remarks: grade.remarks, passing_percentage: grading.finalGradeConversion?.passingPercentage ?? null },
-      evaluation: { risk_level: evaluationContext.result.severity, matched_level: evaluationDefinition.levels.find((level) => level.id === evaluationContext.result.matchedLevelId)?.name ?? null, matched_rules: evaluationRuleReasons(evaluationDefinition, evaluationContext.result), factors },
-      attendance_percentage: attendanceRate(props.workspace, student.enrollmentId),
-      missing_assessment_results: missingAssessments(props.workspace, student.enrollmentId),
+      evaluation: { risk_level: targetEvaluationContext.result.severity, matched_level: targetEvaluationContext.definition.levels.find((level) => level.id === targetEvaluationContext.result.matchedLevelId)?.name ?? null, matched_rules: evaluationRuleReasons(targetEvaluationContext.definition, targetEvaluationContext.result), factors },
+      attendance_percentage: attendanceRate(props.workspace, targetStudent.enrollmentId),
+      missing_assessment_results: missingAssessments(props.workspace, targetStudent.enrollmentId),
       assessments,
     };
   };
@@ -1972,14 +2117,37 @@ function Feedback(props: StateProps) {
     ].join('\n'));
   };
   const generateWithGemini = async () => {
-    if (!student || !props.selectedClassId) return;
+    const recipients = props.workspace.students.filter((item) => selectedStudentIds.includes(item.enrollmentId));
+    if (!recipients.length || !props.selectedClassId) return;
     setGenerating(true);
+    setGenerationFailures([]);
     try {
-      const generated = await generateFacultyFeedbackDraft(props.selectedClassId, student.enrollmentId, buildRecordContext());
-      setBody(generated);
-      setStatus('draft');
-      setEditingFeedbackId(null);
-      props.toast.show('Gemini created a draft from the applied criteria and student records. Review it before saving or publishing.');
+      if (recipients.length === 1) {
+        const generated = await generateFacultyFeedbackDraft(props.selectedClassId, recipients[0].enrollmentId, buildRecordContext(recipients[0]), combinedStyleInstructions);
+        setBody(generated);
+        setStatus('draft');
+        setEditingFeedbackId(null);
+        props.toast.show('Gemini created a draft from the applied criteria and student records. Review it before saving or publishing.');
+        return;
+      }
+      let saved = 0;
+      const failures: string[] = [];
+      for (let index = 0; index < recipients.length; index += 1) {
+        const targetStudent = recipients[index];
+        setGenerationProgress(`Generating ${index + 1} of ${recipients.length}: ${targetStudent.name}`);
+        try {
+          const targetContext = evaluationContextForStudent(props.workspace, targetStudent.enrollmentId);
+          const generated = await generateFacultyFeedbackDraft(props.selectedClassId, targetStudent.enrollmentId, buildRecordContext(targetStudent), combinedStyleInstructions);
+          await saveFacultyFeedback(targetStudent.enrollmentId, generated, targetContext.result.severity ?? 'unavailable', 'draft');
+          saved += 1;
+        } catch (cause) {
+          failures.push(`${targetStudent.name}: ${getErrorMessage(cause, 'Draft generation failed.')}`);
+        }
+      }
+      setGenerationFailures(failures);
+      setGenerationProgress(`Saved ${saved} private draft${saved === 1 ? '' : 's'}${failures.length ? ` · ${failures.length} failed` : ''}.`);
+      props.toast.show(`${saved} feedback draft${saved === 1 ? '' : 's'} saved${failures.length ? `; ${failures.length} failed` : ''}. Review them in Feedback history before publishing.`);
+      if (saved) props.refresh();
     } catch (cause) {
       props.toast.show(getErrorMessage(cause, 'Gemini could not generate a feedback draft.'));
     } finally {
@@ -1987,7 +2155,7 @@ function Feedback(props: StateProps) {
     }
   };
   const save = async () => {
-    if (!student || !body.trim()) return;
+    if (!student || selectedStudentIds.length !== 1 || !body.trim()) return;
     setSaving(true);
     try {
       const publishing = status === 'ready';
@@ -2007,43 +2175,124 @@ function Feedback(props: StateProps) {
       setSaving(false);
     }
   };
-  const history = student ? props.workspace.feedback[student.enrollmentId] ?? [] : [];
+  const historyStudents = useMemo(() => new Map(studentsWithRisk.map((entry) => [entry.student.enrollmentId, entry])), [studentsWithRisk]);
+  const history = useMemo(() => props.workspace.students.flatMap((historyStudent) =>
+    (props.workspace.feedback[historyStudent.enrollmentId] ?? []).map((record) => ({ record, student: historyStudent, risk: historyStudents.get(historyStudent.enrollmentId) }))
+  ).filter(({ record, student: historyStudent, risk }) => {
+    const updatedDay = record.updatedAt.slice(0, 10);
+    return (historyStudentFilter === 'all' || historyStudent.enrollmentId === historyStudentFilter)
+      && (historyRiskFilter === 'all' || risk?.risk === historyRiskFilter)
+      && (historyStatusFilter === 'all' || record.status === historyStatusFilter || (historyStatusFilter === 'published' && record.status === 'sent'))
+      && (!historyUpdatedFrom || updatedDay >= historyUpdatedFrom)
+      && (!historyUpdatedTo || updatedDay <= historyUpdatedTo);
+  }).sort((left, right) => right.record.updatedAt.localeCompare(left.record.updatedAt)), [props.workspace.students, props.workspace.feedback, historyStudents, historyStudentFilter, historyRiskFilter, historyStatusFilter, historyUpdatedFrom, historyUpdatedTo]);
+  const toggleStudent = (enrollmentId: string) => {
+    if (selectedStudentIds.includes(enrollmentId)) {
+      const remaining = selectedStudentIds.filter((id) => id !== enrollmentId);
+      setSelectedStudentIds(remaining);
+      if (studentId === enrollmentId) setStudentId(remaining[0] ?? '');
+    } else {
+      setSelectedStudentIds([...selectedStudentIds, enrollmentId]);
+      setStudentId(enrollmentId);
+    }
+  };
+  const allMatchingSelected = matchingStudents.length > 0 && matchingStudents.every(({ student: item }) => selectedStudentIds.includes(item.enrollmentId));
+  const toggleMatchingStudents = () => {
+    const matchingIds = matchingStudents.map(({ student: item }) => item.enrollmentId);
+    if (allMatchingSelected) {
+      const remaining = selectedStudentIds.filter((id) => !matchingIds.includes(id));
+      setSelectedStudentIds(remaining);
+      if (!remaining.includes(studentId)) setStudentId(remaining[0] ?? '');
+      return;
+    }
+    const next = [...new Set([...selectedStudentIds, ...matchingIds])];
+    setSelectedStudentIds(next);
+    if (!next.includes(studentId)) setStudentId(matchingIds[0] ?? '');
+  };
   return <>
     <Heading title="Performance Feedback" subtitle="Build a draft from the applied grading and evaluation criteria, edit it, then email it to the student and publish it in the portal." />
     <ClassSelect {...props} />
-    <Card style={styles.feedbackFormCard}>
-      <Text style={styles.cardTitle}>Create or edit feedback</Text>
-      <Text style={styles.help}>The built-in draft reflects this class’s applied grading system and evaluation criteria. Gemini can also draft a message from the student’s recorded results; review all generated text before emailing it.</Text>
-      <InlineStudentSearch students={props.workspace.students} value={studentId} onChange={setStudentId} />
-      {editingFeedbackId ? <View style={styles.feedbackEditingBanner}><Text style={styles.feedbackEditingText}>Editing saved draft</Text><Button label="Stop editing" variant="secondary" onPress={() => { setEditingFeedbackId(null); setBody(''); setStatus('draft'); }} /></View> : null}
-      <View style={styles.feedbackActions}>
-        <Button label="Build from records" variant="secondary" disabled={!student} onPress={buildTemplateDraft} />
-        <Button label="Draft with Gemini" variant="secondary" loading={generating} disabled={!student || generating} onPress={() => void generateWithGemini()} />
-        <SelectField label="Review status" value={status} options={[{ label: 'Draft', value: 'draft' }, { label: 'Ready to email', value: 'ready' }]} onChange={(value) => setStatus(value as 'draft' | 'ready')} containerStyle={styles.feedbackStatusField} />
+    <Tabs values={['Compose', 'Feedback history']} selected={activeTab} onSelect={setActiveTab} />
+    {activeTab === 'Compose' ? <Card style={styles.feedbackFormCard}>
+      <Text style={styles.cardTitle}>{editingFeedbackId ? 'Edit feedback draft' : 'Compose feedback'}</Text>
+      <Text style={styles.help}>Choose one student to write or review a message, or select several students to generate private drafts in one run.</Text>
+      <View style={styles.feedbackComposeLayout}>
+        <View style={styles.feedbackRecipientsPane}>
+          <Text style={styles.feedbackPaneTitle}>Recipients</Text>
+          <View style={styles.feedbackRecipientFilters}>
+            <SearchFilter value={studentQuery} onChange={setStudentQuery} placeholder="Search students by name or ID" accessibilityLabel="Search feedback recipients" containerStyle={styles.feedbackRecipientSearch} />
+            <SelectField label="Risk level" value={riskFilter} options={riskOptions} onChange={setRiskFilter} containerStyle={styles.feedbackRiskFilter} />
+          </View>
+          <View style={styles.feedbackBulkActions}>
+            <Text style={styles.help}>{selectedStudentIds.length} recipient{selectedStudentIds.length === 1 ? '' : 's'} selected · {matchingStudents.length} shown</Text>
+            <View style={styles.feedbackActions}>
+              <Button compact label={allMatchingSelected ? 'Clear shown' : 'Select shown'} variant="secondary" disabled={!matchingStudents.length || generating} onPress={toggleMatchingStudents} />
+              <Button compact label="Clear all" variant="ghost" disabled={!selectedStudentIds.length || generating} onPress={() => { setSelectedStudentIds([]); setStudentId(''); }} />
+            </View>
+          </View>
+          <ScrollView style={styles.feedbackBulkStudentList} nestedScrollEnabled keyboardShouldPersistTaps="handled">
+            {matchingStudents.map(({ student: item, riskLabel }) => {
+              const selected = selectedStudentIds.includes(item.enrollmentId);
+              const active = studentId === item.enrollmentId;
+              return <View key={item.enrollmentId} style={[styles.feedbackRecipientRow, active && styles.feedbackRecipientActive]}>
+                <Pressable accessibilityRole="button" accessibilityState={{ selected: active }} onPress={() => setStudentId(item.enrollmentId)} disabled={generating} style={styles.feedbackRecipientIdentity}>
+                  <Text style={styles.feedbackBulkStudentName}>{item.name}</Text>
+                  <Text style={styles.help}>{item.email || 'No email on file'}</Text>
+                  <Text style={styles.help}>{formatStudentId(item.institutionalId)} · {riskLabel}</Text>
+                </Pressable>
+                <Pressable accessibilityRole="checkbox" accessibilityLabel={`Select ${item.name} for feedback`} accessibilityState={{ checked: selected }} onPress={() => toggleStudent(item.enrollmentId)} disabled={generating} style={[styles.feedbackBulkCheck, selected && styles.feedbackBulkCheckSelected]}>{selected ? <Text style={styles.feedbackBulkCheckMark}>✓</Text> : null}</Pressable>
+              </View>;
+            })}
+            {!matchingStudents.length ? <Text style={styles.help}>No students match these filters.</Text> : null}
+          </ScrollView>
+          <Text style={styles.feedbackSelectedRecipient}>{selectedStudentIds.length} selected</Text>
+        </View>
+        <View style={styles.feedbackCompositionPane}>
+          <Text style={styles.feedbackPaneTitle}>Composition</Text>
+          {selectedStudentIds.length === 1 && student ? <Text style={styles.feedbackSelectedRecipient}>Writing for {student.name}</Text> : selectedStudentIds.length > 1 ? <Text style={styles.feedbackSelectedRecipient}>Gemini will create and save a separate private draft for each selected student. No email will be sent.</Text> : <Text style={styles.feedbackSelectedRecipient}>Select at least one student to continue.</Text>}
+          {editingFeedbackId ? <View style={styles.feedbackEditingBanner}><Text style={styles.feedbackEditingText}>Editing saved draft</Text><Button label="Stop editing" variant="secondary" onPress={() => { setEditingFeedbackId(null); setBody(''); setStatus('draft'); }} /></View> : null}
+          <View style={styles.feedbackStyleControls}>
+            <SelectField label="Style and tone" value={stylePreset} options={stylePresetOptions} onChange={setStylePreset} containerStyle={styles.feedbackStylePreset} />
+            <Field label="Additional instructions (optional)" value={styleInstructions} onChangeText={setStyleInstructions} multiline numberOfLines={2} maxLength={500} placeholder="Add a brief preference for wording or emphasis." style={styles.feedbackStyleBox} containerStyle={styles.feedbackStyleExtra} />
+          </View>
+          <Text style={styles.help}>Style guidance is sent to Gemini with anonymized records. Don’t include student names or identifying details. It guides wording, not the evidence.</Text>
+          {selectedStudentIds.length === 1 ? <>
+            <View style={styles.feedbackActions}>
+              <Button label="Build from records" variant="secondary" disabled={!student || generating} onPress={buildTemplateDraft} />
+              <Button label="Draft with Gemini" variant="secondary" loading={generating} disabled={!student || generating} onPress={() => void generateWithGemini()} />
+              <SelectField label="Review status" value={status} options={[{ label: 'Draft', value: 'draft' }, { label: 'Ready to email', value: 'ready' }]} onChange={(value) => setStatus(value as 'draft' | 'ready')} containerStyle={styles.feedbackStatusField} />
+            </View>
+            <Field label="Feedback message" value={body} onChangeText={setBody} multiline numberOfLines={8} style={styles.feedbackBox} />
+            <View style={styles.feedbackSaveRow}>
+              <Text style={styles.help}>{status === 'ready' ? 'This emails the student’s registered address and publishes the feedback in the portal.' : 'Drafts remain private to you until emailed.'}</Text>
+              <Button label={status === 'ready' ? 'Email feedback' : editingFeedbackId ? 'Save draft changes' : 'Save feedback'} icon={status === 'ready' ? 'email' : 'save'} loading={saving} disabled={!student || !body.trim() || generating} onPress={() => void save()} />
+            </View>
+          </> : selectedStudentIds.length > 1 ? <View style={styles.feedbackBulkFooter}>
+            <Button label={`Generate ${selectedStudentIds.length} private drafts with Gemini`} loading={generating} disabled={generating} onPress={() => void generateWithGemini()} />
+            {generationProgress ? <Text style={styles.help}>{generationProgress}</Text> : null}
+            {generationFailures.length ? <View style={styles.feedbackBulkFailures}><Text style={styles.feedbackBulkFailureTitle}>Some drafts could not be generated</Text>{generationFailures.map((failure) => <Text key={failure} style={styles.feedbackBulkFailure}>{failure}</Text>)}</View> : null}
+          </View> : null}
+        </View>
       </View>
-      <Field label="Feedback message" value={body} onChangeText={setBody} multiline numberOfLines={8} style={styles.feedbackBox} />
-      <View style={styles.feedbackSaveRow}>
-        <Text style={styles.help}>{status === 'ready' ? 'This emails the student’s registered address and publishes the feedback in the portal.' : 'Drafts remain private to you until emailed.'}</Text>
-        <Button label={status === 'ready' ? 'Email feedback' : editingFeedbackId ? 'Save draft changes' : 'Save feedback'} icon={status === 'ready' ? 'email' : 'save'} loading={saving} disabled={!student || !body.trim()} onPress={() => void save()} />
-      </View>
-    </Card>
-    <Card style={styles.feedbackHistoryCard}>
+    </Card> : null}
+    {activeTab === 'Feedback history' ? <Card style={styles.feedbackHistoryCard}>
       <View style={styles.feedbackHistoryHeading}><View style={styles.flex}><Text style={styles.cardTitle}>Feedback history</Text><Text style={styles.help}>Select a draft to continue editing. Emailed feedback is read-only.</Text></View></View>
-      {history.length ? <View style={styles.feedbackHistoryList}>{history.map((item) => <View key={item.id} style={styles.feedbackHistoryItem}>
-        <View style={styles.feedbackHistoryItemHeader}><View style={styles.feedbackHistoryMeta}><Text style={styles.feedbackHistoryStatus}>{item.status === 'published' ? 'Published' : item.status === 'sent' ? 'Published' : item.status === 'draft' ? 'Draft' : item.status === 'ready' ? 'Ready to publish' : item.status}</Text><Text style={styles.help}>{new Date(item.createdAt).toLocaleString()}</Text></View>{item.status === 'draft' || item.status === 'ready' ? <Button label={item.status === 'ready' ? 'Continue to publish' : 'Edit draft'} variant="secondary" onPress={() => { setEditingFeedbackId(item.id); setBody(item.body); setStatus(item.status === 'ready' ? 'ready' : 'draft'); }} /> : null}</View>
-        <Text numberOfLines={4} style={styles.feedbackHistoryBody}>{item.body}</Text>
-      </View>)}</View> : <PageState kind="empty" title="No feedback yet" message="Saved drafts and published messages for the selected student appear here." />}
-    </Card>
+      <View style={styles.feedbackHistoryFilters}>
+        <SelectField label="Student" value={historyStudentFilter} options={[{ label: 'All students', value: 'all' }, ...props.workspace.students.map((item) => ({ label: `${item.name} · ${item.email || formatStudentId(item.institutionalId)}`, value: item.enrollmentId }))]} onChange={setHistoryStudentFilter} placeholder="Search student name or email" searchable containerStyle={styles.feedbackHistoryStudentFilter} />
+        <SelectField label="Risk level" value={historyRiskFilter} options={riskOptions} onChange={setHistoryRiskFilter} containerStyle={styles.feedbackHistorySelectFilter} />
+        <SelectField label="Feedback status" value={historyStatusFilter} options={[{ label: 'All statuses', value: 'all' }, { label: 'Draft', value: 'draft' }, { label: 'Ready to email', value: 'ready' }, { label: 'Published', value: 'published' }, { label: 'Failed', value: 'failed' }, { label: 'Archived', value: 'archived' }]} onChange={setHistoryStatusFilter} containerStyle={styles.feedbackHistorySelectFilter} />
+      </View>
+      <View style={styles.feedbackHistoryDateFilters}>
+        <DateField label="Updated from" value={historyUpdatedFrom} onChange={setHistoryUpdatedFrom} containerStyle={styles.feedbackHistoryDateField} />
+        <DateField label="Updated to" value={historyUpdatedTo} onChange={setHistoryUpdatedTo} containerStyle={styles.feedbackHistoryDateField} />
+        <Button compact label="Clear filters" variant="ghost" onPress={() => { setHistoryStudentFilter('all'); setHistoryRiskFilter('all'); setHistoryStatusFilter('all'); setHistoryUpdatedFrom(''); setHistoryUpdatedTo(''); }} />
+      </View>
+      {history.length ? <View style={styles.feedbackHistoryList}>{history.map(({ record, student: historyStudent, risk }) => <View key={record.id} style={styles.feedbackHistoryItem}>
+        <View style={styles.feedbackHistoryItemHeader}><View style={styles.flex}><Text style={styles.feedbackBulkStudentName}>{historyStudent.name}</Text><Text style={styles.help}>{historyStudent.email || 'No email on file'} · {risk?.riskLabel ?? 'Risk unavailable'}</Text></View><View style={styles.feedbackHistoryMeta}><Text style={styles.feedbackHistoryStatus}>{record.status === 'published' || record.status === 'sent' ? 'Published' : record.status === 'draft' ? 'Draft' : record.status === 'ready' ? 'Ready to publish' : record.status}</Text><Text style={styles.help}>Updated {new Date(record.updatedAt).toLocaleString()}</Text></View>{record.status === 'draft' || record.status === 'ready' ? <Button label={record.status === 'ready' ? 'Continue to publish' : 'Edit draft'} variant="secondary" onPress={() => { setStudentId(historyStudent.enrollmentId); setSelectedStudentIds([historyStudent.enrollmentId]); setEditingFeedbackId(record.id); setBody(record.body); setStatus(record.status === 'ready' ? 'ready' : 'draft'); setActiveTab('Compose'); }} /> : null}</View>
+        <Text numberOfLines={4} style={styles.feedbackHistoryBody}>{record.body}</Text>
+      </View>)}</View> : <PageState kind="empty" title="No matching feedback" message="Adjust the filters or choose another date range to see saved feedback." />}
+    </Card> : null}
   </>;
-}
-
-function InlineStudentSearch({ students, value, onChange }: { students: RosterStudent[]; value: string; onChange: (value: string) => void }) {
-  const selected = students.find((student) => student.enrollmentId === value);
-  const [query, setQuery] = useState(selected ? `${selected.name} · ${formatStudentId(selected.institutionalId)}` : '');
-  useEffect(() => { const current = students.find((student) => student.enrollmentId === value); setQuery(current ? `${current.name} · ${formatStudentId(current.institutionalId)}` : ''); }, [students, value]);
-  const normalized = query.trim().toLowerCase();
-  const matches = students.filter((student) => student.name.toLowerCase().includes(normalized) || normalizeStudentId(student.institutionalId).includes(normalizeStudentId(query)));
-  return <View style={styles.inlineStudentSearch}><Field label="Student" value={query} onChangeText={setQuery} placeholder="Search student name or ID" autoCapitalize="none" /><ScrollView style={styles.inlineStudentOptions} nestedScrollEnabled keyboardShouldPersistTaps="handled">{matches.map((student) => <Pressable key={student.enrollmentId} accessibilityRole="button" accessibilityState={{ selected: student.enrollmentId === value }} onPress={() => { onChange(student.enrollmentId); setQuery(`${student.name} · ${formatStudentId(student.institutionalId)}`); }} style={[styles.inlineStudentOption, student.enrollmentId === value && styles.inlineStudentOptionSelected]}><Text style={[styles.inlineStudentOptionText, student.enrollmentId === value && styles.inlineStudentOptionTextSelected]}>{student.name}</Text><Text style={styles.help}>{formatStudentId(student.institutionalId)}</Text></Pressable>)}{!matches.length ? <Text style={styles.inlineStudentEmpty}>No matching students.</Text> : null}</ScrollView></View>;
 }
 
 function DetailSection({ title, summary, defaultExpanded = false, children }: { title: string; summary?: string; defaultExpanded?: boolean; children: ReactNode }) {
@@ -2157,16 +2406,16 @@ function StudentDetail({ student, workspace, onClose }: { student: RosterStudent
     <DetailSection title="Component breakdown" summary={`${componentRows.length} components · includes configured aggregation and contribution fields`} defaultExpanded><DataTable columns={['Seq.', 'Component hierarchy', 'Code', 'Source', 'Aggregation', 'Weight', 'Calculated percentage', 'Description / scoring']} rows={componentRows} columnWidths={[56, 190, 72, 100, 125, 76, 150, 300]} /></DetailSection>
     {groupRows.length ? <DetailSection title="Group breakdown" summary={`${groupRows.length} groups`}><DataTable columns={['Seq.', 'Group hierarchy', 'Type', 'Parent', 'Aggregation', 'Calculated percentage']} rows={groupRows} columnWidths={[64, 260, 120, 200, 150, 180]} /></DetailSection> : null}
     <DetailSection title="Final-grade calculation and conversion" summary={`${gradingResult.rawFinal == null ? 'Raw grade unavailable' : `Raw ${displayGrade(gradingResult.rawFinal)} → ${displayGrade(gradingResult.finalGrade)}`} · passing at ${grading.finalGradeConversion?.passingPercentage ?? '—'}%`} defaultExpanded>
-      <DataTable columns={['Final result source', 'Raw percentage', 'Final percentage', 'Point grade', 'Letter grade', 'Remarks', 'Passing threshold']} rows={[[grading.finalResult?.source === 'period_grade' ? grading.periods?.find((period: any) => period.id === grading.finalResult.periodId)?.name ?? 'Configured period' : grading.components?.find((component: any) => component.id === grading.finalResult?.componentId)?.name ?? 'Configured component', displayGrade(gradingResult.rawFinal), displayGrade(gradingResult.finalGrade), gradingResult.pointGrade == null ? '—' : gradingResult.pointGrade.toFixed(2), gradingResult.letterGrade ?? '—', gradingResult.remarks, grading.finalGradeConversion?.passingPercentage == null ? '—' : `${grading.finalGradeConversion.passingPercentage}%`]]} columnWidths={[240, 140, 140, 120, 120, 260, 150]} />
-      <DataTable columns={['Scale', 'Percentage range', 'Conversion mode', 'Point mapping', 'Interval', 'Rounding', 'Precision']} rows={conversionRows} columnWidths={[140, 180, 180, 340, 120, 130, 110]} />
+      <DataTable columns={['Final result source', 'Raw percentage', 'Final percentage', 'Point grade', 'Letter grade', 'Remarks', 'Passing threshold']} rows={[[grading.finalResult?.source === 'period_grade' ? grading.periods?.find((period: any) => period.id === grading.finalResult.periodId)?.name ?? 'Configured period' : grading.components?.find((component: any) => component.id === grading.finalResult?.componentId)?.name ?? 'Configured component', displayGrade(gradingResult.rawFinal), displayGrade(gradingResult.finalGrade), gradingResult.pointGrade == null ? '—' : gradingResult.pointGrade.toFixed(2), gradingResult.letterGrade ?? '—', gradingResult.remarks, grading.finalGradeConversion?.passingPercentage == null ? '—' : `${grading.finalGradeConversion.passingPercentage}%`]]} columnWidths={[240, 140, 140, 120, 120, 260, 150]} highlightCell={(_row, columnIndex) => gradingResult.remarks === 'failing' && (columnIndex === 3 || columnIndex === 4)} />
+      <DataTable columns={['Scale', 'Percentage range', 'Conversion mode', 'Point mapping', 'Interval', 'Rounding', 'Precision']} rows={conversionRows} columnWidths={[140, 180, 180, 190, 120, 130, 110]} />
     </DetailSection>
     <DetailSection title="Evaluation-factor explanation" summary={`${evaluationDefinition.factors.length} configured factors · ${evaluationContext.result.evidenceCount} with available values`} defaultExpanded>
       <Text style={styles.detailNarrative}>{factorSummary || 'No evaluation factors are configured.'}</Text>
-      <DataTable columns={['Factor', 'Metric', 'Data origin', 'Grade aggregation', 'Student value', 'Weight']} rows={evaluationFactorRows} columnWidths={[220, 180, 200, 220, 160, 110]} />
+      <DataTable columns={['Factor', 'Metric', 'Data origin', 'Grade aggregation', 'Student value', 'Weight']} rows={evaluationFactorRows} columnWidths={[220, 180, 200, 140, 160, 110]} />
     </DetailSection>
     <DetailSection title="Why this risk level was assigned" summary={levelLabel} defaultExpanded>
       <Text style={styles.detailNarrative}>{riskSummary}</Text>
-      <DataTable columns={['Level', 'Severity', 'Priority', 'Rule logic', 'Factor', 'Observed value', 'Condition', 'Outcome', 'Rule explanation']} rows={evaluationRuleRows} columnWidths={[160, 110, 90, 190, 160, 150, 170, 140, 340]} />
+      <DataTable columns={['Level', 'Severity', 'Priority', 'Rule logic', 'Factor', 'Observed value', 'Condition', 'Outcome', 'Rule explanation']} rows={evaluationRuleRows} columnWidths={[160, 110, 90, 190, 160, 150, 170, 140, 340]} highlightRow={(row) => row[7] === 'Matched'} />
       <DataTable columns={['Configured level', 'Severity', 'Priority', 'Match logic', 'Rule count', 'Rule summary', 'Status']} rows={evaluationLevelRows} columnWidths={[180, 110, 90, 180, 110, 340, 120]} />
       <Text style={styles.help}>Missing assessment results: {missing}. {evaluation?.predictedStanding == null ? 'No saved AI prediction.' : `Saved AI predicted standing: ${evaluation.predictedStanding.toFixed(2)}%.`}</Text>
       {evaluationDefinition.explanation?.includeAiFactors && evaluation?.factors.length ? <Text style={styles.help}>AI explanation factors: {evaluation.factors.join('; ')}</Text> : null}
@@ -2195,9 +2444,40 @@ function facultyReportRecords(workspace: ClassWorkspace, classInfo: FacultyClass
 }
 
 function Analytics(props: StateProps) {
-  const evaluationDefinition = props.workspace.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
+  const [allClasses, setAllClasses] = useState(false);
+  const [allClassWorkspaces, setAllClassWorkspaces] = useState<{ classInfo: FacultyClass; workspace: ClassWorkspace }[] | null>(null);
+  useEffect(() => {
+    let active = true;
+    if (!allClasses) { setAllClassWorkspaces(null); return () => { active = false; }; }
+    setAllClassWorkspaces(null);
+    Promise.all(props.classes.map(async (classInfo) => ({
+      classInfo,
+      workspace: classInfo.id === props.selectedClassId
+        ? props.workspace
+        : await loadClassWorkspace(classInfo.id, undefined, props.userId, undefined, { includeAttendance: true, includeEvaluations: true }),
+    }))).then((loaded) => { if (active) setAllClassWorkspaces(loaded); });
+    return () => { active = false; };
+  }, [allClasses, props.classes, props.selectedClassId, props.userId, props.workspace]);
+  const analyticsWorkspace = allClasses
+    ? allClassWorkspaces?.reduce<ClassWorkspace>((combined, item) => ({
+      students: [...combined.students, ...item.workspace.students],
+      assessments: [...combined.assessments, ...item.workspace.assessments],
+      scores: { ...combined.scores, ...item.workspace.scores },
+      categoricalScores: { ...combined.categoricalScores, ...item.workspace.categoricalScores },
+      criteria: combined.criteria ?? item.workspace.criteria,
+      defaultGradingSystem: combined.defaultGradingSystem ?? item.workspace.defaultGradingSystem,
+      semesterEndsOn: combined.semesterEndsOn ?? item.workspace.semesterEndsOn,
+      evaluationSystem: combined.evaluationSystem ?? item.workspace.evaluationSystem,
+      attendanceSessions: [...combined.attendanceSessions, ...item.workspace.attendanceSessions],
+      attendance: { ...combined.attendance, ...item.workspace.attendance },
+      evaluations: { ...combined.evaluations, ...item.workspace.evaluations },
+      feedback: { ...combined.feedback, ...item.workspace.feedback },
+    }), emptyWorkspace) ?? props.workspace
+    : props.workspace;
   const selectedClass = props.classes.find((item) => item.id === props.selectedClassId);
-  const reportRows = useMemo(() => selectedClass ? facultyReportRecords(props.workspace, selectedClass) : [], [props.workspace, selectedClass]);
+  const reportRows = useMemo(() => allClasses
+    ? (allClassWorkspaces ?? []).flatMap(({ classInfo, workspace }) => facultyReportRecords(workspace, classInfo))
+    : selectedClass ? facultyReportRecords(props.workspace, selectedClass) : [], [allClasses, allClassWorkspaces, props.workspace, selectedClass]);
   const reportScopeOptions = useMemo<ReportScopeOption[]>(() => props.classes.length > 1 ? [{
     label: 'All classes assigned to me',
     value: 'all-faculty-classes',
@@ -2212,39 +2492,47 @@ function Analytics(props: StateProps) {
       return loaded;
     },
   }] : [], [props.classes, props.selectedClassId, props.userId, props.workspace]);
-  const analyticsRecords = useMemo(() => props.workspace.students.flatMap((student) => {
-    const summary = summarizeEnrollmentStanding(props.workspace, student.enrollmentId);
+  const analyticsSources = allClasses ? allClassWorkspaces ?? [] : selectedClass ? [{ classInfo: selectedClass, workspace: props.workspace }] : [];
+  const analyticsEvaluationDefinitions = [...new Map(analyticsSources.map(({ workspace }) => {
+    const definition = workspace.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
+    return [definition.id, definition] as const;
+  })).values()];
+  const evaluationDefinition = analyticsEvaluationDefinitions[0] ?? analyticsWorkspace.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
+  const analyticsRecords = useMemo(() => analyticsSources.flatMap(({ classInfo, workspace }) => workspace.students.flatMap((student) => {
+    const summary = summarizeEnrollmentStanding(workspace, student.enrollmentId);
     const score = summary.finalGrade ?? summary.p3 ?? summary.effortfulLearning ?? summary.mastery;
     if (score == null) return [];
-    const evaluation = evaluationContextForStudent(props.workspace, student.enrollmentId);
-    const riskKey = evaluationRiskValue(evaluationDefinition, evaluation.result);
+    const evaluation = evaluationContextForStudent(workspace, student.enrollmentId);
+    const definition = workspace.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
+    const riskKey = evaluationRiskValue(definition, evaluation.result);
     const riskLevel = evaluation.result.matchedLevelId ? evaluation.definition.levels.find((level) => level.id === evaluation.result.matchedLevelId)?.name ?? 'Configured risk' : evaluation.result.severity === 'unavailable' ? 'Unavailable' : 'No matching level';
-    return [{ id: student.enrollmentId, label: student.name, student: student.name, score: evaluation.calculated.finalGrade ?? score, currentStanding: evaluation.calculated.finalGrade ?? score, risk: riskKey, riskLevel, attendanceRate: evaluation.values.attendance_rate, missingAssessments: evaluation.values.missing_assessment_count, classification: summary.remarks, category: student.section ?? 'Class', timestamp: props.workspace.assessments.at(-1)?.assessmentDate }];
-  }), [evaluationDefinition, props.workspace]);
-  const filters = useAnalyticsFilters(analyticsRecords, evaluationRiskOptions(evaluationDefinition, 'All risks'));
+    return [{ id: student.enrollmentId, label: student.name, student: student.name, score: evaluation.calculated.finalGrade ?? score, currentStanding: evaluation.calculated.finalGrade ?? score, risk: riskKey, riskLevel, attendanceRate: evaluation.values.attendance_rate, missingAssessments: evaluation.values.missing_assessment_count, classification: summary.remarks, category: classInfo.code, timestamp: workspace.assessments.at(-1)?.assessmentDate }];
+  })), [analyticsSources]);
+  const filters = useAnalyticsFilters(analyticsRecords, evaluationRiskOptions(analyticsEvaluationDefinitions.length ? analyticsEvaluationDefinitions : evaluationDefinition, 'All risks'));
   const visible = filters.filtered;
   const summaries = visible.map((item) => item.classification);
   const passing = summaries.filter((value) => value === 'passing').length;
   const riskDistribution = [
-    ...[...evaluationDefinition.levels].sort((left, right) => right.priority - left.priority).map((level) => ({ label: level.name, value: visible.filter((record) => record.risk === `level:${evaluationDefinition.id}:${level.id}`).length })),
+    ...analyticsEvaluationDefinitions.flatMap((definition) => [...definition.levels].sort((left, right) => right.priority - left.priority).map((level) => ({ label: `${level.name} · ${definition.name}`, value: visible.filter((record) => record.risk === `level:${definition.id}:${level.id}`).length }))),
     { label: 'No matching level', value: visible.filter((record) => record.risk === 'unmatched').length },
     { label: 'Unavailable', value: visible.filter((record) => record.risk === 'unavailable').length },
   ];
-  const exportCsv = async () => { const csv = exportClassCsv(props.workspace); if (Platform.OS === 'web') { const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'apms-class-report.csv'; anchor.click(); URL.revokeObjectURL(url); } else await Share.share({ message: csv }); props.toast.show('Class report exported as CSV.'); };
+  const exportCsv = async () => { const csv = exportClassCsv(analyticsWorkspace); if (Platform.OS === 'web') { const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv' })); const anchor = document.createElement('a'); anchor.href = url; anchor.download = allClasses ? 'apms-all-classes-report.csv' : 'apms-class-report.csv'; anchor.click(); URL.revokeObjectURL(url); } else await Share.share({ message: csv }); props.toast.show('Class report exported as CSV.'); };
   const scores = visible.map((item) => ({ label: item.label, value: item.score, kind: 'continuous' as const }));
   const visibleIds = new Set(visible.map((item) => item.id));
-  const assessmentTrend = buildAssessmentTrend(props.workspace, visibleIds);
+  const assessmentTrend = buildAssessmentTrend(analyticsWorkspace, visibleIds);
   const passFail = [{ label: 'Meets rule', value: passing }, { label: 'Below or incomplete', value: visible.length - passing }];
   return <>
     <Heading title="Analytics and Reports" subtitle="Live class monitoring summary from SWUNEXT scores, attendance, and advisory risk data." action={<Button label="Export CSV" onPress={() => void exportCsv()} />} />
-    <ClassSelect {...props} />{filters.controls}
-    <View style={styles.metrics}><MetricCard label="Passing rule met" value={String(passing)} tone="success" /><MetricCard label="Below rule" value={String(visible.filter((item) => item.classification === 'failing').length)} tone="warning" /><MetricCard label="Students in applied risk levels" value={String(visible.length)} tone="danger" /><MetricCard label="Assessments" value={String(props.workspace.assessments.length)} tone="info" /></View>
+    {props.classes.length > 1 ? <SelectField label="Class scope" value={allClasses ? 'all-classes' : props.selectedClassId} options={[{ label: 'All classes assigned to me', value: 'all-classes' }, ...props.classes.map((item) => ({ label: `${item.code} · ${item.section}`, value: item.id }))]} onChange={(value) => { if (value === 'all-classes') setAllClasses(true); else { setAllClasses(false); props.setSelectedClassId(value); } }} containerStyle={styles.classSelect} /> : <ClassSelect {...props} />}{filters.controls}
+    {allClasses && !allClassWorkspaces ? <Text style={styles.help}>Loading analytics for all assigned classes…</Text> : null}
+    <View style={styles.metrics}><MetricCard label="Passing rule met" value={String(passing)} tone="success" /><MetricCard label="Below rule" value={String(visible.filter((item) => item.classification === 'failing').length)} tone="warning" /><MetricCard label="Students in applied risk levels" value={String(visible.length)} tone="danger" /><MetricCard label="Assessments" value={String(analyticsWorkspace.assessments.length)} tone="info" /></View>
     <Suspense fallback={<Card><Text style={styles.cardTitle}>Preparing analytics charts…</Text></Card>}>
       <View style={styles.analyticsCharts}><LazyVisualizationPanel title="Student score histogram" description="Filtered continuous SWUNEXT scores grouped into score bands." data={scores} type="histogram" suffix="%" /><LazyVisualizationPanel title="Risk distribution" description={`Applied criteria: ${evaluationDefinition.name}`} data={riskDistribution} type="pie" /><LazyVisualizationPanel title="Passing rule status" description="Binary pass and not yet passing classification." data={passFail} type="pie" /></View>
       <LazyVisualizationPanel title="Assessment trend" description="Mean assessment score over time for students matching these filters." data={assessmentTrend} type="line" suffix="%" />
     </Suspense>
     <Card><Text style={styles.help}>P1 and P2 are running cumulative views only. Final grade uses P3 effortful learning at 55% and FE mastery at 45%. Exports contain APMS monitoring data only and are not SIS submission files.</Text></Card>
-    <ReportComposer title="Faculty Class Monitoring Report" scopeLabel={selectedClass ? `${selectedClass.code} · ${selectedClass.section}` : 'Assigned class'} description="Provisional student standing and advisory risk for your assigned class scope." rows={reportRows} scopeOptions={reportScopeOptions} />
+    <ReportComposer title="Faculty Class Monitoring Report" scopeLabel={allClasses ? 'All classes assigned to me' : selectedClass ? `${selectedClass.code} · ${selectedClass.section}` : 'Assigned class'} description="Provisional student standing and advisory risk for your assigned class scope." rows={reportRows} scopeOptions={reportScopeOptions} />
   </>;
 }
 

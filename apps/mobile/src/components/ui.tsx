@@ -1,4 +1,4 @@
-import { createContext, createElement, useCallback, useContext, useEffect, useRef, useState, type ChangeEvent, type PropsWithChildren, type ReactNode } from "react";
+import { createContext, createElement, useCallback, useContext, useEffect, useMemo, useRef, useState, type ChangeEvent, type PropsWithChildren, type ReactNode } from "react";
 import {
   ActivityIndicator,
   Modal,
@@ -20,6 +20,7 @@ import { colors, radius, shadow, space } from "@/theme/tokens";
 import { AppIcon } from "@/components/Icon";
 import type { AppIconName } from "@/components/Icon";
 import { formatStudentId, formatStudentIdInput } from "@/utils/studentId";
+import { loadFailingGradesRedPreference, loadTablePaginationPreference } from "@/services/actions";
 
 function buttonIcon(label: string): AppIconName {
   const action = label.trim().toLowerCase();
@@ -81,6 +82,7 @@ export function Button({
   loading = false,
   icon,
   description,
+  compact = false,
 }: {
   label: string;
   onPress?: () => void;
@@ -89,9 +91,11 @@ export function Button({
   loading?: boolean;
   icon?: AppIconName;
   description?: string;
+  compact?: boolean;
 }) {
   const hint = description ?? buttonDescription(label);
   const compactControls = useContext(CompactControlsContext);
+  const dense = compactControls || compact;
   return (
     <Pressable
       accessibilityRole="button"
@@ -103,7 +107,7 @@ export function Button({
       onPress={onPress}
       style={({ pressed }) => [
         styles.button,
-        compactControls && styles.buttonDense,
+        dense && styles.buttonDense,
         styles[`button_${variant}`],
         pressed && styles.pressed,
         (disabled || loading) && styles.disabled,
@@ -124,7 +128,7 @@ export function Button({
           <Text
             style={[
               styles.buttonText,
-              compactControls && styles.buttonTextDense,
+              dense && styles.buttonTextDense,
               variant !== "primary" &&
                 variant !== "danger" &&
                 styles.buttonTextDark,
@@ -251,6 +255,7 @@ export function SelectField({
   controlRef,
   controlDataSet,
   onKeyDown,
+  hideLabel = false,
 }: {
   label: string;
   value: string;
@@ -271,6 +276,7 @@ export function SelectField({
   controlRef?: (instance: any) => void;
   controlDataSet?: Record<string, string>;
   onKeyDown?: (event: any) => void;
+  hideLabel?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -281,7 +287,7 @@ export function SelectField({
     : options;
   return (
     <View style={[styles.field, compactControls && styles.fieldDense, compact && styles.compactField, containerStyle]}>
-      <View style={styles.labelRow}><Text style={[styles.label, compact && styles.compactLabel]}>{label}</Text>{helpText ? <HelpTooltip title={label} text={helpText} example={helpExample} /> : null}</View>
+      {!hideLabel ? <View style={styles.labelRow}><Text style={[styles.label, compact && styles.compactLabel]}>{label}</Text>{helpText ? <HelpTooltip title={label} text={helpText} example={helpExample} /> : null}</View> : null}
       <Pressable
         ref={controlRef as any}
         accessibilityRole="button"
@@ -443,6 +449,31 @@ export function Badge({
 }
 
 type DataTableCell = string | ReactNode;
+const tablePageSizes = [5, 10, 25, 50, 100, 500];
+
+const TablePaginationContext = createContext({ enabled: true, setEnabled: (_enabled: boolean) => {}, failingGradesRed: true, setFailingGradesRed: (_enabled: boolean) => {} });
+
+export function TablePaginationProvider({ userId, demoMode, children }: PropsWithChildren<{ userId?: string; demoMode: boolean }>) {
+  const [enabled, setEnabled] = useState(true);
+  const [failingGradesRed, setFailingGradesRed] = useState(true);
+  useEffect(() => {
+    let active = true;
+    setEnabled(true);
+    setFailingGradesRed(true);
+    void loadTablePaginationPreference(demoMode ? undefined : userId).then((value) => { if (active) setEnabled(value); }).catch(() => {});
+    void loadFailingGradesRedPreference(demoMode ? undefined : userId).then((value) => { if (active) setFailingGradesRed(value); }).catch(() => {});
+    return () => { active = false; };
+  }, [userId, demoMode]);
+  return <TablePaginationContext.Provider value={{ enabled, setEnabled, failingGradesRed, setFailingGradesRed }}>{children}</TablePaginationContext.Provider>;
+}
+
+export function useTablePaginationPreference() {
+  return useContext(TablePaginationContext);
+}
+
+export function TablePageSizeSelect({ value, onChange }: { value: number; onChange: (value: number) => void }) {
+  return <SelectField label="Rows per page" hideLabel compact value={String(value)} options={tablePageSizes.map((size) => ({ label: `${size} rows`, value: String(size) }))} onChange={(next) => onChange(Number(next))} containerStyle={styles.tablePageSizeField} accessibilityLabel="Rows per page" />;
+}
 
 function isTextCell(cell: DataTableCell): cell is string {
   return typeof cell === "string";
@@ -475,29 +506,144 @@ export function DataTable<Row extends DataTableCell[]>({
   onRowPress,
   columnWidths,
   compact = false,
+  paginationEnabled,
+  widthMode,
+  columnHeaderContent,
+  columnFlex,
+  highlightRow,
+  highlightCell,
 }: {
   columns: string[];
   rows: Row[];
   onRowPress?: (row: Row) => void;
   columnWidths?: number[];
   compact?: boolean;
+  paginationEnabled?: boolean;
+  widthMode?: "content" | "container";
+  columnHeaderContent?: (ReactNode | undefined)[];
+  columnFlex?: number[];
+  highlightRow?: (row: Row) => boolean;
+  highlightCell?: (row: Row, columnIndex: number) => boolean;
 }) {
+  const paginationPreference = useTablePaginationPreference();
+  const highlightFailingGrades = paginationPreference.failingGradesRed;
+  const shouldPaginate = paginationEnabled ?? paginationPreference.enabled;
+  const resolvedWidthMode = widthMode ?? (compact ? "content" : "container");
+  const [sort, setSort] = useState<{ index: number; direction: "asc" | "desc" } | null>(null);
+  const [filters, setFilters] = useState<Record<number, string>>({});
+  const [dateRanges, setDateRanges] = useState<Record<number, TableDateRange>>({});
+  const [multiFilters, setMultiFilters] = useState<Record<number, string[]>>({});
+  const [filterColumn, setFilterColumn] = useState<number | null>(null);
+  const [hoveredHeader, setHoveredHeader] = useState<number | null>(null);
+  const [page, setPage] = useState(0);
+  const [pageSize, setPageSize] = useState(10);
+  const [availableWidth, setAvailableWidth] = useState(0);
   const studentIdColumns = columns.map((column) => /student\s*(?:id|number)\b/i.test(column));
+  const statusColumns = columns.map((column) => /^(?:status|state)$/i.test(column.trim()));
+  const actionColumns = columns.map((column) => /^(?:actions?|manage|edit|view|remove|delete|select)$/i.test(column.trim()));
+  const filterKinds = useMemo(() => columns.map((column, index) => tableFilterKind(column, rows, index)), [columns, rows]);
+  const categoricalOptions = useMemo(() => columns.map((_, index) => filterKinds[index] === "multi"
+    ? [...new Set(rows.map((row) => row[index]).filter(isTextCell).map((value) => value.trim()).filter(Boolean))].sort((a, b) => a.localeCompare(b, undefined, { numeric: true, sensitivity: "base" }))
+    : []), [columns, filterKinds, rows]);
+  const widths = useMemo(() => columns.map((column, index) => {
+    if (columnWidths?.[index]) return columnWidths[index];
+    if (actionColumns[index]) return 96;
+    const values = rows.map((row) => row[index]).filter(isTextCell) as string[];
+    const longest = Math.max(column.length, ...values.map((value) => value.length));
+    const paragraphLike = values.some((value) => value.includes("\n") || value.length > 72);
+    return paragraphLike ? 280 : longest <= 8 ? 88 : longest <= 15 ? 112 : longest <= 26 ? 148 : 210;
+  }), [columns, columnWidths, rows, actionColumns]);
+  const visibleRows = useMemo(() => {
+    const filtered = rows.filter((row) => columns.every((_, index) => {
+      const cell = row[index];
+      const textFilter = filters[index]?.trim();
+      if (textFilter && (!isTextCell(cell) || !cell.toLocaleLowerCase().includes(textFilter.toLocaleLowerCase()))) return false;
+      const selected = multiFilters[index] ?? [];
+      if (selected.length && (!isTextCell(cell) || !selected.includes(cell.trim()))) return false;
+      const range = dateRanges[index];
+      if (range?.from || range?.to) {
+        if (!isTextCell(cell)) return false;
+        const timestamp = new Date(cell).getTime();
+        if (!Number.isFinite(timestamp)) return false;
+        const dateOnly = filterKinds[index] === "date";
+        const fromTimestamp = range.from ? new Date(dateOnly ? `${range.from}T00:00:00` : range.from).getTime() : null;
+        const toTimestamp = range.to ? new Date(dateOnly ? `${range.to}T23:59:59.999` : range.to).getTime() : null;
+        if (fromTimestamp != null && Number.isFinite(fromTimestamp) && timestamp < fromTimestamp) return false;
+        if (toTimestamp != null && Number.isFinite(toTimestamp) && timestamp > toTimestamp) return false;
+      }
+      return true;
+    }));
+    if (!sort) return filtered;
+    return [...filtered].sort((left, right) => {
+      const a = left[sort.index];
+      const b = right[sort.index];
+      const leftValue = isTextCell(a) ? a : "";
+      const rightValue = isTextCell(b) ? b : "";
+      const normalizedA = leftValue.replace(/[,\s%]/g, "");
+      const normalizedB = rightValue.replace(/[,\s%]/g, "");
+      const numericA = Number(normalizedA);
+      const numericB = Number(normalizedB);
+      const numericValues = /^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(normalizedA) && /^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(normalizedB);
+      const leftDate = filterKinds[sort.index] === "date" || filterKinds[sort.index] === "dateTime" ? new Date(leftValue).getTime() : Number.NaN;
+      const rightDate = filterKinds[sort.index] === "date" || filterKinds[sort.index] === "dateTime" ? new Date(rightValue).getTime() : Number.NaN;
+      const compared = Number.isFinite(leftDate) && Number.isFinite(rightDate)
+        ? leftDate - rightDate
+        : numericValues
+          ? numericA - numericB
+          : leftValue.localeCompare(rightValue, undefined, { numeric: true, sensitivity: "base" });
+      return sort.direction === "asc" ? compared : -compared;
+    });
+  }, [rows, columns, filters, dateRanges, multiFilters, filterKinds, sort]);
+  const contentWidth = widths.reduce((total, width) => total + width, 0);
+  const tableWidth = resolvedWidthMode === "container" ? Math.max(contentWidth, availableWidth) : contentWidth;
+  const extraWidth = Math.max(0, tableWidth - contentWidth);
+  const automaticFlex: number[] = columns.map((column, index) => actionColumns[index] ? 0 : /name|title|department|program|subject|student|email|description|entity|actor|scope|term|criteria/i.test(column) ? 1 : 0);
+  const automaticFlexTotal = automaticFlex.reduce<number>((total, weight) => total + weight, 0);
+  const fallbackFlex = columns.map((_, index) => actionColumns[index] ? 0 : 1);
+  const fitFlex = columnFlex ?? (automaticFlexTotal ? automaticFlex : fallbackFlex);
+  const flexTotal = fitFlex.reduce((total, weight) => total + Math.max(0, weight), 0);
+  const fittedWidths = extraWidth > 0 && flexTotal > 0
+    ? widths.map((width, index) => width + extraWidth * Math.max(0, fitFlex[index] ?? 0) / flexTotal)
+    : extraWidth > 0 && contentWidth > 0
+      ? widths.map((width) => width * tableWidth / contentWidth)
+      : widths;
+  const pageCount = Math.max(1, Math.ceil(visibleRows.length / pageSize));
+  const displayedRows = shouldPaginate ? visibleRows.slice(page * pageSize, (page + 1) * pageSize) : visibleRows;
+  const columnStyle = (index: number) => ({ width: fittedWidths[index], flexBasis: fittedWidths[index], flexGrow: 0, flexShrink: 0 });
+  useEffect(() => { setPage((current) => Math.min(current, pageCount - 1)); }, [pageCount]);
   return (
     <ScrollView
       horizontal
       showsHorizontalScrollIndicator
       accessibilityLabel="Scrollable data table"
+      onLayout={(event) => setAvailableWidth(event.nativeEvent.layout.width)}
     >
-      <View style={styles.table}>
+      <View style={[styles.table, { width: tableWidth }]}>
         <View style={[styles.tableRow, styles.tableHead, compact && styles.compactTableRow]}>
           {columns.map((column, index) => (
-            <Text key={column} style={[styles.cell, styles.headCell, compact && styles.compactCell, columnWidths?.[index] ? { width: columnWidths[index], flexBasis: columnWidths[index], flexGrow: 0, flexShrink: 0 } : null]}>
-              {column}
-            </Text>
+            <View key={column} style={[styles.cell, styles.headCellWrap, compact && styles.compactCell, columnStyle(index)]} {...(Platform.OS === "web" ? ({ onMouseEnter: () => setHoveredHeader(index), onMouseLeave: () => setHoveredHeader((current) => current === index ? null : current) } as never) : {})}>
+              {columnHeaderContent?.[index] ? columnHeaderContent[index] : <>
+                <View style={styles.tableHeaderLine}>
+                  <Text numberOfLines={2} style={styles.headCellText}>{column}</Text>
+                  {!actionColumns[index] ? <View style={[styles.tableHeaderActions, Platform.OS === "web" && hoveredHeader !== index && sort?.index !== index && filterColumn !== index && !filters[index] && !dateRanges[index]?.from && !dateRanges[index]?.to && !multiFilters[index]?.length && styles.tableHeaderActionsHidden]}>
+                    <Pressable accessibilityRole="button" accessibilityLabel={`Sort by ${column}`} {...(Platform.OS === "web" ? ({ title: `Sort by ${column}`, onFocus: () => setHoveredHeader(index) } as never) : {})} onPress={() => { setPage(0); setSort((current) => current?.index === index ? { index, direction: current.direction === "asc" ? "desc" : "asc" } : { index, direction: "asc" }); }} style={[styles.tableTool, sort?.index === index && styles.tableToolActive]}>
+                      <AppIcon name={sort?.index === index && sort.direction === "desc" ? "sortDescending" : "sortAscending"} size={12} color={sort?.index === index ? colors.brand : colors.textMuted} />
+                    </Pressable>
+                    <Pressable accessibilityRole="button" accessibilityLabel={`${filterColumn === index ? "Hide" : "Filter"} ${column}`} {...(Platform.OS === "web" ? ({ title: `Filter ${column}`, onFocus: () => setHoveredHeader(index) } as never) : {})} onPress={() => setFilterColumn((current) => current === index ? null : index)} style={[styles.tableTool, Boolean(filterColumn === index || filters[index] || dateRanges[index]?.from || dateRanges[index]?.to || multiFilters[index]?.length) && styles.tableToolActive]}>
+                      <AppIcon name="filter" size={12} color={Boolean(filterColumn === index || filters[index] || dateRanges[index]?.from || dateRanges[index]?.to || multiFilters[index]?.length) ? colors.brand : colors.textMuted} />
+                    </Pressable>
+                  </View> : null}
+                </View>
+                {!actionColumns[index] && filterColumn === index ? filterKinds[index] === "date" || filterKinds[index] === "dateTime"
+                  ? <TableDateRangeFilter column={column} kind={filterKinds[index] as "date" | "dateTime"} value={dateRanges[index] ?? { from: "", to: "" }} onApply={(range) => { setPage(0); setDateRanges((current) => ({ ...current, [index]: range })); }} />
+                  : filterKinds[index] === "multi"
+                    ? <TableMultiSelectFilter column={column} options={categoricalOptions[index]} selected={multiFilters[index] ?? []} onChange={(values) => { setPage(0); setMultiFilters((current) => ({ ...current, [index]: values })); }} />
+                    : <TextInput accessibilityLabel={`Filter ${column}`} placeholder="Filter…" placeholderTextColor="#99A1AF" value={filters[index] ?? ""} onChangeText={(value) => { setPage(0); setFilters((current) => ({ ...current, [index]: value })); }} style={styles.tableFilterInput} /> : null}
+              </>}
+            </View>
           ))}
         </View>
-          {rows.map((row, index) => (
+          {displayedRows.map((row, index) => (
             <Pressable
               key={`${row[0]}-${index}`}
               accessibilityRole={onRowPress ? "button" : undefined}
@@ -509,17 +655,20 @@ export function DataTable<Row extends DataTableCell[]>({
               style={({ pressed }) => [
                 styles.tableRow,
                 compact && styles.compactTableRow,
+                highlightRow?.(row) && styles.tableRowHighlighted,
               pressed && onRowPress && styles.rowPressed,
             ]}
           >
               {row.map((cell, cellIndex) => (
-                <View key={`${cell}-${cellIndex}`} style={[styles.cell, compact && styles.compactCell, columnWidths?.[cellIndex] ? { width: columnWidths[cellIndex], flexBasis: columnWidths[cellIndex], flexGrow: 0, flexShrink: 0 } : null]}>
-                  {cellIndex === row.length - 1 && isTextCell(cell) && isStatusCell(cell) ? (
+                <View key={`${cellIndex}-${String(cell)}`} style={[styles.cell, compact && styles.compactCell, columnStyle(cellIndex)]}>
+                  {(statusColumns[cellIndex] || cellIndex === row.length - 1 || (isTextCell(cell) && cell.trim().toLowerCase() === "unavailable")) && isTextCell(cell) && isStatusCell(cell) ? (
                     <Badge
                       tone={
-                        cell.includes("High") || cell.includes("Failed")
+                        /^(?:inactive|closed|archived|disabled|never|unavailable)$/i.test(cell.trim())
+                        ? "neutral"
+                        : /high|failed|rejected|suspended|invalid/i.test(cell)
                         ? "danger"
-                        : cell.includes("Medium") || cell.includes("Warning")
+                        : /medium|warning|pending|planned/i.test(cell)
                           ? "warning"
                           : "success"
                     }
@@ -527,12 +676,26 @@ export function DataTable<Row extends DataTableCell[]>({
                       {cell}
                     </Badge>
                   ) : (
-                    isTextCell(cell) ? <Text style={styles.cellText}>{studentIdColumns[cellIndex] ? formatStudentId(cell) : cell}</Text> : cell
+                    isTextCell(cell) ? <Text style={[styles.cellText, onRowPress && cellIndex === 0 && styles.entityLink, highlightFailingGrades && (highlightCell?.(row, cellIndex) || isFailingGradeCell(columns[cellIndex], cell)) && styles.failingGradeCell]}>{studentIdColumns[cellIndex] ? formatStudentId(cell) : cell}</Text> : cell
                   )}
                 </View>
               ))}
             </Pressable>
         ))}
+        {!visibleRows.length ? <View style={styles.tableEmpty}><Text style={styles.tableEmptyText}>No matching rows</Text></View> : null}
+        {shouldPaginate && visibleRows.length > 0 ? (
+          <View style={styles.tablePagination}>
+            <View style={styles.tablePaginationSummary}>
+              <Text style={styles.tablePaginationText}>Showing {page * pageSize + 1}–{Math.min((page + 1) * pageSize, visibleRows.length)} of {visibleRows.length}</Text>
+              <TablePageSizeSelect value={pageSize} onChange={(value) => { setPageSize(value); setPage(0); }} />
+            </View>
+            <View style={styles.tablePaginationActions}>
+              <Text style={styles.tablePaginationPage}>Page {page + 1} of {pageCount}</Text>
+              <Pressable accessibilityRole="button" accessibilityLabel="Previous page" disabled={page === 0} onPress={() => setPage((current) => Math.max(0, current - 1))} style={[styles.tablePageButton, page === 0 && styles.tablePageButtonDisabled]}><AppIcon name="previous" size={13} color={page === 0 ? "#A1A1AA" : colors.text} /></Pressable>
+              <Pressable accessibilityRole="button" accessibilityLabel="Next page" disabled={page >= pageCount - 1} onPress={() => setPage((current) => Math.min(pageCount - 1, current + 1))} style={[styles.tablePageButton, page >= pageCount - 1 && styles.tablePageButtonDisabled]}><AppIcon name="next" size={13} color={page >= pageCount - 1 ? "#A1A1AA" : colors.text} /></Pressable>
+            </View>
+          </View>
+        ) : null}
       </View>
     </ScrollView>
   );
@@ -611,7 +774,7 @@ export function ConfirmDialog({
             {title}
           </Text>
           <Text style={styles.dialogMessage}>{message}</Text>
-          <View style={styles.dialogActions}>
+          <View style={styles.confirmDialogActions}>
             <Button
               label={cancelLabel}
               variant="secondary"
@@ -681,15 +844,17 @@ export function SearchFilter({
   onChange,
   placeholder = "Search records...",
   accessibilityLabel = "Search records",
+  containerStyle,
 }: {
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   accessibilityLabel?: string;
+  containerStyle?: StyleProp<ViewStyle>;
 }) {
   const compactControls = useContext(CompactControlsContext);
   return (
-    <View style={[styles.search, compactControls && styles.searchDense]}>
+    <View style={[styles.search, compactControls && styles.searchDense, containerStyle]}>
       <AppIcon name="search" size={18} color={colors.textMuted} />
       <TextInput
         accessibilityLabel={accessibilityLabel}
@@ -709,6 +874,120 @@ const CompactControlsContext = createContext(false);
 
 export function CompactControlsProvider({ children }: PropsWithChildren) {
   return <CompactControlsContext.Provider value={true}>{children}</CompactControlsContext.Provider>;
+}
+
+function isFailingGradeCell(column: string, value: string) {
+  const normalizedColumn = column.trim().toLowerCase();
+  if (!/(?:score|grade|standing|mastery|effort|final|percentage|^p[1-3]$)/i.test(normalizedColumn)) return false;
+  const normalizedValue = value.trim();
+  if (/^(?:fail|failing)$/i.test(normalizedValue) || /\bfailing\b/i.test(normalizedValue)) return true;
+  const percentage = normalizedValue.match(/^(-?\d+(?:\.\d+)?)\s*%$/);
+  return percentage ? Number(percentage[1]) < 80 : false;
+}
+
+type TableFilterKind = "date" | "dateTime" | "multi" | "text";
+type TableDateRange = { from: string; to: string };
+
+function tableFilterKind(column: string, rows: DataTableCell[][], index: number): TableFilterKind {
+  const values = rows.map((row) => row[index]).filter(isTextCell).map((value) => value.trim()).filter(Boolean);
+  const dateColumn = /\b(date|time|timestamp|created|updated|login|completed|starts|ends)\b/i.test(column);
+  if (dateColumn && values.some((value) => Number.isFinite(new Date(value).getTime()))) {
+    return /\b(time|timestamp|created|updated|login|completed)\b/i.test(column) || values.some((value) => /\d{1,2}:\d{2}/.test(value)) ? "dateTime" : "date";
+  }
+  const categoricalColumn = /\b(status|action|entity|role|scope|type|category|classification|severity|provider|model|result|permission|source|outcome|kind|semester|term|program|year|grade)\b/i.test(column);
+  const uniqueValues = new Set(values);
+  if (categoricalColumn && uniqueValues.size > 0 && uniqueValues.size <= 12 && values.every((value) => value.length <= 80 && !value.includes("\n"))) return "multi";
+  return "text";
+}
+
+function TableDateRangeFilter({ column, kind, value, onApply }: { column: string; kind: "date" | "dateTime"; value: TableDateRange; onApply: (value: TableDateRange) => void }) {
+  const [open, setOpen] = useState(false);
+  const [draft, setDraft] = useState(value);
+  const [calendarTarget, setCalendarTarget] = useState<"from" | "to">("from");
+  const [calendarMonth, setCalendarMonth] = useState(() => new Date(new Date().getFullYear(), new Date().getMonth(), 1));
+  useEffect(() => { if (!open) setDraft(value); }, [open, value]);
+  const active = !!(value.from || value.to);
+  const inputType = kind === "dateTime" ? "datetime-local" : "date";
+  const inputStyle = Platform.OS === "web" ? styles.tableRangeInput : styles.tableRangeNativeInput;
+  const updateDateText = (key: "from" | "to", next: string) => setDraft((current) => ({ ...current, [key]: next }));
+  const renderInput = (label: string, key: "from" | "to") => <View style={styles.tableRangeInputRow}>
+    {Platform.OS === "web"
+      ? createElement("input", { type: inputType, value: draft[key], "aria-label": `${column} ${label.toLowerCase()}`, onChange: (event: ChangeEvent<HTMLInputElement>) => updateDateText(key, event.currentTarget.value), style: inputStyle })
+      : <TextInput accessibilityLabel={`${column} ${label.toLowerCase()}`} placeholder={kind === "dateTime" ? "YYYY-MM-DD HH:mm" : "YYYY-MM-DD"} value={draft[key]} onChangeText={(next) => updateDateText(key, next)} style={inputStyle} />}
+    <Pressable accessibilityRole="button" accessibilityLabel={`Choose calendar date for ${column} ${label.toLowerCase()}`} accessibilityState={{ selected: calendarTarget === key }} onPress={() => {
+      const currentDate = draft[key].slice(0, 10);
+      const parsed = /^\d{4}-\d{2}-\d{2}$/.test(currentDate) ? new Date(`${currentDate}T00:00:00`) : new Date();
+      setCalendarMonth(new Date(parsed.getFullYear(), parsed.getMonth(), 1));
+      setCalendarTarget(key);
+    }} style={styles.tableCalendarButton}><AppIcon name="events" size={15} color={calendarTarget === key ? colors.brand : colors.textMuted} /></Pressable>
+  </View>;
+  const daysInMonth = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 0).getDate();
+  const firstWeekday = new Date(calendarMonth.getFullYear(), calendarMonth.getMonth(), 1).getDay();
+  const selectedDate = calendarTarget ? draft[calendarTarget].slice(0, 10) : "";
+  const monthLabel = calendarMonth.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  return <>
+    <Pressable accessibilityRole="button" accessibilityLabel={`Set ${column} date range`} accessibilityState={{ expanded: open }} onPress={() => setOpen(true)} style={[styles.tableFilterTrigger, active && styles.tableFilterTriggerActive]}>
+      <Text numberOfLines={1} style={styles.tableFilterTriggerText}>{active ? `${value.from || "…"} – ${value.to || "…"}` : "Date range"}</Text>
+    </Pressable>
+    <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)} presentationStyle="overFullScreen">
+      <View style={styles.tableFilterOverlay}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Close date range filter" onPress={() => setOpen(false)} style={StyleSheet.absoluteFill} />
+        <View accessibilityViewIsModal style={styles.tableFilterDialog}>
+          <Text style={styles.tableFilterDialogTitle}>{column} range</Text>
+          <View style={styles.tableRangeFields}><View style={styles.tableRangeField}><Text style={styles.tableRangeLabel}>From</Text>{renderInput("From", "from")}</View><View style={styles.tableRangeField}><Text style={styles.tableRangeLabel}>To</Text>{renderInput("To", "to")}</View></View>
+          <View style={styles.tableCalendar}>
+            <View style={styles.tableCalendarHeader}>
+              <Pressable accessibilityRole="button" accessibilityLabel="Previous month" onPress={() => setCalendarMonth((current) => new Date(current.getFullYear(), current.getMonth() - 1, 1))} style={styles.tableCalendarNav}><Text style={styles.tableCalendarNavText}>‹</Text></Pressable>
+              <Text style={styles.tableCalendarMonth}>{monthLabel}</Text>
+              <Pressable accessibilityRole="button" accessibilityLabel="Next month" onPress={() => setCalendarMonth((current) => new Date(current.getFullYear(), current.getMonth() + 1, 1))} style={styles.tableCalendarNav}><Text style={styles.tableCalendarNavText}>›</Text></Pressable>
+            </View>
+            <View style={styles.tableCalendarGrid}>{["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"].map((day) => <Text key={day} style={styles.tableCalendarWeekday}>{day}</Text>)}
+              {Array.from({ length: firstWeekday }, (_, index) => <View key={`blank-${index}`} style={styles.tableCalendarDay} />)}
+              {Array.from({ length: daysInMonth }, (_, index) => {
+                const day = index + 1;
+                const dateValue = `${calendarMonth.getFullYear()}-${String(calendarMonth.getMonth() + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+                const selected = selectedDate === dateValue;
+                return <Pressable key={dateValue} accessibilityRole="button" accessibilityLabel={dateValue} accessibilityState={{ selected }} onPress={() => {
+                  const time = kind === "dateTime" ? (draft[calendarTarget].slice(11, 16) || (calendarTarget === "from" ? "00:00" : "23:59")) : "";
+                  updateDateText(calendarTarget, kind === "dateTime" ? `${dateValue}T${time}` : dateValue);
+                }} style={[styles.tableCalendarDay, selected && styles.tableCalendarDaySelected]}><Text style={[styles.tableCalendarDayText, selected && styles.tableCalendarDayTextSelected]}>{day}</Text></Pressable>;
+              })}
+            </View>
+          </View>
+          <View style={styles.tableFilterDialogActions}>
+            <Pressable accessibilityRole="button" onPress={() => { const cleared = { from: "", to: "" }; setDraft(cleared); onApply(cleared); setOpen(false); }} style={styles.tableFilterAction}><Text style={styles.tableFilterActionText}>Clear</Text></Pressable>
+            <Pressable accessibilityRole="button" onPress={() => { onApply(draft); setOpen(false); }} style={[styles.tableFilterAction, styles.tableFilterActionPrimary]}><Text style={[styles.tableFilterActionText, styles.tableFilterActionPrimaryText]}>Apply range</Text></Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  </>;
+}
+
+function TableMultiSelectFilter({ column, options, selected, onChange }: { column: string; options: string[]; selected: string[]; onChange: (values: string[]) => void }) {
+  const [open, setOpen] = useState(false);
+  const toggle = (option: string) => onChange(selected.includes(option) ? selected.filter((value) => value !== option) : [...selected, option]);
+  return <>
+    <Pressable accessibilityRole="button" accessibilityLabel={`Choose ${column} filter values`} accessibilityState={{ expanded: open }} onPress={() => setOpen(true)} style={[styles.tableFilterTrigger, selected.length > 0 && styles.tableFilterTriggerActive]}>
+      <Text numberOfLines={1} style={styles.tableFilterTriggerText}>{selected.length ? `${selected.length} selected` : "All values"}</Text>
+    </Pressable>
+    <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)} presentationStyle="overFullScreen">
+      <View style={styles.tableFilterOverlay}>
+        <Pressable accessibilityRole="button" accessibilityLabel={`Close ${column} filter`} onPress={() => setOpen(false)} style={StyleSheet.absoluteFill} />
+        <View accessibilityViewIsModal style={styles.tableFilterDialog}>
+          <Text style={styles.tableFilterDialogTitle}>Filter {column}</Text>
+          <ScrollView style={styles.tableMultiOptions}>{options.map((option) => <Pressable key={option} accessibilityRole="checkbox" accessibilityState={{ checked: selected.includes(option) }} onPress={() => toggle(option)} style={styles.tableMultiOption}>
+            <View style={[styles.tableMultiCheck, selected.includes(option) && styles.tableMultiCheckSelected]}><Text style={styles.tableMultiCheckMark}>{selected.includes(option) ? "✓" : ""}</Text></View>
+            <Text numberOfLines={2} style={styles.tableMultiOptionText}>{option}</Text>
+          </Pressable>)}</ScrollView>
+          <View style={styles.tableFilterDialogActions}>
+            <Pressable accessibilityRole="button" onPress={() => onChange([])} style={styles.tableFilterAction}><Text style={styles.tableFilterActionText}>Clear</Text></Pressable>
+            <Pressable accessibilityRole="button" onPress={() => setOpen(false)} style={[styles.tableFilterAction, styles.tableFilterActionPrimary]}><Text style={[styles.tableFilterActionText, styles.tableFilterActionPrimaryText]}>Done</Text></Pressable>
+          </View>
+        </View>
+      </View>
+    </Modal>
+  </>;
 }
 const unavailableToast: ToastState = { message: '', show: () => undefined, clear: () => undefined };
 
@@ -872,14 +1151,14 @@ export function useToast() {
 
 const styles = StyleSheet.create({
   button: {
-    minHeight: 40,
-    paddingHorizontal: 18,
+    minHeight: 36,
+    paddingHorizontal: 14,
     borderRadius: radius.medium,
     alignItems: "center",
     justifyContent: "center",
     backgroundColor: colors.brand,
   },
-  buttonDense: { minHeight: 36, paddingHorizontal: 15 },
+  buttonDense: { minHeight: 32, paddingHorizontal: 12 },
   button_primary: { backgroundColor: colors.brand },
   button_secondary: {
     backgroundColor: colors.surface,
@@ -919,11 +1198,11 @@ const styles = StyleSheet.create({
   helpTooltipExampleLabel: { color: colors.brand, fontSize: 10, fontWeight: "800", textTransform: "uppercase", marginBottom: 3 },
   helpTooltipExampleText: { color: colors.text, fontSize: 12, lineHeight: 17, fontFamily: Platform.OS === "web" ? "monospace" : undefined },
   input: {
-    minHeight: 44,
+    minHeight: 38,
     borderWidth: 1,
     borderColor: "#D1D5DB",
     borderRadius: radius.medium,
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
     backgroundColor: "#FFF",
     color: colors.text,
     fontSize: Platform.OS === "web" ? 14 : 16,
@@ -931,18 +1210,18 @@ const styles = StyleSheet.create({
   webDateInput: {
     boxSizing: "border-box",
     width: "100%",
-    height: 44,
+    height: 38,
     border: "1px solid #D1D5DB",
     borderRadius: radius.medium,
-    paddingHorizontal: 12,
+    paddingHorizontal: 16,
     paddingVertical: 0,
     backgroundColor: "#FFF",
     color: colors.text,
     fontSize: 14,
-    fontFamily: "inherit",
+    fontFamily: "Arial, sans-serif",
   } as never,
-  webDateInputDense: { boxSizing: "border-box", width: "100%", height: 40, border: "1px solid #D1D5DB", borderRadius: radius.small, paddingHorizontal: 10, paddingVertical: 0, backgroundColor: "#FFF", color: colors.text, fontSize: 13, fontFamily: "inherit" } as never,
-  inputDense: { minHeight: 40, height: 40, paddingHorizontal: 9, paddingVertical: 0, fontSize: Platform.OS === "web" ? 13 : 15, borderRadius: radius.small },
+  webDateInputDense: { boxSizing: "border-box", width: "100%", height: 40, border: "1px solid #D1D5DB", borderRadius: radius.small, paddingHorizontal: 16, paddingVertical: 0, backgroundColor: "#FFF", color: colors.text, fontSize: 14, fontFamily: "Arial, sans-serif" } as never,
+  inputDense: { minHeight: 36, height: 36, paddingHorizontal: 8, paddingVertical: 0, fontSize: Platform.OS === "web" ? 13 : 15, borderRadius: radius.small },
   inputError: { borderColor: colors.danger },
   secureInput: { paddingRight: 48 },
   visibilityToggle: {
@@ -1027,31 +1306,87 @@ const styles = StyleSheet.create({
   badgeText: { fontSize: 11, fontWeight: "600" },
   table: {
     width: "100%",
-    minWidth: 760,
     borderWidth: 1,
     borderColor: colors.border,
     borderRadius: radius.medium,
     overflow: "hidden",
+    backgroundColor: colors.surface,
   },
   tableRow: {
     flexDirection: "row",
-    minHeight: 50,
-    alignItems: "center",
+    minHeight: 42,
+    alignItems: "stretch",
     borderBottomWidth: 1,
     borderColor: colors.border,
     backgroundColor: "#FFF",
   },
-  compactTableRow: { minHeight: 36 },
-  tableHead: { backgroundColor: colors.surfaceMuted },
-  cell: { flex: 1, minWidth: 110, paddingHorizontal: 14 },
-  compactCell: { paddingVertical: 5, paddingHorizontal: 10 },
-  headCell: {
+  compactTableRow: { minHeight: 34 },
+  tableHead: { backgroundColor: "#FAFAFA", borderBottomWidth: 1 },
+  cell: { justifyContent: "center", minWidth: 0, paddingHorizontal: 9, paddingVertical: 8 },
+  compactCell: { paddingVertical: 5, paddingHorizontal: 8 },
+  headCellWrap: { justifyContent: "center", gap: 3, paddingVertical: 6 },
+  tableHeaderLine: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 3 },
+  headCellText: {
     color: colors.textMuted,
+    flex: 1,
     fontSize: 11,
     fontWeight: "700",
-    textTransform: "uppercase",
+    letterSpacing: 0.25,
   },
-  cellText: { color: colors.text, fontSize: 13 },
+  tableHeaderActions: { flexDirection: "row", alignItems: "center", gap: 1 },
+  tableHeaderActionsHidden: { display: "none" },
+  tableTool: { width: 20, height: 20, borderRadius: 5, alignItems: "center", justifyContent: "center", backgroundColor: "transparent" },
+  tableToolActive: { backgroundColor: "#F4EAE8" },
+  tableFilterInput: { minHeight: 27, height: 27, borderWidth: 1, borderColor: colors.border, borderRadius: 5, paddingHorizontal: 6, fontSize: 11, color: colors.text, backgroundColor: colors.surface } as never,
+  tableFilterTrigger: { minHeight: 27, justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 5, paddingHorizontal: 6, backgroundColor: colors.surface },
+  tableFilterTriggerActive: { borderColor: "#D8BDB7", backgroundColor: "#FFFDFC" },
+  tableFilterTriggerText: { color: colors.textMuted, fontSize: 10 },
+  tableFilterOverlay: { flex: 1, alignItems: "center", justifyContent: "center", padding: 16, backgroundColor: "#00000044" },
+  tableFilterDialog: { width: 360, maxWidth: "100%", maxHeight: "85%", gap: 12, padding: 14, borderWidth: 1, borderColor: colors.border, borderRadius: 10, backgroundColor: colors.surface, ...shadow },
+  tableFilterDialogTitle: { color: colors.text, fontSize: 14, fontWeight: "700" },
+  tableRangeFields: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
+  tableRangeField: { flex: 1, minWidth: 145, gap: 5 },
+  tableRangeLabel: { color: colors.textMuted, fontSize: 11, fontWeight: "600" },
+  tableRangeInputRow: { flexDirection: "row", alignItems: "center", gap: 5 },
+  tableRangeInput: { boxSizing: "border-box", flex: 1, width: "100%", minWidth: 0, height: 34, paddingHorizontal: 8, borderWidth: 1, borderStyle: "solid", borderColor: colors.border, borderRadius: 6, color: colors.text, backgroundColor: colors.surface, fontSize: 12 },
+  tableRangeNativeInput: { flex: 1, minWidth: 0, height: 34, borderWidth: 1, borderColor: colors.border, borderRadius: 6, paddingHorizontal: 8, color: colors.text, backgroundColor: colors.surface, fontSize: 12 } as never,
+  tableCalendarButton: { width: 30, height: 30, borderWidth: 1, borderColor: colors.border, borderRadius: 6, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface },
+  tableCalendar: { borderWidth: 1, borderColor: colors.border, borderRadius: 8, padding: 9, gap: 7 },
+  tableCalendarHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
+  tableCalendarNav: { width: 28, height: 28, alignItems: "center", justifyContent: "center", borderRadius: 5, backgroundColor: colors.canvas },
+  tableCalendarNavText: { color: colors.text, fontSize: 20, lineHeight: 22 },
+  tableCalendarMonth: { color: colors.text, fontSize: 12, fontWeight: "700" },
+  tableCalendarGrid: { flexDirection: "row", flexWrap: "wrap" },
+  tableCalendarWeekday: { width: "14.2857%", textAlign: "center", color: colors.textMuted, fontSize: 10, fontWeight: "600", paddingVertical: 4 },
+  tableCalendarDay: { width: "14.2857%", height: 30, alignItems: "center", justifyContent: "center", borderRadius: 5 },
+  tableCalendarDaySelected: { backgroundColor: colors.brand },
+  tableCalendarDayText: { color: colors.text, fontSize: 11 },
+  tableCalendarDayTextSelected: { color: "#FFF", fontWeight: "700" },
+  tableFilterDialogActions: { flexDirection: "row", justifyContent: "flex-end", gap: 8 },
+  tableFilterAction: { minHeight: 32, justifyContent: "center", paddingHorizontal: 10, borderRadius: 6, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  tableFilterActionPrimary: { borderColor: colors.brand, backgroundColor: colors.brand },
+  tableFilterActionText: { color: colors.text, fontSize: 12, fontWeight: "600" },
+  tableFilterActionPrimaryText: { color: "#FFF" },
+  tableMultiOptions: { maxHeight: 280 },
+  tableMultiOption: { flexDirection: "row", alignItems: "center", gap: 9, minHeight: 34, paddingVertical: 5 },
+  tableMultiCheck: { width: 17, height: 17, borderWidth: 1, borderColor: colors.border, borderRadius: 4, alignItems: "center", justifyContent: "center", backgroundColor: colors.surface },
+  tableMultiCheckSelected: { borderColor: colors.brand, backgroundColor: colors.brand },
+  tableMultiCheckMark: { color: "#FFF", fontSize: 11, fontWeight: "700", lineHeight: 13 },
+  tableMultiOptionText: { flex: 1, color: colors.text, fontSize: 12 },
+  cellText: { color: colors.text, fontSize: 12, lineHeight: 17 },
+  failingGradeCell: { color: colors.danger, fontWeight: "600" },
+  entityLink: { color: colors.brand, fontWeight: "600", textDecorationLine: "underline", textDecorationColor: "#D8BDB7" },
+  tableEmpty: { minHeight: 42, alignItems: "center", justifyContent: "center", borderTopWidth: 0 },
+  tableEmptyText: { color: colors.textMuted, fontSize: 12 },
+  tablePagination: { minHeight: 42, flexDirection: "row", flexWrap: "wrap", alignItems: "center", justifyContent: "space-between", gap: 10, paddingHorizontal: 10, paddingVertical: 4, borderTopWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  tablePaginationSummary: { flexDirection: "row", flexWrap: "wrap", alignItems: "center", gap: 8 },
+  tablePageSizeField: { width: 96 },
+  tablePaginationText: { color: colors.textMuted, fontSize: 11 },
+  tablePaginationActions: { flexDirection: "row", alignItems: "center", gap: 5 },
+  tablePaginationPage: { color: colors.textMuted, fontSize: 11, marginRight: 4 },
+  tablePageButton: { width: 27, height: 27, alignItems: "center", justifyContent: "center", borderWidth: 1, borderColor: colors.border, borderRadius: 5, backgroundColor: colors.surface },
+  tablePageButtonDisabled: { backgroundColor: "#FAFAFA", opacity: 0.7 },
+  tableRowHighlighted: { backgroundColor: "#F0FDF4" },
   rowPressed: { backgroundColor: "#FCF8F7" },
   state: { padding: 42, alignItems: "center", gap: 8 },
   stateIcon: {
@@ -1089,6 +1424,14 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "flex-end",
     gap: 8,
+  },
+  confirmDialogActions: {
+    marginTop: 24,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 20,
   },
   toast: {
     position: "absolute",

@@ -5,7 +5,7 @@ import { Modal, Platform, Pressable, ScrollView, Share, StyleSheet, Text, View }
 import { useAuth } from '@/auth/AuthProvider';
 import { AppIcon } from '@/components/Icon';
 import { supabase } from '@/services/supabase';
-import { Badge, Button, Card, ConfirmDialog, DataTable, Field, HelpTooltip, MetricCard, PageState, RangeSlider, RefreshIndicator, SelectField, useToast } from '@/components/ui';
+import { Badge, Button, Card, ConfirmDialog, DataTable, DateField, Field, HelpTooltip, MetricCard, PageState, RangeSlider, RefreshIndicator, SelectField, useToast } from '@/components/ui';
 import { useAnalyticsFilters } from '@/components/charts/AnalyticsFilters';
 import { ReportComposer, type ReportRecord } from '@/components/reports/ReportComposer';
 import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
@@ -152,6 +152,7 @@ export function AcademicAdminPortalContent({ screen }: { screen: string }) {
     {screen === 'students' ? <Students {...props} /> : null}
     {screen === 'risk' ? <Risk {...props} /> : null}
     {screen === 'criteria' ? <Criteria {...props} /> : null}
+    {screen === 'deadlines' ? <GradeDeadlineRequests {...props} /> : null}
     {screen === 'analytics' ? <Analytics {...props} /> : null}
     {screen === 'settings' ? <AccountSettings role="academic_admin" screen="settings" onMessage={(message) => toast.show(message)} /> : null}
   </View>;
@@ -180,8 +181,88 @@ function Overview({ data }: Props) {
   });
   const riskCounts = riskOptions.slice(1).map((option) => ({ label: option.label, value: filters.filtered.filter((row) => row.risk === option.value).length }));
   const filteredAlerts = alertRows.filter((row) => visibleIds.has(row.student.enrollmentId));
-  return <><Heading title="Academic Administration Dashboard" subtitle={`Live, department-scoped monitoring for ${data.department?.name ?? 'your assigned academic unit'}. Official grades remain in SWU SIS.`} /><View style={styles.metrics}><MetricCard label="Active classes" value={String(data.classes.length)} /><MetricCard label="Students monitored" value={String(unique.size)} tone="info" /><MetricCard label="At-risk class records" value={String(alertRows.length)} tone={alertRows.length ? 'danger' : 'success'} /><MetricCard label="Average current standing" value={scores.length ? `${(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1)}%` : '—'} tone="success" /></View>{filters.controls}<View style={styles.analyticsCharts}><VisualizationPanel title="Average score by class" description="Current provisional standing by department class for matching student records." data={scoreByClass} type="bar" suffix="%" /><VisualizationPanel title="Risk distribution" description="Applied evaluation criteria and their configured risk levels for each class." data={riskCounts} type="pie" /></View><Card><Text style={styles.cardTitle}>Priority monitoring</Text>{filteredAlerts.length ? <DataTable columns={['Student', 'Class', 'Current', 'Attendance', 'Risk']} rows={filteredAlerts.slice(0, 15).map((row) => [row.student.name, `${row.item.code} · ${row.item.section}`, row.score == null ? 'Missing' : `${row.score.toFixed(1)}%`, row.rate == null ? 'No data' : `${row.rate.toFixed(0)}%`, `${row.riskLevelName} (${row.risk})`])} /> : <PageState kind="empty" title="No active alerts" message="Alerts appear when department records indicate performance or attendance concern." />}</Card></>;
+  const priorityRows = filteredAlerts.slice(0, 15);
+  return <><Heading title="Academic Administration Dashboard" subtitle={`Live, department-scoped monitoring for ${data.department?.name ?? 'your assigned academic unit'}. Official grades remain in SWU SIS.`} /><View style={styles.metrics}><MetricCard label="Active classes" value={String(data.classes.length)} /><MetricCard label="Students monitored" value={String(unique.size)} tone="info" /><MetricCard label="At-risk class records" value={String(alertRows.length)} tone={alertRows.length ? 'danger' : 'success'} /><MetricCard label="Average current standing" value={scores.length ? `${(scores.reduce((a, b) => a + b, 0) / scores.length).toFixed(1)}%` : '—'} tone="success" /></View>{filters.controls}<View style={styles.analyticsCharts}><VisualizationPanel title="Average score by class" description="Current provisional standing by department class for matching student records." data={scoreByClass} type="bar" suffix="%" /><VisualizationPanel title="Risk distribution" description="Applied evaluation criteria and their configured risk levels for each class." data={riskCounts} type="pie" /></View><Card><Text style={styles.cardTitle}>Priority monitoring</Text>{priorityRows.length ? <DataTable columns={['Student', 'Class', 'Current', 'Attendance', 'Risk']} rows={priorityRows.map((row) => [row.student.name, `${row.item.code} · ${row.item.section}`, row.score == null ? 'Missing' : `${row.score.toFixed(1)}%`, row.rate == null ? 'No data' : `${row.rate.toFixed(0)}%`, <Badge key={`${row.student.enrollmentId}-risk`} color={row.risk === 'unavailable' ? '#94A3B8' : row.riskLevelColor ?? colors.textMuted}>{row.riskLevelName}</Badge>])} highlightCell={(tableRow, columnIndex) => columnIndex === 2 && priorityRows.find((row) => row.student.name === tableRow[0] && `${row.item.code} · ${row.item.section}` === tableRow[1])?.summary.remarks === 'failing'} /> : <PageState kind="empty" title="No active alerts" message="Alerts appear when department records indicate performance or attendance concern." />}</Card></>;
 }
+
+const gradeDeadlinePeriods = [{ key: 'overall', label: 'Overall encoding' }, { key: 'p1', label: 'Period 1' }, { key: 'p2', label: 'Period 2' }, { key: 'p3', label: 'Period 3' }];
+function GradeDeadlineRequests({ data, userId, toast }: Props) {
+  const [scopeType, setScopeType] = useState<'program' | 'year_level'>('program');
+  const [programId, setProgramId] = useState(data.programs[0]?.id ?? '');
+  const [yearLevel, setYearLevel] = useState('1');
+  const [deadlines, setDeadlines] = useState<Record<string, string>>({ overall: '', p1: '', p2: '', p3: '' });
+  const [rationale, setRationale] = useState('');
+  const [requests, setRequests] = useState<any[]>([]);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    if (!supabase) return;
+    const [globalResult, requestResult] = await Promise.all([
+      supabase.from('grade_encoding_deadlines').select('period_key,deadline_at').eq('scope_type', 'system'),
+      supabase.from('grade_encoding_deadline_requests').select('id,scope_type,program_id,year_level,requested_deadlines,rationale,status,review_note,created_at').eq('requested_by', userId).order('created_at', { ascending: false }).limit(100),
+    ]);
+    const error = globalResult.error ?? requestResult.error;
+    if (error) throw error;
+    setRequests(requestResult.data ?? []);
+    return globalResult.data ?? [];
+  }, [userId]);
+  const [globalDeadlines, setGlobalDeadlines] = useState<Record<string, string>>({});
+  useEffect(() => { void load().then((rows) => { if (rows) setGlobalDeadlines(Object.fromEntries(rows.map((row) => [row.period_key, String(row.deadline_at).slice(0, 10)]))); }).catch((cause) => toast.show(getErrorMessage(cause, 'Grade deadline information could not be loaded.'))); }, [load, toast]);
+  const submit = async () => {
+    if (!supabase || !data.department) return toast.show('Your department scope is unavailable.');
+    const requested = Object.fromEntries(gradeDeadlinePeriods.flatMap(({ key }) => deadlines[key] ? [[key, `${deadlines[key]}T23:59:59+08:00`]] : []));
+    if (!Object.keys(requested).length) return toast.show('Enter at least one deadline to request.');
+    if (rationale.trim().length < 10) return toast.show('Explain why the deadline change is needed (at least 10 characters).');
+    setBusy(true);
+    try {
+      const { error } = await supabase.from('grade_encoding_deadline_requests').insert({
+        department_id: data.department.id,
+        requested_by: userId,
+        scope_type: scopeType,
+        program_id: scopeType === 'program' ? programId : null,
+        year_level: scopeType === 'year_level' ? Number(yearLevel) : null,
+        requested_deadlines: requested,
+        rationale: rationale.trim(),
+      });
+      if (error) throw error;
+      toast.show('Grade deadline request sent for System Admin review.');
+      setDeadlines({ overall: '', p1: '', p2: '', p3: '' }); setRationale('');
+      await load();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'The deadline request could not be submitted.')); }
+    finally { setBusy(false); }
+  };
+  const displayDeadline = (value: unknown) => {
+    if (typeof value !== 'string' || !value) return 'Not set';
+    const date = value.slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T12:00:00`).toLocaleDateString() : 'Not set';
+  };
+  return <>
+    <Heading title="Grade encoding deadlines" subtitle="Request department-scoped deadline changes. Approved requests override the system-wide deadline for the selected program or year level." />
+    <Card style={styles.form}>
+      <Text style={styles.cardTitle}>Current system-wide deadlines</Text>
+      <View style={styles.deadlineSummaryGrid}>{gradeDeadlinePeriods.map(({ key, label }) => <View key={key} style={styles.deadlineSummaryItem}><Text style={styles.deadlineSummaryLabel}>{label}</Text><Text style={styles.deadlineSummaryValue}>{displayDeadline(globalDeadlines[key])}</Text></View>)}</View>
+    </Card>
+    <Card style={styles.form}>
+      <Text style={styles.cardTitle}>Request a deadline change</Text>
+      <Text style={styles.help}>Deadlines are enforced when scores are saved. After an approved deadline passes, scores in that scope cannot be added, edited, cleared, or restored.</Text>
+      <View style={styles.formGrid}>
+        <SelectField label="Request scope" value={scopeType} options={[{ label: 'Program', value: 'program' }, { label: 'Year level across my department', value: 'year_level' }]} onChange={(value) => setScopeType(value as 'program' | 'year_level')} containerStyle={{ flex: 1, minWidth: 220 }} />
+        {scopeType === 'program' ? <SelectField label="Program" value={programId} options={data.programs.map((program) => ({ label: `${program.code} · ${program.name}`, value: program.id }))} onChange={setProgramId} containerStyle={{ flex: 1, minWidth: 220 }} /> : <SelectField label="Year level" value={yearLevel} options={Array.from({ length: 8 }, (_, index) => ({ label: `Year ${index + 1}`, value: String(index + 1) }))} onChange={setYearLevel} containerStyle={{ flex: 1, minWidth: 220 }} />}
+      </View>
+      <View style={styles.formGrid}>{[...gradeDeadlinePeriods.filter(({ key }) => key !== 'overall'), ...gradeDeadlinePeriods.filter(({ key }) => key === 'overall')].map(({ key, label }) => <DateField key={key} label={`${key === 'overall' ? 'Overall' : label} deadline`} value={deadlines[key]} onChange={(value) => setDeadlines((current) => ({ ...current, [key]: value }))} containerStyle={styles.deadlineDateField} />)}</View>
+      <View style={styles.requestReasonField}><Field label="Reason for request" value={rationale} onChangeText={setRationale} multiline numberOfLines={3} maxLength={1000} placeholder="Explain the circumstances and requested change." /></View>
+      <View style={[styles.subjectFormActions, styles.deadlineSubmitActions]}><Button label="Submit for review" loading={busy} disabled={busy || (scopeType === 'program' && !programId)} onPress={() => void submit()} /></View>
+    </Card>
+    <Card style={styles.form}>
+      <Text style={styles.cardTitle}>Your requests</Text>
+      {requests.length ? <View style={{ gap: 8 }}>{requests.map((request) => {
+        const program = data.programs.find((item) => item.id === request.program_id);
+        const statusTone = request.status === 'approved' ? 'success' : request.status === 'rejected' ? 'danger' : 'warning';
+        return <View key={request.id} style={[styles.savedSystemRow, styles.deadlineRequestRow]}><View style={styles.flex}><View style={styles.deadlineRequestHeader}><Text style={styles.bulkClassName}>{request.scope_type === 'program' ? `${program?.code ?? 'Program'} · ${program?.name ?? ''}` : `Year ${request.year_level} · All programs`}</Text><Badge tone={statusTone}>{request.status}</Badge></View><Text style={styles.help}>Requested {new Date(request.created_at).toLocaleString()}</Text><View style={styles.requestedDeadlinesGrid}>{gradeDeadlinePeriods.map(({ key, label }) => request.requested_deadlines?.[key] ? <View key={key} style={styles.requestedDeadlineItem}><Text style={styles.deadlineSummaryLabel}>{label}</Text><Text style={styles.deadlineSummaryValue}>{displayDeadline(request.requested_deadlines[key])}</Text></View> : null)}</View><View style={styles.requestReasonBox}><Text style={styles.requestReasonLabel}>Reason for request</Text><Text style={styles.help}>{request.rationale}</Text></View>{request.review_note ? <Text style={[styles.help, styles.reviewNote]}>Review note: {request.review_note}</Text> : null}</View></View>;
+      })}</View> : <PageState kind="empty" title="No requests yet" message="Submitted deadline changes will appear here for review." />}
+    </Card>
+  </>;
+}
+
 function Units({ data }: Props) {
   const toast = useToast();
   const [programId, setProgramId] = useState(data.programs[0]?.id ?? '');
@@ -1098,6 +1179,20 @@ const styles = StyleSheet.create({
   bulkClassRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 10, padding: 12, borderWidth: 1, borderColor: '#E3E7EE', borderRadius: 10 },
   bulkClassName: { color: colors.text, fontSize: 13, fontWeight: '700' },
   formGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },
+  deadlineDateField: { flex: 1, flexBasis: 180, minWidth: 180 },
+  deadlineSummaryGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4 },
+  deadlineSummaryItem: { flex: 1, flexBasis: 150, minWidth: 130, gap: 3, padding: 10, borderRadius: 8, backgroundColor: colors.canvas },
+  deadlineSummaryLabel: { color: colors.textMuted, fontSize: 11 },
+  deadlineSummaryValue: { color: colors.text, fontSize: 13, fontWeight: '700' },
+  requestedDeadlinesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 5 },
+  requestedDeadlineItem: { flex: 1, flexBasis: 130, minWidth: 115, gap: 3, padding: 9, borderRadius: 8, backgroundColor: colors.canvas },
+  requestReasonField: { paddingTop: 6 },
+  deadlineSubmitActions: { marginTop: 5 },
+  deadlineRequestRow: { alignItems: 'flex-start' },
+  deadlineRequestHeader: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  requestReasonBox: { gap: 4, paddingHorizontal: 10, paddingTop: 14, paddingBottom: 10, marginTop: 7, borderRadius: 8, backgroundColor: colors.canvas },
+  requestReasonLabel: { color: colors.text, fontSize: 12, fontWeight: '700' },
+  reviewNote: { marginTop: 6 },
   inlineSubjectForm: { gap: 10, borderWidth: 1, borderColor: '#E3E7EE', borderRadius: 10, padding: 12, backgroundColor: '#F8FAFC' },
   subjectFormActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
   newSubjectField: { flexGrow: 1, flexBasis: 210 },

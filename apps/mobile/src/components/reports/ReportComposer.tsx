@@ -697,21 +697,26 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
           const rgb = [0, 2, 4].map((offset) => parseInt(hex.slice(offset, offset + 2), 16));
           if (visualization === 'Donut chart' || visualization === 'Risk distribution') {
             const palette: [number, number, number][] = [rgb as [number, number, number], [46, 134, 171], [83, 167, 123], [230, 162, 60], [139, 115, 181], [214, 107, 107], [100, 116, 139], [194, 135, 86]];
-            const total = chartGroups.reduce((sum, item) => sum + item.count, 0);
+            const donutGroups = chartGroups.map((item) => ({ ...item, count: Number.isFinite(Number(item.count)) ? Math.max(0, Number(item.count)) : 0 }));
+            const total = donutGroups.reduce((sum, item) => sum + item.count, 0);
             const cx = pageWidth / 2; const cy = y + 38; const radius = 31; let start = -Math.PI / 2;
-            chartGroups.forEach((item, index) => {
-              const end = start + (total ? 2 * Math.PI * item.count / total : 0); pdf.setFillColor(...palette[index % palette.length]);
+            if (total > 0) donutGroups.forEach((item, index) => {
+              if (item.count <= 0) return;
+              const end = start + 2 * Math.PI * item.count / total; pdf.setFillColor(...palette[index % palette.length]);
               const steps = Math.max(2, Math.ceil((end - start) / (Math.PI / 36)));
-              const points: Array<{ x: number; y: number }> = [];
-              for (let step = 0; step <= steps; step++) { const angle = start + (end - start) * step / steps; points.push({ x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) }); }
-              for (let step = steps; step >= 0; step--) { const angle = start + (end - start) * step / steps; points.push({ x: cx + radius * 0.58 * Math.cos(angle), y: cy + radius * 0.58 * Math.sin(angle) }); }
-              const relativePoints = points.slice(1).map((point, pointIndex) => [point.x - points[pointIndex].x, point.y - points[pointIndex].y]);
-              pdf.lines(relativePoints, points[0].x, points[0].y, 1, 'F', true);
+              let previousAngle = start;
+              for (let step = 1; step <= steps; step++) {
+                const angle = start + (end - start) * step / steps;
+                const x1 = cx + radius * Math.cos(previousAngle); const y1 = cy + radius * Math.sin(previousAngle);
+                const x2 = cx + radius * Math.cos(angle); const y2 = cy + radius * Math.sin(angle);
+                if ([cx, cy, x1, y1, x2, y2].every(Number.isFinite)) pdf.triangle(cx, cy, x1, y1, x2, y2, 'F');
+                previousAngle = angle;
+              }
               start = end;
             });
             pdf.setFillColor(255, 255, 255); pdf.circle(cx, cy, 18, 'F'); pdf.setTextColor(71, 85, 105); pdf.setFontSize(8); pdf.text(`${total} records`, cx, cy + 1, { align: 'center' });
             y = cy + radius + 10; pdf.setFontSize(9);
-            chartGroups.forEach((item, index) => { pdf.setFillColor(...palette[index % palette.length]); pdf.rect(14, y - 3, 3, 3, 'F'); pdf.setTextColor(30, 41, 59); pdf.text(`${item.label}: ${total ? Math.round(item.count * 100 / total) : 0}% (${item.count})`, 20, y); y += 7; });
+            donutGroups.forEach((item, index) => { pdf.setFillColor(...palette[index % palette.length]); pdf.rect(14, y - 3, 3, 3, 'F'); pdf.setTextColor(30, 41, 59); pdf.text(`${item.label}: ${total ? Math.round(item.count * 100 / total) : 0}% (${item.count})`, 20, y); y += 7; });
           } else if (visualization === 'KPI summary') {
             const standingValues = currentStandingField ? reportRows.map((row) => row[currentStandingField]).filter((item): item is number => typeof item === 'number' && Number.isFinite(item)) : numericValues;
             const attendanceValues = attendanceField ? reportRows.map((row) => row[attendanceField]).filter((item): item is number => typeof item === 'number' && Number.isFinite(item)) : [];
