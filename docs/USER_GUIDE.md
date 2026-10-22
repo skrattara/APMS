@@ -52,7 +52,7 @@ If a subject you teach is not listed:
 Academic Administrators maintain departmental oversight and subject management:
 
 1. **Subjects Management**: Navigate to **Subjects** to create, edit, activate, or deactivate department subjects.
-2. **Reviewing Subject Requests**: Review pending faculty requests, view faculty rationales, and approve (auto-activates the subject) or reject (requires a review note).
+2. **Reviewing Subject Requests**: Review pending faculty requests, and approve (auto-activates the subject) or reject (requires a review note).
 3. **Department Monitoring**: Inspect live aggregated class averages, student performance, at-risk alerts, and filter dashboard charts by class, risk, classification, period, and minimum score. Export charts as PNG or department-wide records as CSV, DOCX, or PDF from Report builder.
 4. **Grading Criteria Oversight**: Inspect and save versioned grading criteria for any class in the department.
 

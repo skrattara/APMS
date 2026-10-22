@@ -1,5 +1,7 @@
 # AI forecasts in the APMS app
 
+The new custom-service assessment previews require a trained **assessment context version one** artifact. In System Admin **Check connection**, confirm **Assessment-specific forecast support** is Yes (`assessment_instance_conditioning: true`). A ready legacy model can still forecast standing/risk, but the updated gateway rejects assessment-preview requests against it before charging usage. See the [assessment upgrade and Docker rollout](AI_ASSESSMENT_CONTEXT_UPGRADE.md).
+
 ## Run a first prediction from the app
 
 Use an authorized Faculty account and a small test class containing demo records. A complete numeric standing can be forecast when **Current standing** is an allowed AI input. Early forecasts for students whose final grade is still incomplete require **Recent scores** to be enabled and at least one saved, schema-mapped score. The current synthetic-only model is for demonstration. The run action covers all eligible students in the selected class, regardless of table/search filters, so use an actually small class for this check.
@@ -32,6 +34,22 @@ For the reported successful run, read-only verification confirmed 10 saved predi
 
 Reload the updated local app, reselect the class, and open **Gradebook → Full View → AI score preview** to inspect those saved forecasts without another inference request. On a later acknowledged saved run whose response cannot be validated, the app now reports that distinction and reloads saved workspace data without automatically retrying. Opening the page still does not start inference, and the preview starts off on a fresh screen. This repair requires the updated frontend only; it does not require rebuilding Docker images, retraining, or redeploying Supabase functions.
 
+### Saved assessment forecasts remain invisible in Full View
+
+The 2026-10-20 display repair aligns forecast overlays with the Gradebook's assessment column IDs. Stored forecasts correctly identify an instance by its assessment UUID, but Full View uses `assessment:<UUID>` for its column key. The previous host adapter supplied the bare UUID, so no preview matched a rendered column even when **AI score preview** was enabled. The adapter and column builder now share the same key function; persisted assessment IDs and score storage keys keep their existing format.
+
+Read-only verification for the reported class confirmed 250 latest student forecasts containing 15,500 assessment forecasts. The attached ten-student response contained 620 assessment forecasts whose values passed the current grading domains. A successful save and valid domains therefore did not establish that the UI had rendered the previews.
+
+Verification: all 106 unit tests and the complete web build passed. Offline replay through the actual column builder and host adapter matched all 620 sample previews after the repair, compared with zero before it. The authenticated browser check could not reach the Gradebook using the saved test session, so on-screen rendering in that session remains unverified. No new inference was requested.
+
+Reload the updated frontend, reselect the class, open **Gradebook → Full View**, and enable **AI score preview** if the button does not already say **Hide AI score preview**. Existing forecasts can then display without generating a new run. This is another frontend-only repair: Docker, the trained model and Supabase functions need no update. Recorded scores still take precedence, and stale outputs outside current domains remain hidden.
+
+### Clipped previews and repeated assessment values
+
+Active value previews now contribute to assessment column width instead of using only recorded/draft score lengths. The preview label can wrap to two lines; hiding previews restores ordinary score widths. This is a display change and does not change stored model outputs or official grades. Reload the updated frontend to receive it.
+
+Repeated values in the original artifact reflect a legacy conditioning limitation: its assessment queries could have identical field/horizon/domain descriptors, so the model received no instance-specific distinction. Small integer/category domains can cause further ties. The new context-version-one model represents schema scope, sequence and preceding observations, with a shared training/serving compiler and a newly trained context projection. Equivalent evidence can still produce equal values; variation alone is not an accuracy measure. See the [legacy explanation](AI_MODEL_ARCHITECTURE.md#legacy-assessment-adapter-and-context-version-one-upgrade) and [new design and rollout](AI_ASSESSMENT_CONTEXT_UPGRADE.md). A frontend refresh alone does not update weights or rewrite saved predictions.
+
 AI forecasts are saved advisory records. Faculty trigger them from the AI predictions page, At-Risk page, or Gradebook Full View; opening a screen or changing a filter never starts inference. The refresh action covers the selected class roster, regardless of visible table filters. The app sends only eligible student records through the authenticated `apms-predictions` gateway, which checks the active grading and evaluation schemas before saving.
 
 Before sending a class forecast, the app plans all batches using the UTF-8 byte length of each complete JSON request, including both schema snapshots. Batches stay within 900,000 bytes, below the gateway's 1,000,000-byte limit. Every provider uses a working cap of 10 students and may use fewer to fit the byte limit. The gateway's 100-student hard ceiling is not the recommended batch size: the custom connector sends individual student requests sequentially under a shared 45-second budget. Smaller batches reduce per-invocation work; they do not prove that a particular CPU or memory limit has been resolved. No records or history are silently dropped. If one record plus the schemas cannot fit, preparation stops before the first request. Each batch is a separate saved run. If a request is interrupted, later batches are not sent; the app reports the confirmed count and tells the user to check saved predictions before retrying because an interrupted request may have reached the service. More batches can consume more provider requests; existing monthly usage limits still apply.
@@ -51,7 +69,9 @@ Assessment score previews can run before every minimum-count requirement in the 
 
 If the configured custom model runtime does not advertise partial-inventory support, the gateway rejects the request before reserving usage or sending inference. Turn off **Assessment score predictions** to run standing and risk forecasts from **Recent scores** while assessment instances are still being added. The runtime capability is available only after updating the model service image and deploying the current `apms-predictions` gateway; reload the frontend after its UI changes. No retraining, schema edits, or fabricated future assessment rows are needed.
 
-### Update an existing Cloudflare model container
+### Historical partial-inventory runtime update
+
+The commands below document the earlier validation-only change. They do **not** enable the new assessment-specific context capability with `release-20261017`. For current assessment previews, follow the [new artifact and runtime rollout](AI_ASSESSMENT_CONTEXT_UPGRADE.md#rollout-to-the-docker-computer); the new gateway requires both capabilities.
 
 Copy the updated project source to the Docker computer first. Rebuild the runtime as well as the image that contains the model: rebuilding only `Dockerfile.model` on top of an old runtime keeps the old validation code. The existing approved `release-20261017` model bundle can be reused. From the project root in **cmd**:
 

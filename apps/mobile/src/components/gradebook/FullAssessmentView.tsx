@@ -4,7 +4,7 @@
  * data, persistence callbacks, and style tokens.
  */
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Modal, Platform, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
+import { Dimensions, Modal, Platform, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
 import * as XLSX from 'xlsx-js-style';
 import * as FileSystem from 'expo-file-system/legacy';
 import * as Sharing from 'expo-sharing';
@@ -26,6 +26,8 @@ import {
   calculateFullViewGrades,
   gradePercent,
   fullAssessmentColumnWidth,
+  assessmentColumnId,
+  assessmentPreviewColumnWidth,
   fullViewColumns,
   fullAssessmentHeaderRows,
   fullViewColumnValue,
@@ -408,7 +410,8 @@ const FullGradebookRow = memo(function FullGradebookRow(row: FullGradebookRowPro
     const overlay = cellOverlayFor(columnId);
     if (!overlay || (overlay.mode !== 'value' && overlay.mode !== 'value-highlight')) return null;
     const isValueOnly = overlay.mode === 'value';
-    return <View pointerEvents="none" style={[StyleSheet.absoluteFill, { zIndex: 5, justifyContent: 'center', alignItems: 'center', backgroundColor: isValueOnly ? 'rgba(241,245,249,0.98)' : 'rgba(224,231,255,0.98)' }]}><Text numberOfLines={1} style={{ maxWidth: '100%', paddingHorizontal: 2, color: overlay.color ?? '#64748B', fontSize: 10, lineHeight: 12, fontWeight: '600' }}>{overlay.label ?? overlay.value ?? ''}</Text></View>;
+    const fullLabel = overlay.label ?? overlay.value ?? '';
+    return <View pointerEvents="none" style={[StyleSheet.absoluteFill, { zIndex: 5, justifyContent: 'center', alignItems: 'center', backgroundColor: isValueOnly ? 'rgba(241,245,249,0.98)' : 'rgba(224,231,255,0.98)' }]}><Text numberOfLines={2} accessibilityLabel={fullLabel} style={{ maxWidth: '100%', paddingHorizontal: 4, color: overlay.color ?? '#64748B', fontSize: 10, lineHeight: 13, fontWeight: '600', textAlign: 'center' }}>{fullLabel}</Text></View>;
   };
   return <View onLayout={(event: any) => {
     const height = Number(event?.nativeEvent?.layout?.height);
@@ -438,7 +441,8 @@ const FullGradebookRow = memo(function FullGradebookRow(row: FullGradebookRowPro
           const emphasizeGrade = ['period', 'non_period', 'final', 'final_equivalent'].includes(column.kind)
             || (column.kind === 'group' && !row.deemphasizeGroupGrades);
           const statusTone = finalDetail === 'Pass' ? 'success' : finalDetail === 'Fail' ? 'danger' : finalDetail.includes('ongoing') ? 'info' : 'warning';
-          return <View key={`${student.enrollmentId}-${column.id}`} accessible accessibilityRole="text" accessibilityLabel={`${student.name}, ${column.leafLabel}, ${finalDetail}${hasConditionalFormatting ? ', conditional formatting applied' : ''}`} {...({ dataSet: { gradebookCol: row.columnCssKey(column.id), gradebookColumnId: column.id, gradebookStudent: student.enrollmentId, gradebookHoverCell: 'true', ...(hasConditionalFormatting ? { gradebookFormatted: 'true' } : {}), ...(marksPreview ? { gradebookPreview: 'true' } : {}) } } as any)} {...row.columnHoverProps([column.id])} style={[styles.fullAssessmentColumn, styles.fullComputedCell, { width: column.width, position: 'relative' }, containerFormatStyle(conditionalStyle), hoverFormatStyle(conditionalStyle?.backgroundColor ?? conditionalBadge?.backgroundColor), cellOverlayStyleFor(column.id), frozenPaneClip]}>{column.kind === 'final_status' ? <Badge tone={statusTone}>{finalDetail}</Badge> : <Text style={[styles.fullComputedValue, emphasizeGrade && styles.fullEmphasizedGradeValue, textFormatStyle(conditionalStyle)]}>{finalDetail}</Text>}{hasCellConditionalFormatting ? renderConditionalFormatMarker() : null}{conditionalBadge ? <View pointerEvents="none" style={{ alignSelf: 'center', marginTop: 2, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 8, backgroundColor: conditionalBadge.backgroundColor ?? '#E0E7FF' }}><Text style={{ color: conditionalBadge.textColor ?? '#3730A3', fontSize: 9, lineHeight: 12, fontWeight: '700' }}>{conditionalBadge.label}</Text></View> : null}{renderCellOverlay(column.id)}</View>;
+          const overlayValueLabel = overlay && (overlay.mode === 'value' || overlay.mode === 'value-highlight') ? overlay.label ?? overlay.value : undefined;
+          return <View key={`${student.enrollmentId}-${column.id}`} accessible accessibilityRole="text" accessibilityLabel={`${student.name}, ${column.leafLabel}, ${finalDetail}${overlayValueLabel ? `, ${overlayValueLabel}` : ''}${hasConditionalFormatting ? ', conditional formatting applied' : ''}`} {...({ title: overlayValueLabel, dataSet: { gradebookCol: row.columnCssKey(column.id), gradebookColumnId: column.id, gradebookStudent: student.enrollmentId, gradebookHoverCell: 'true', ...(hasConditionalFormatting ? { gradebookFormatted: 'true' } : {}), ...(marksPreview ? { gradebookPreview: 'true' } : {}) } } as any)} {...row.columnHoverProps([column.id])} style={[styles.fullAssessmentColumn, styles.fullComputedCell, { width: column.width, position: 'relative' }, containerFormatStyle(conditionalStyle), hoverFormatStyle(conditionalStyle?.backgroundColor ?? conditionalBadge?.backgroundColor), cellOverlayStyleFor(column.id), frozenPaneClip]}>{column.kind === 'final_status' ? <Badge tone={statusTone}>{finalDetail}</Badge> : <Text style={[styles.fullComputedValue, emphasizeGrade && styles.fullEmphasizedGradeValue, textFormatStyle(conditionalStyle)]}>{finalDetail}</Text>}{hasCellConditionalFormatting ? renderConditionalFormatMarker() : null}{conditionalBadge ? <View pointerEvents="none" style={{ alignSelf: 'center', marginTop: 2, paddingHorizontal: 5, paddingVertical: 1, borderRadius: 8, backgroundColor: conditionalBadge.backgroundColor ?? '#E0E7FF' }}><Text style={{ color: conditionalBadge.textColor ?? '#3730A3', fontSize: 9, lineHeight: 12, fontWeight: '700' }}>{conditionalBadge.label}</Text></View> : null}{renderCellOverlay(column.id)}</View>;
         }
         const assessment = column.assessment;
         const key = `${student.enrollmentId}:${assessment.id}`;
@@ -457,7 +461,8 @@ const FullGradebookRow = memo(function FullGradebookRow(row: FullGradebookRowPro
         const hasConditionalFormatting = hasCellConditionalFormatting || !!(rowCellFormat?.style || rowCellFormat?.badge);
         const overlay = cellOverlayFor(column.id);
         const marksPreview = overlay?.mode === 'highlight' || overlay?.mode === 'value-highlight';
-        return <View key={`${student.enrollmentId}-${assessment.id}`} accessible accessibilityRole="text" accessibilityLabel={`${student.name}, ${assessment.title}, score ${value || 'unscored'}${hasConditionalFormatting ? ', conditional formatting applied' : ''}`} {...({ dataSet: { gradebookCol: row.columnCssKey(column.id), gradebookColumnId: column.id, gradebookStudent: student.enrollmentId, gradebookHoverCell: 'true', ...(hasConditionalFormatting ? { gradebookFormatted: 'true' } : {}), ...(marksPreview ? { gradebookPreview: 'true' } : {}) } } as any)} {...row.columnHoverProps([column.id])} style={[styles.fullAssessmentColumn, { width: column.width, position: 'relative' }, containerFormatStyle(conditionalStyle), hoverFormatStyle(conditionalStyle?.backgroundColor ?? conditionalBadge?.backgroundColor), cellOverlayStyleFor(column.id), frozenPaneClip]}>
+        const overlayValueLabel = overlay && (overlay.mode === 'value' || overlay.mode === 'value-highlight') ? overlay.label ?? overlay.value : undefined;
+        return <View key={`${student.enrollmentId}-${assessment.id}`} accessible accessibilityRole="text" accessibilityLabel={`${student.name}, ${assessment.title}, score ${value || 'unscored'}${overlayValueLabel ? `, ${overlayValueLabel}` : ''}${hasConditionalFormatting ? ', conditional formatting applied' : ''}`} {...({ title: overlayValueLabel, dataSet: { gradebookCol: row.columnCssKey(column.id), gradebookColumnId: column.id, gradebookStudent: student.enrollmentId, gradebookHoverCell: 'true', ...(hasConditionalFormatting ? { gradebookFormatted: 'true' } : {}), ...(marksPreview ? { gradebookPreview: 'true' } : {}) } } as any)} {...row.columnHoverProps([column.id])} style={[styles.fullAssessmentColumn, { width: column.width, position: 'relative' }, containerFormatStyle(conditionalStyle), hoverFormatStyle(conditionalStyle?.backgroundColor ?? conditionalBadge?.backgroundColor), cellOverlayStyleFor(column.id), frozenPaneClip]}>
           {mapping ? <SelectField compact label="" accessibilityLabel={`${student.name}, ${assessment.title} score`} controlDataSet={{ gradebookScoreControl: 'true' }} value={value} error={error} deferModalUntilOpen options={gradebookSelectOptions(mapping)} onChange={(next) => row.onChange(key, next)} controlRef={(input) => { if (input) row.scoreInputRefs.current.set(key, input); else row.scoreInputRefs.current.delete(key); }} onKeyDown={(event) => row.navigateScoreInput(event, student.enrollmentId, assessment.id, value)} containerStyle={[styles.fullScoreField, { gap: 0 }]} controlStyle={[styles.fullScoreControl, categoricalTone === 'passing' ? { backgroundColor: '#EAF6EC', borderColor: '#55A66A' } : null, categoricalTone === 'failing' ? { backgroundColor: '#FCEBEC', borderColor: '#D66B70' } : null, conditionalStyle?.backgroundColor ? { backgroundColor: conditionalStyle.backgroundColor } : null, conditionalStyle?.borderColor ? { borderColor: conditionalStyle.borderColor } : null]} valueStyle={[styles.fullScoreValue, categoricalTone === 'passing' ? { color: '#176B35' } : null, categoricalTone === 'failing' ? { color: '#A52B32' } : null, textFormatStyle(conditionalStyle)]} /> : <DebouncedGradebookScoreField accessibilityLabel={`${student.name}, ${assessment.title} score`} value={value} error={error} placeholder={`0–${assessment.maximumScore}`} onChangeText={(next) => row.onChange(key, next)} inputRef={(input) => { if (input) row.scoreInputRefs.current.set(key, input); else row.scoreInputRefs.current.delete(key); }} onKeyDown={(event) => row.navigateScoreInput(event, student.enrollmentId, assessment.id, value)} style={[styles.fullNumericInput, conditionalStyle?.backgroundColor ? { backgroundColor: conditionalStyle.backgroundColor } : null, textFormatStyle(conditionalStyle)]} containerStyle={styles.fullNumericScoreField} />}
           {hasCellConditionalFormatting ? renderConditionalFormatMarker() : null}
           {conditionalBadge ? <View pointerEvents="none" style={{ position: 'absolute', right: 2, bottom: 1, paddingHorizontal: 4, paddingVertical: 0, borderRadius: 7, backgroundColor: conditionalBadge.backgroundColor ?? '#E0E7FF' }}><Text style={{ color: conditionalBadge.textColor ?? '#3730A3', fontSize: 8, lineHeight: 10, fontWeight: '700' }}>{conditionalBadge.label}</Text></View> : null}
@@ -545,6 +550,10 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
   const gradeDecimalPlaces = Math.min(100, Math.max(0, Number.parseInt(gradeDecimalPlacesInput, 10) || 0));
   const passingGradePercentage = gradingSystem.finalGradeConversion?.passingPercentage ?? workspace.criteria?.passingThreshold ?? 80;
   const [viewOptionsOpen, setViewOptionsOpen] = useState(false);
+  const [fullViewActionsOpen, setFullViewActionsOpen] = useState(false);
+  const [hoveredFullViewAction, setHoveredFullViewAction] = useState<string | null>(null);
+  const fullViewActionsAnchorRef = useRef<View>(null);
+  const [fullViewActionsPosition, setFullViewActionsPosition] = useState({ left: 8, top: 8 });
   const [exportingExcel, setExportingExcel] = useState(false);
   const [bulkScoreAssessment, setBulkScoreAssessment] = useState<FacultyAssessment | null>(null);
   const [bulkScoreValue, setBulkScoreValue] = useState('');
@@ -628,7 +637,10 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
   const [randomOrderSeed, setRandomOrderSeed] = useState(1);
   const [gridHasScrolled, setGridHasScrolled] = useState({ x: false, y: false });
   const [virtualStartIndex, setVirtualStartIndex] = useState(0);
-  const fullRowHeight = 22;
+  // Student IDs commonly wrap onto a second 18px line, so use a realistic
+  // fallback for rows that have not been measured yet. This keeps the virtual
+  // spacer offsets close to the actual scroll height from the first render.
+  const fullRowHeight = 36;
   const [rowHeightModel, setRowHeightModel] = useState<{ baseline: number | null; exceptions: Record<string, number> }>({ baseline: null, exceptions: {} });
   const pendingRowHeightsRef = useRef(new Map<string, number>());
   const rowHeightFrameRef = useRef<number | null>(null);
@@ -750,7 +762,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
   const horizontalColumnRangeRef = useRef(horizontalColumnRange);
   const gridViewportWidthRef = useRef(gridViewportWidth);
   const horizontalScrollLeftRef = useRef(0);
-  const virtualOverscanRows = 2;
+  const virtualOverscanRows = 6;
   const valueMappings = useMemo(() => new Map<string, { value: string; percentage: number }[]>(
     (gradingSystem.components ?? []).flatMap((component: any) => {
       const definition = component.assessmentDefinition;
@@ -841,7 +853,6 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
       return next;
     });
   };
-  const contextProps = (actions: GradebookContextAction[]) => ({ onContextMenu: (event: any) => showContextMenu(event, actions) } as any);
   const clickContextProps = (actions: GradebookContextAction[]) => ({ onClick: (event: any) => showContextMenu(event, actions), onContextMenu: (event: any) => showContextMenu(event, actions) } as any);
   const clearColumnHover = () => {
     if (hoverUpdateFrameRef.current != null && typeof cancelAnimationFrame !== 'undefined') cancelAnimationFrame(hoverUpdateFrameRef.current);
@@ -933,7 +944,20 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
     decorated.sort((left, right) => left.order[0] - right.order[0] || left.order[1] - right.order[1] || left.order[2] - right.order[2] || left.order[3].localeCompare(right.order[3]) || left.order[4].localeCompare(right.order[4]));
     return decorated.map(({ assessment }) => assessment);
   }, [assessments, gradingSystem]);
-  const columnWidths = useMemo(() => new Map(orderedAssessments.map((assessment) => [assessment.id, fullAssessmentColumnWidth(assessment, gradingSystem, workspace, props.values)])), [orderedAssessments, gradingSystem, workspace.students, workspace.scores, workspace.categoricalScores, props.values]);
+  const previewLabelsByColumn = useMemo(() => {
+    const labels = new Map<string, string[]>();
+    for (const overlay of cellOverlayByKey.values()) {
+      if ((overlay.mode !== 'value' && overlay.mode !== 'value-highlight') || !overlay.label && !overlay.value) continue;
+      const columnLabels = labels.get(overlay.columnId) ?? [];
+      columnLabels.push(overlay.label ?? overlay.value ?? '');
+      labels.set(overlay.columnId, columnLabels);
+    }
+    return labels;
+  }, [cellOverlayByKey]);
+  const columnWidths = useMemo(() => new Map(orderedAssessments.map((assessment) => [assessment.id, assessmentPreviewColumnWidth(
+    fullAssessmentColumnWidth(assessment, gradingSystem, workspace, props.values),
+    previewLabelsByColumn.get(assessmentColumnId(assessment.id)) ?? [],
+  )])), [orderedAssessments, gradingSystem, workspace.students, workspace.scores, workspace.categoricalScores, props.values, previewLabelsByColumn]);
   const columns = useMemo(() => fullViewColumns(orderedAssessments, gradingSystem, (assessment) => columnWidths.get(assessment.id) ?? 42, hideSingleChildComponentGrades).map((column) => {
     if (column.kind === 'assessment') return column;
     const formattedGradeLength = column.kind === 'final_equivalent'
@@ -2140,50 +2164,66 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
     const format = rule.colorScale ? `${rule.colorScale.mode} color scale` : rule.badge ? `badge “${rule.badge.label}”` : 'cell highlight';
     return `${condition}${value ? ` ${value}${rule.valueTo == null ? '' : ` – ${rule.valueTo}`}` : ''} · ${rule.applyTo === 'row' ? 'row' : 'cell'} · ${format}`;
   };
+  const fullViewActions: { label: string; icon: AppIconName; onSelect: () => void; disabled?: boolean }[] = [
+    { label: 'Import scores', icon: 'upload', onSelect: () => { setScoreImportPreview(null); setScoreImportOpen(true); } },
+    { label: exportingExcel ? 'Exporting Excel…' : 'Export Excel', icon: 'download', onSelect: () => void exportFullViewExcel(), disabled: exportingExcel },
+    ...(props.overlayControl ? [{ label: props.overlayControl.active ? `Hide ${props.overlayControl.label}` : props.overlayControl.label, icon: 'evaluation' as const, onSelect: props.overlayControl.onToggle }] : []),
+    { label: 'Version history', icon: 'history', onSelect: () => {
+      setGradebookHistoryOpen(true);
+      setGradebookHistoryQuery('');
+      setGradebookHistoryAction('all');
+      setGradebookHistoryActor('all');
+      setGradebookHistoryDate(null);
+      setRestoreMenuVersionId(null);
+      setGradebookHistory([]);
+      setGradebookHistoryCursor(null);
+      setGradebookHistoryHasMore(false);
+      setGradebookHistoryVisibleLimit(100);
+      setGradebookHistoryScanning(false);
+      void loadGradebookHistoryPage(null, false);
+    } },
+    { label: 'View options', icon: 'settings', onSelect: () => setViewOptionsOpen(true) },
+  ];
+  const toggleFullViewActions = () => {
+    if (fullViewActionsOpen) { setFullViewActionsOpen(false); return; }
+    const anchor = fullViewActionsAnchorRef.current;
+    if (!anchor) { setFullViewActionsPosition({ left: 8, top: 8 }); setFullViewActionsOpen(true); return; }
+    anchor.measureInWindow((x, y, width, height) => {
+      const viewportWidth = Dimensions.get('window').width;
+      const menuWidth = Math.min(240, Math.max(160, viewportWidth - 16));
+      setFullViewActionsPosition({ left: Math.max(8, Math.min(x + width - menuWidth, viewportWidth - menuWidth - 8)), top: y + height + 4 });
+      setFullViewActionsOpen(true);
+    });
+  };
   return (
     <>
-      <View {...contextProps([
-        { label: 'Show all hidden columns', onSelect: () => setSectionStates({}) },
-        { label: 'Show all hidden header levels', onSelect: () => setHiddenHeaderLevels(new Set()) },
-      ])} style={styles.assessmentContext}>
-        <View style={styles.flex}>
-          <Text style={styles.assessmentTitle}>Full gradebook</Text>
-          <Text style={styles.help}>View and update every assessment in one table. Scroll horizontally to see all assessment columns.</Text>
-        </View>
-      </View>
       <View style={styles.gradeToolbar}>
         <Field label="Find student" value={props.studentQuery} placeholder="Name or student ID" onChangeText={props.onStudentQuery} containerStyle={styles.studentSearch} />
         <Field label="Find column" value={columnHeaderQuery} placeholder="Period, component, assessment…" onChangeText={setColumnHeaderQuery} containerStyle={styles.studentSearch} />
         <SelectField label="Show" value={props.studentFilter} options={[{ label: 'All students', value: 'all' }, { label: 'Missing any score', value: 'missing' }, { label: 'At-risk students', value: 'at_risk' }, { label: 'Passing students', value: 'passing' }]} onChange={props.onStudentFilter} containerStyle={styles.studentFilter} />
         <SelectField label="Sort" value={props.studentSort} options={[{ label: 'Class number (ascending)', value: 'class_number' }, { label: 'Name (A–Z)', value: 'name' }, { label: 'Highest risk first', value: 'risk' }, { label: 'Lowest standing first', value: 'standing' }]} onChange={props.onStudentSort} containerStyle={styles.studentSort} />
-        <Text style={styles.resultCount}>{props.paginationEnabled ? `${orderedStudents.length} students · Page ${props.page} of ${localPageCount}` : `${orderedStudents.length} students · Showing all`}</Text>
-      </View>
-      <View style={styles.fullViewOptionsBar}>
-        <Button label="Import scores" variant="secondary" onPress={() => { setScoreImportPreview(null); setScoreImportOpen(true); }} />
-        <Button label={exportingExcel ? 'Exporting…' : 'Export Excel'} variant="secondary" disabled={exportingExcel} onPress={() => void exportFullViewExcel()} />
-        {props.overlayControl ? <Button label={props.overlayControl.active ? `Hide ${props.overlayControl.label}` : props.overlayControl.label} variant="secondary" onPress={props.overlayControl.onToggle} /> : null}
         {historyPreviewOverlays.length ? <Button label={`Previous values · Clear (${historyPreviewOverlays.length})`} variant="secondary" onPress={() => {
           setHistoryPreviewOverlays([]);
           const pageCountWithoutPreview = Math.max(1, Math.ceil(sortedStudents.length / 10));
           props.onPageChange((current) => Math.min(current, pageCountWithoutPreview));
         }} /> : null}
-        <Button label="Version history" variant="secondary" onPress={() => {
-          setGradebookHistoryOpen(true);
-          setGradebookHistoryQuery('');
-          setGradebookHistoryAction('all');
-          setGradebookHistoryActor('all');
-          setGradebookHistoryDate(null);
-          setRestoreMenuVersionId(null);
-          setGradebookHistory([]);
-          setGradebookHistoryCursor(null);
-          setGradebookHistoryHasMore(false);
-          setGradebookHistoryVisibleLimit(100);
-          setGradebookHistoryScanning(false);
-          void loadGradebookHistoryPage(null, false);
-        }} />
-        <Button label="View options" variant="secondary" onPress={() => setViewOptionsOpen(true)} />
+        <View ref={fullViewActionsAnchorRef}>
+          <Pressable accessibilityRole="button" accessibilityState={{ expanded: fullViewActionsOpen }} accessibilityLabel="Full gradebook actions" onPress={toggleFullViewActions} style={({ pressed }) => [styles.fullViewActionTrigger, pressed ? { backgroundColor: colors.surfaceMuted } : null]}>
+            <Text style={styles.fullViewActionTriggerText}>Actions</Text><AppIcon name="chevronDown" size={14} color={colors.textMuted} />
+          </Pressable>
+        </View>
         <Button label="Save all scores" loading={props.saving} disabled={!props.dirtyCount || !!props.invalidCount} onPress={props.onSave} />
       </View>
+      <Modal visible={fullViewActionsOpen} transparent animationType="none" onRequestClose={() => setFullViewActionsOpen(false)}>
+        <View style={styles.fullViewActionModalRoot}>
+          <Pressable accessibilityLabel="Close actions menu" onPress={() => setFullViewActionsOpen(false)} style={StyleSheet.absoluteFill} />
+          <View style={[styles.fullViewActionMenu, fullViewActionsPosition]}>
+            {fullViewActions.map((action) => <Pressable key={action.label} accessibilityRole="button" accessibilityState={{ disabled: action.disabled }} disabled={action.disabled} onHoverIn={() => setHoveredFullViewAction(action.label)} onHoverOut={() => setHoveredFullViewAction((current) => current === action.label ? null : current)} onPress={() => { setFullViewActionsOpen(false); setHoveredFullViewAction(null); action.onSelect(); }} style={({ pressed }) => [styles.fullViewActionItem, hoveredFullViewAction === action.label || pressed ? styles.fullViewActionItemHovered : null]}>
+              <AppIcon name={action.icon} size={15} color={colors.brand} /><Text style={styles.fullViewActionItemText}>{action.label}</Text>
+            </Pressable>)}
+          </View>
+        </View>
+      </Modal>
       {!assessments.length ? <PageState kind="empty" title="No assessments yet" message="Create an assessment to start using the full gradebook." /> : (
         <View {...({ dataSet: { gradebookGrid: 'true', gradebookVisibleColumns: String(visibleColumns.length), gradebookStudentCount: String(displayStudents.length), gradebookColumnWindowStart: String(horizontalColumnRange.start), gradebookColumnWindowEnd: String(horizontalColumnRange.end) }, onMouseLeave: clearColumnHover, onContextMenu: handleGridCellContextMenu, onKeyDownCapture: handleGridKeyDownCapture } as any)} style={styles.fullGridScrollFrame}>
         <ScrollView {...({ dataSet: { gradebookScrollViewport: 'true' } } as any)} ref={gridScrollElementRef} horizontal={Platform.OS !== 'web'} showsHorizontalScrollIndicator onLayout={(event: any) => {

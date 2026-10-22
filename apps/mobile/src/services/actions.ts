@@ -10,9 +10,7 @@ export async function performScreenAction({ screen, user, demoMode, label }: Act
   if (!supabase) throw new Error('APMS is not connected. No action was performed.');
 
   if (screen === 'backup') {
-    const { error } = await supabase.from('backups').insert({ scope: 'full', status: 'queued', created_by: user.id });
-    if (error) throw error;
-    return 'Backup request queued. The protected worker will report verification and completion status.';
+    throw new Error('Use Backup Management to create, download, schedule, or restore an encrypted JSON backup.');
   }
 
   throw new Error(`${label} requires its validated workflow form or protected server worker. No record was changed.`);

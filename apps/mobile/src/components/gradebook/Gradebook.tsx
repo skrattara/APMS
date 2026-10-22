@@ -501,16 +501,18 @@ export function Gradebook(props: GradebookProps) {
         <Button label="Assessment View" variant={gradebookView === 'assessment' ? 'primary' : 'secondary'} onPress={() => { setGradebookView('assessment'); setPage(1); }} />
         <Button label="Full View" variant={gradebookView === 'full' ? 'primary' : 'secondary'} onPress={() => { setGradebookView('full'); setPage(1); }} />
         {gradebookView === 'full' && props.onRunAiPredictions ? <Button label="Refresh AI predictions" variant="secondary" loading={props.predictionRunning} disabled={props.predictionRunning} onPress={() => void props.onRunAiPredictions?.()} /> : null}
-        <Pressable accessibilityRole="switch" accessibilityState={{ checked: paginationEnabled }} onPress={() => { setPaginationByView((current) => ({ ...current, [gradebookView]: !current[gradebookView] })); setPage(1); }} style={styles.paginationToggle}>
-          <Text style={styles.paginationToggleLabel}>Pagination</Text>
-          <View style={[styles.paginationSwitch, paginationEnabled && styles.paginationSwitchOn]}><View style={[styles.paginationSwitchThumb, paginationEnabled && styles.paginationSwitchThumbOn]} /></View>
-          <Text style={styles.paginationToggleState}>{paginationEnabled ? 'On' : 'Off'}</Text>
-        </Pressable>
-        <Pressable accessibilityRole="switch" accessibilityState={{ checked: autosaveEnabled, disabled: !accountAutosaveEnabled }} disabled={!accountAutosaveEnabled} onPress={() => setPageAutosaveEnabled((current) => !current)} style={styles.paginationToggle}>
-          <Text style={styles.paginationToggleLabel}>Autosave</Text>
-          <View style={[styles.paginationSwitch, autosaveEnabled && styles.paginationSwitchOn]}><View style={[styles.paginationSwitchThumb, autosaveEnabled && styles.paginationSwitchThumbOn]} /></View>
-          <Text style={styles.paginationToggleState}>{accountAutosaveEnabled ? autosaveEnabled ? 'On' : 'Off' : 'Account off'}</Text>
-        </Pressable>
+        <View style={styles.gradebookPreferenceToggles}>
+          <Pressable accessibilityRole="switch" accessibilityState={{ checked: paginationEnabled }} onPress={() => { setPaginationByView((current) => ({ ...current, [gradebookView]: !current[gradebookView] })); setPage(1); }} style={styles.paginationToggle}>
+            <Text style={styles.paginationToggleLabel}>Pagination</Text>
+            <View style={[styles.paginationSwitch, paginationEnabled && styles.paginationSwitchOn]}><View style={[styles.paginationSwitchThumb, paginationEnabled && styles.paginationSwitchThumbOn]} /></View>
+            <Text style={styles.paginationToggleState}>{paginationEnabled ? 'On' : 'Off'}</Text>
+          </Pressable>
+          <Pressable accessibilityRole="switch" accessibilityState={{ checked: autosaveEnabled, disabled: !accountAutosaveEnabled }} disabled={!accountAutosaveEnabled} onPress={() => setPageAutosaveEnabled((current) => !current)} style={styles.paginationToggle}>
+            <Text style={styles.paginationToggleLabel}>Autosave</Text>
+            <View style={[styles.paginationSwitch, autosaveEnabled && styles.paginationSwitchOn]}><View style={[styles.paginationSwitchThumb, autosaveEnabled && styles.paginationSwitchThumbOn]} /></View>
+            <Text style={styles.paginationToggleState}>{accountAutosaveEnabled ? autosaveEnabled ? 'On' : 'Off' : 'Account off'}</Text>
+          </Pressable>
+        </View>
         <Button label={savedHistoryBusy ? 'Undoing…' : 'Undo'} icon="undo" description={`Unsaved edits first, then saved score changes. Assessment instance edits stay in version history. ${scoreUndoRef.current.length} unsaved and ${savedUndoRef.current.length}${savedHistoryHasMoreRef.current ? '+' : ''} saved score steps loaded.`} variant="secondary" disabled={savedHistoryBusy || (!scoreUndoRef.current.length && savedHistoryLoadedRef.current && !savedUndoRef.current.length && !savedHistoryHasMoreRef.current)} onPress={undoScoreEdit} />
         <Button label={savedHistoryBusy ? 'Working…' : 'Redo'} icon="redo" description={`Unsaved edits first, then saved score changes. Assessment instance edits stay in version history. ${scoreRedoRef.current.length} unsaved and ${savedRedoRef.current.length} saved score steps available.`} variant="secondary" disabled={savedHistoryBusy || (!scoreRedoRef.current.length && !savedRedoRef.current.length)} onPress={redoScoreEdit} />
       </View>

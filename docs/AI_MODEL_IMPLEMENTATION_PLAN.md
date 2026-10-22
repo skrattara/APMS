@@ -13,6 +13,17 @@ Read `AI_MODEL_ARCHITECTURE.md` together with `analysis/AI_PROVIDER_INTEGRATION.
 
 Keep implementation modular. Use optional ML/export/explainability dependencies so readiness/contract behavior can be inspected without downloading a model. All temporary files, environment directories, download/install caches and generated artifacts must be inside the project workspace. Run commands through `cmd.exe`. Do not modify the app, database or gateway to bypass privacy controls. Do not silently activate a synthetic model in production.
 
+## Assessment-specific query upgrade
+
+The versioned compiler, context projection, adapter/gateway capability gate, matched synthetic comparison and mobile contract are now implemented. See [the design and rollout guide](AI_ASSESSMENT_CONTEXT_UPGRADE.md) for the implementation sequence, fields, validation workflow and deployment requirements. The original model remains unchanged; a successful runtime update is separate from an accepted newly trained artifact. The following requirements explain the scope of this upgrade and remain acceptance criteria for future real-data releases.
+
+The legacy assessment-context-zero adapter binds valid output domains and references but does not give the model an assessment-specific query representation. Identical field/horizon/domain queries for one student therefore repeat the same output. The Gradebook preview fixes alone do not change that artifact's behavior.
+
+1. Version and encode query-to-schema relationships, relative instance order/time and assessment scope without learning opaque assessment/student IDs or private display text. Preserve compatibility checks for existing artifacts and their encoders.
+2. Carry cutoff-safe observed assessment context through the authorized projection, shared training encoder and serving adapter. Preserve missing values and known-result suppression; do not impute future evidence.
+3. Train on assessment-level targets with matched structural variation and multiple meaningful horizons. Keep real-data priority, bounded synthetic replay, leakage-resistant student/cohort splits and independent calibration.
+4. Test permutation/subset and ID-renaming invariance, response reference round trips, legitimate equal predictions, context sensitivity, partial inventories and real assessment-domain conformance. Compare per-type/horizon RMSE/MAE and categorical metrics against suitable baselines; promote a new bundle only after evaluation. Update ONNX/mobile contracts and parity gates when the tensor contract changes.
+
 ## Accuracy and coverage follow-up
 
 1. Extend generation through a validated `SyntheticConfig`: independent dynamics/noise/policy parameters, typed nuisance and cross-subject observations, null/absent/burst missingness, partial labels, and grouped learner windows. Keep distributions configurable and identities outside predictive inputs.

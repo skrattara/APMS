@@ -1,5 +1,11 @@
 # Transformer implementation review and validation
 
+## Assessment context upgrade, completed 2026-10-22
+
+The new version-one context model passed grouped synthetic validation, separate calibration, dynamic ONNX/Python/JavaScript parity, packaged authenticated HTTP inference, and its executed playground. On 40 held-out synthetic learners, linear-assessment RMSE improved **14.009→13.533 percentage points** across 355 labels; mapped/category assessment accuracy also improved. AI-risk-category accuracy worsened **71.79%→64.10%** (39 labels), and calibrated assessment interval coverage was **83.87%** across 341 eligible labels against a nominal 90%. This is an experimental synthetic release, with no production promotion or institutional accuracy claim. The [full results and rollout guide](AI_ASSESSMENT_CONTEXT_UPGRADE.md#measured-synthetic-results-completed-2026-10-22) records denominators, matched baselines, the corrected selector/protocol mismatch, preserved failed attempts, compression, source amendments and deployment paths. The historical results below use different data and remain separate comparisons.
+
+## Earlier implementation review
+
 Validated locally on October 17, 2026. GPT-6 Luna with medium reasoning wrote the implementation and mobile reference adapter; the primary agent reviewed the changes, corrected findings, and ran the checks below. Existing unrelated app, domain, gateway, and database edits were preserved. Commands ran through `cmd.exe`; environments, caches, notebook runs, datasets, and artifacts stayed inside this workspace.
 
 ## Verification evidence

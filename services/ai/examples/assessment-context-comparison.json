@@ -1,0 +1,45 @@
+{
+  "description": "A controlled synthetic ablation for the shared assessment-context compiler and model. Synthetic results are engineering evidence only, never an institutional accuracy claim.",
+  "dataset": {
+    "groups": 400,
+    "seed": 7319,
+    "history_fraction": 0.62,
+    "score_missing_probability": 0.10,
+    "label_missing_probability": 0.02,
+    "noise_sd": 5.0
+  },
+  "split": {
+    "seed": 20261020,
+    "ratios": [0.7, 0.1, 0.1, 0.1],
+    "roles": ["train", "validation", "calibration", "test"]
+  },
+  "training": {
+    "seed": 20261020,
+    "epochs": 12,
+    "batch_size": 16,
+    "width": 32,
+    "layers": 1,
+    "heads": 4,
+    "learning_rate": 0.001,
+    "patience": 3,
+    "accelerator": "cpu",
+    "real_fraction": 1.0,
+    "primary_target_field": "current_standing",
+    "dropout": 0.1,
+    "weight_decay": 0.01,
+    "numeric_residual": false,
+    "assessment_context_version": 0
+  },
+  "models": {
+    "context_control": {"assessment_context_version": 0},
+    "assessment_context_v1": {"assessment_context_version": 1}
+  },
+  "selection": {
+    "primary_metric": "linear_assessment_score_rmse",
+    "guard_metrics": ["standing_mae", "standing_rmse", "failure_brier", "ai_risk_level_accuracy", "mapped_score_accuracy_or_mae", "categorical_score_accuracy"],
+    "standing_error_tolerance": 1.0,
+    "failure_brier_tolerance": 0.02,
+    "category_accuracy_tolerance": 0.03,
+    "test_unopened_until_after_selection": true
+  }
+}

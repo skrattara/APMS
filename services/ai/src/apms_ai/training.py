@@ -17,7 +17,7 @@ from pathlib import Path
 
 import torch
 
-from .contracts import Example, validate_example
+from .contracts import Example, example_fingerprint_record, validate_example
 from .data import RobustPreprocessor, group_split
 from .encoding import token_rows
 from .lifecycle import load_bundle, make_fabric, save_bundle, seed_everything
@@ -49,9 +49,49 @@ def _prepare(
     from .encoding import history_tokens
 
     model_config = model_config or {}
+    # Training and serving must compile the same schema-derived constraints.
+    # Keep this one pass before tensorization so numeric mappings, per-query
+    # categories, and assessment bounds cannot drift between the two paths.
+    if any(
+        example.schema
+        and not getattr(example, "_schema_bound", False)
+        and (
+            example.assessment_instances
+            or any(
+                "assessment_ref" in query or "factor_ref" in query
+                for query in example.queries
+            )
+        )
+        for example in examples
+    ):
+        from .inference import bind_schema_queries
+
+        examples = [
+            bind_schema_queries(example)[0]
+            if example.schema
+            and not getattr(example, "_schema_bound", False)
+            and (
+                example.assessment_instances
+                or any(
+                    "assessment_ref" in query or "factor_ref" in query
+                    for query in example.queries
+                )
+            )
+            else example
+            for example in examples
+        ]
     max_history = int(model_config.get("max_history", 512))
     max_queries = int(model_config.get("max_queries", 128))
     max_categories = int(model_config.get("categories", 16))
+    assessment_context_version = model_config.get("assessment_context_version", 0)
+    if (
+        isinstance(assessment_context_version, bool)
+        or not isinstance(assessment_context_version, int)
+        or assessment_context_version not in (0, 1)
+    ):
+        raise ValueError("assessment_context_version must be integer 0 or 1")
+    if assessment_context_version == 1:
+        from .assessment_context import compile_assessment_contexts
 
     encoded = []
     q_count = 1
@@ -85,6 +125,11 @@ def _prepare(
             queries = [{"field": name} for name in target_fields]
         if not labels:
             labels = [{} for _ in queries]
+        assessment_contexts = (
+            compile_assessment_contexts(example)
+            if assessment_context_version == 1
+            else [[0.0] * 34 for _ in queries]
+        )
         q_rows = []
         for index, query in enumerate(queries):
             name = _query_field(query, specs)
@@ -107,6 +152,7 @@ def _prepare(
                     target_row,
                     query,
                     spec.categories,
+                    assessment_contexts[index],
                 )
             )
         q_count = max(q_count, len(q_rows))
@@ -132,7 +178,8 @@ def _prepare(
     legal = torch.zeros(batch, q_count, max_categories, dtype=torch.bool, device=device)
     numeric_bounds = torch.full((batch, q_count, 1, 2), float("inf"), device=device)
     numeric_bounds[..., 0] = float("-inf")
-    query_features = torch.zeros(batch, q_count, 8, device=device)
+    query_feature_width = 42 if assessment_context_version == 1 else 8
+    query_features = torch.zeros(batch, q_count, query_feature_width, device=device)
     targets = {
         "numeric": torch.zeros(batch, q_count, device=device),
         "category": torch.zeros(batch, q_count, dtype=torch.long, device=device),
@@ -161,6 +208,7 @@ def _prepare(
             label,
             query,
             categories,
+            assessment_context,
         ) in enumerate(q_rows):
             query_ids[i, j] = field_id
             query_mask[i, j] = False
@@ -222,6 +270,10 @@ def _prepare(
                     or examples[i].schema.get("evaluationCriteria")
                 )
             )
+            if assessment_context_version == 1:
+                query_features[i, j, 8:] = torch.as_tensor(
+                    assessment_context, dtype=torch.float32, device=device
+                )
             if (
                 isinstance(value, (int, float))
                 and not isinstance(value, bool)
@@ -408,9 +460,12 @@ def train(
     input_dropout=None,
     min_delta=None,
     numeric_history_context: bool | None = None,
+    assessment_context_version: int | None = None,
     numeric_center_loss_kind: str | None = None,
     selection_metric: str | None = None,
+    primary_target_field: str | None = None,
 ):
+    primary_target_field_explicit = primary_target_field is not None
     if epochs < 1 or batch_size < 1:
         raise ValueError("epochs and batch size must be positive")
     for example in examples:
@@ -476,6 +531,35 @@ def train(
         example for example in splits["validation"] if example.origin == "real"
     ]
     model_selection = real_validation or splits["validation"]
+    assessment_query_counts = {}
+    for role, partition in splits.items():
+        assessment_query_counts[role] = sum(
+            1
+            for example in partition
+            for index, query in enumerate(example.queries)
+            if "assessment_ref" in query
+            and index < len(example.labels)
+            and example.labels[index].get(query.get("field")) is not None
+        )
+    target_fields = list(
+        dict.fromkeys(
+            _query_field(query, {field.name: field for field in example.fields})
+            for example in splits["train"]
+            for query in example.queries
+        )
+    )
+    target_fields = [name for name in target_fields if name is not None]
+    target_field_kinds = {
+        field.name: field.kind
+        for example in splits["train"]
+        for field in example.fields
+    }
+    assessment_target_fields = {
+        query.get("field")
+        for example in splits["train"]
+        for query in example.queries
+        if query.get("assessment_ref") is not None
+    }
     fields = list(
         dict.fromkeys(
             field.name for example in splits["train"] for field in example.fields
@@ -512,10 +596,20 @@ def train(
     reset_numeric_head_after_pretraining = False
     if resume:
         resumed_state, resumed_metadata = load_bundle(resume)
+        saved_primary_target = resumed_metadata.get("target_field")
+        if primary_target_field is None:
+            primary_target_field = saved_primary_target
+        elif primary_target_field != saved_primary_target:
+            raise ValueError("Resume cannot change primary_target_field")
         saved_config = resumed_metadata.get("model_config", {})
         saved_resume_contract = resumed_metadata.get("training", {}).get(
             "resume_contract", {}
         )
+        saved_assessment_version = saved_config.get("assessment_context_version", 0)
+        if assessment_context_version is None:
+            assessment_context_version = saved_assessment_version
+        elif assessment_context_version != saved_assessment_version:
+            raise ValueError("Resume cannot change assessment_context_version")
         if numeric_history_context is None:
             numeric_history_context = bool(
                 saved_config.get("numeric_history_context", False)
@@ -557,6 +651,15 @@ def train(
         preprocessing = dict(resumed_metadata.get("preprocessing", {}))
     elif init_from:
         initial_state, initial_metadata = load_bundle(init_from)
+        saved_primary_target = initial_metadata.get("target_field")
+        if primary_target_field is None:
+            primary_target_field = saved_primary_target
+        elif saved_primary_target is not None and primary_target_field != saved_primary_target:
+            raise ValueError("Fine-tuning cannot change primary_target_field")
+        initial_config = initial_metadata.get("model_config", {})
+        initial_assessment_version = initial_config.get(
+            "assessment_context_version", 0
+        )
         incumbent_residual = bool(
             initial_metadata.get("model_config", {}).get("numeric_residual", False)
         )
@@ -564,6 +667,13 @@ def train(
             "residual_link", "logit"
         )
         is_masked_pretraining_bundle = bool(initial_metadata.get("pretraining"))
+        if assessment_context_version is None:
+            assessment_context_version = initial_assessment_version
+        elif (
+            assessment_context_version != initial_assessment_version
+            and not is_masked_pretraining_bundle
+        ):
+            raise ValueError("Fine-tuning cannot change assessment_context_version")
         initial_numeric_context = bool(
             initial_metadata.get("model_config", {}).get(
                 "numeric_history_context", False
@@ -647,6 +757,47 @@ def train(
         numeric_residual = True
     if numeric_history_context is None:
         numeric_history_context = False
+    if assessment_context_version is None:
+        assessment_context_version = 0
+    if (
+        isinstance(assessment_context_version, bool)
+        or not isinstance(assessment_context_version, int)
+        or assessment_context_version not in (0, 1)
+    ):
+        raise ValueError("assessment_context_version must be integer 0 or 1")
+    if assessment_context_version == 1 and not assessment_query_counts.get("train", 0):
+        raise ValueError(
+            "V1 assessment conditioning requires labeled assessment queries in the training split"
+        )
+    if primary_target_field is None:
+        if assessment_context_version == 1:
+            primary_target_field = next(
+                (
+                    name
+                    for name in ("current_standing", "predicted_standing")
+                    if name in target_fields
+                ),
+                None,
+            )
+            if primary_target_field is None:
+                raise ValueError(
+                    "Assessment-context v1 requires primary_target_field or a current_standing/predicted_standing target"
+                )
+        else:
+            # Preserve the original query-order default for version 0.
+            primary_target_field = target_fields[0] if target_fields else None
+    if primary_target_field is not None:
+        if primary_target_field not in target_fields:
+            raise ValueError("primary_target_field must be a declared training query")
+        enforce_primary_semantics = (
+            assessment_context_version == 1 or primary_target_field_explicit
+        )
+        if enforce_primary_semantics and target_field_kinds.get(primary_target_field) not in {"float", "integer"}:
+            raise ValueError("primary_target_field must be numeric")
+        if enforce_primary_semantics and primary_target_field in assessment_target_fields:
+            raise ValueError("primary_target_field cannot be an assessment-instance target")
+    elif assessment_context_version == 1:
+        raise ValueError("Assessment-context v1 requires a numeric primary target field")
     if numeric_center_loss_kind is None:
         numeric_center_loss_kind = "smooth_l1"
     if selection_metric is None:
@@ -681,6 +832,7 @@ def train(
         "numeric_residual": bool(numeric_residual),
         "residual_link": residual_link,
         "numeric_history_context": bool(numeric_history_context),
+        "assessment_context_version": assessment_context_version,
     }
     resume_contract = {
         "learning_rate": learning_rate,
@@ -691,6 +843,7 @@ def train(
         "real_fraction": real_fraction,
         "ratios": list(ratios),
         "model_config": model_config,
+        "primary_target_field": primary_target_field,
         "task_weights": task_weights,
         "numeric_center_loss_weight": numeric_center_loss_weight,
         "input_dropout": input_dropout,
@@ -731,7 +884,7 @@ def train(
     stale = 0
     fingerprint = hashlib.sha256(
         json.dumps(
-            [asdict(x) for x in examples],
+            [example_fingerprint_record(x) for x in examples],
             sort_keys=True,
             separators=(",", ":"),
             default=list,
@@ -748,19 +901,23 @@ def train(
         if metadata.get("training", {}).get("seed") != seed:
             raise ValueError("Resume seed differs from the checkpoint")
         saved_contract = metadata.get("training", {}).get("resume_contract", {})
+        normalized_saved = dict(saved_contract)
+        normalized_saved.setdefault(
+            "primary_target_field", metadata.get("target_field")
+        )
         # New knobs may be absent from a legacy checkpoint. Compare the exact
         # historical contract in that case while still checking old model mode.
         comparable_contract = {
             key: value
             for key, value in resume_contract.items()
-            if key in saved_contract
+            if key in normalized_saved
         }
-        normalized_saved = dict(saved_contract)
         if "model_config" in normalized_saved:
             normalized_model_config = dict(normalized_saved["model_config"])
             normalized_model_config.setdefault("numeric_residual", False)
             normalized_model_config.setdefault("residual_link", "logit")
             normalized_model_config.setdefault("numeric_history_context", False)
+            normalized_model_config.setdefault("assessment_context_version", 0)
             normalized_saved["model_config"] = normalized_model_config
         if normalized_saved != comparable_contract:
             raise ValueError(
@@ -805,6 +962,7 @@ def train(
                 "numeric_context_encoder.",
                 "numeric_context_to_forecast.",
                 "numeric_context_to_quantiles.",
+                "assessment_context_projection.",
             )
             disallowed_missing = [
                 key
@@ -813,7 +971,7 @@ def train(
             ]
             if disallowed_missing or incompatible.unexpected_keys:
                 raise ValueError(
-                    "Pretraining transfer state mismatch; only numeric-history context keys may be newly initialized"
+                    "Pretraining transfer state mismatch; only optional context projection keys may be newly initialized"
                 )
         else:
             model.load_state_dict(pretrained_weights)
@@ -1204,6 +1362,40 @@ def train(
                     "mean": sum(selected) / len(selected),
                     "source": "real_train" if row["real"] else "synthetic_train",
                 }
+        assessment_targets = {"linear": set(), "numeric_mapping": set(), "value_mapping": set()}
+        for example in splits["train"]:
+            instance_by_ref = {
+                item["assessment_ref"]: item for item in example.assessment_instances
+            }
+            specs = {field.name: field for field in example.fields}
+            for query in example.queries:
+                ref = query.get("assessment_ref")
+                spec = specs.get(query.get("field"))
+                instance = instance_by_ref.get(ref)
+                if instance is not None and spec is not None:
+                    mode = instance.get("scoring", {}).get("mode")
+                    if mode in assessment_targets:
+                        assessment_targets[mode].add(spec.name)
+        if assessment_context_version == 1:
+            if len(assessment_targets["linear"]) > 1:
+                raise ValueError(
+                    "V1 training requires one consistent numeric target for linear assessment scores"
+                )
+            if len(assessment_targets["numeric_mapping"]) > 1:
+                raise ValueError(
+                    "V1 training requires one consistent numeric-mapping target"
+                )
+            if len(assessment_targets["value_mapping"]) > 1:
+                raise ValueError(
+                    "V1 training requires one consistent categorical assessment target"
+                )
+            if not any(assessment_targets.values()):
+                raise ValueError(
+                    "V1 training requires labeled queries bound to assessment instances"
+                )
+        linear_target = next(iter(assessment_targets["linear"]), None)
+        mapped_target = next(iter(assessment_targets["numeric_mapping"]), None)
+        category_target = next(iter(assessment_targets["value_mapping"]), None)
         metadata = {
             "model_version": "schema-transformer-v1",
             "model_config": model_config,
@@ -1223,26 +1415,23 @@ def train(
                     role: sum(ex.origin == "real" for ex in part)
                     for role, part in splits.items()
                 },
+                "assessment_query_counts": assessment_query_counts,
             },
             "fields": fields,
             "field_kinds": kinds,
             "field_specs": field_specs,
             "target_fields": target_fields,
-            "target_field": target_fields[0] if target_fields else None,
+            "target_field": primary_target_field,
             "mapped_target_fields": mapped_target_fields,
             "category_target_fields": category_target_fields,
-            "assessment_numeric_target": next(
-                (
-                    name
-                    for name in target_fields
-                    if name in {"current_standing", "predicted_standing"}
-                ),
+            "assessment_numeric_target": linear_target or next(
+                (name for name in target_fields if name in {"current_standing", "predicted_standing"}),
                 None,
             ),
-            "assessment_mapped_target": next(
+            "assessment_mapped_target": mapped_target or next(
                 (name for name in mapped_target_fields if name == "mapped_score"), None
             ),
-            "assessment_category_target": next(
+            "assessment_category_target": category_target or next(
                 (name for name in target_fields if name == "categorical_score"), None
             ),
             "distillation": {
@@ -1258,6 +1447,21 @@ def train(
             "inference_adapter": {"name": "apms_custom_v1", "version": 1},
             "institutionally_validated": False,
         }
+        metadata["assessment_context_version"] = assessment_context_version
+        if assessment_context_version == 1:
+            from .assessment_context import (
+                ASSESSMENT_CONTEXT_FEATURE_NAMES,
+                ASSESSMENT_CONTEXT_NORMALIZATION_VERSION,
+                ASSESSMENT_RESULT_CUTOFF,
+            )
+
+            metadata["assessment_context_feature_names"] = list(
+                ASSESSMENT_CONTEXT_FEATURE_NAMES
+            )
+            metadata["assessment_context_normalization_version"] = (
+                ASSESSMENT_CONTEXT_NORMALIZATION_VERSION
+            )
+            metadata["assessment_result_cutoff"] = ASSESSMENT_RESULT_CUTOFF
         save_bundle(
             str(output) + ".checkpoint", state=state, metadata=metadata, overwrite=True
         )

@@ -210,11 +210,11 @@ def _training_mean_baselines(examples, metadata):
 def dataset_fingerprint(examples):
     import hashlib
     import json
-    from dataclasses import asdict
+    from .contracts import example_fingerprint_record
 
     return hashlib.sha256(
         json.dumps(
-            [asdict(x) for x in examples],
+            [example_fingerprint_record(x) for x in examples],
             sort_keys=True,
             separators=(",", ":"),
             default=list,
@@ -277,6 +277,22 @@ def query_identity(example, index):
 
     from .training import _query_field
 
+    # A bound assessment query carries its actual score domain (for example a
+    # 0..10 instance within a field that also supports 0..100). Use the same
+    # schema compiler as serving so calibration keys match inference keys.
+    if "assessment_ref" in example.queries[index] or "factor_ref" in example.queries[index]:
+        bound = getattr(example, "_assessment_query_binding", None)
+        if bound is None:
+            if getattr(example, "_schema_bound", False):
+                bound = example
+            else:
+                from .inference import bind_schema_queries
+
+                bound, _references = bind_schema_queries(example)
+            # This cache is an internal acceleration only; dataclass
+            # serialization and dataset fingerprints ignore dynamic attrs.
+            example._assessment_query_binding = bound
+        example = bound
     specs = {field.name: field for field in example.fields}
     query = example.queries[index]
     name = _query_field(query, specs)

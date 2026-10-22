@@ -223,7 +223,7 @@ type WorkerStatus = {
   device: string | null
   synthetic_demo: boolean
   institutionally_validated: false
-  capabilities: { v1_predictions: boolean; v2_forecasts: boolean; partial_assessment_inventory: boolean }
+  capabilities: { v1_predictions: boolean; v2_forecasts: boolean; partial_assessment_inventory: boolean; assessment_instance_conditioning: boolean }
 }
 
 export type AIServiceProbe = WorkerStatus & { latency_ms: number }
@@ -264,6 +264,7 @@ function sanitizeWorkerStatus(value: unknown): Omit<WorkerStatus, 'reachable'> {
       v1_predictions: capabilities.v1_predictions === true,
       v2_forecasts: capabilities.v2_forecasts === true,
       partial_assessment_inventory: capabilities.partial_assessment_inventory === true,
+      assessment_instance_conditioning: capabilities.assessment_instance_conditioning === true,
     },
   }
 }
@@ -430,7 +431,7 @@ export function failedAIServiceProbe(): AIServiceProbe {
     device: null,
     synthetic_demo: false,
     institutionally_validated: false,
-    capabilities: { v1_predictions: false, v2_forecasts: false, partial_assessment_inventory: false },
+    capabilities: { v1_predictions: false, v2_forecasts: false, partial_assessment_inventory: false, assessment_instance_conditioning: false },
     latency_ms: 0,
   }
 }

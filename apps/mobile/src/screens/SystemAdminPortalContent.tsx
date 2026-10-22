@@ -1,6 +1,7 @@
 import { getErrorMessage } from '@/services/errors';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import * as DocumentPicker from 'expo-document-picker';
 
 import { useAuth } from '@/auth/AuthProvider';
 import { supabase } from '@/services/supabase';
@@ -9,7 +10,7 @@ import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
 import { ReportComposer } from '@/components/reports/ReportComposer';
 import { AIServiceSettings } from '@/components/AIServiceSettings';
 import { Settings as AccountSettings } from '@/screens/AppPortalScreen';
-import { createManagedUser, deleteProgram, loadAdminWorkspace, queueBackup, saveAcademicTerm, saveDepartment, saveProgram, saveSystemSetting, updateManagedUser, type AcademicTermRecord, type AdminWorkspace, type DepartmentRecord, type ManagedUser, type ProgramRecord } from '@/services/admin';
+import { createJsonBackup, createManagedUser, deleteProgram, loadAdminWorkspace, restoreJsonBackup, restoreStoredScheduledBackup, saveAcademicTerm, saveBackupSchedule, saveDepartment, saveProgram, saveSystemSetting, updateManagedUser, uploadJsonBackup, type AcademicTermRecord, type AdminWorkspace, type DepartmentRecord, type ManagedUser, type ProgramRecord } from '@/services/admin';
 import { IT_GLOBAL_GRADING_SYSTEM, type GradingDefinition } from '@apms/domain';
 import { colors } from '@/theme/tokens';
 
@@ -38,7 +39,7 @@ function useWorkspace() {
   return { data, loading, refreshing, error, refresh };
 }
 
-export function SystemAdminPortalContent({ screen }: { screen: string }) {
+export function SystemAdminPortalContent({ screen, settingsCategory }: { screen: string; settingsCategory?: string }) {
   const { user } = useAuth(); const state = useWorkspace(); const toast = useToast();
   if (!user) return <PageState kind="error" title="Session required" message="Sign in again to continue." />;
   if (state.loading) return <PageState kind="loading" title="Loading System Admin workspace" message="Retrieving users, permissions, settings, backups, and audit activity." />;
@@ -53,7 +54,7 @@ export function SystemAdminPortalContent({ screen }: { screen: string }) {
     {screen === 'backup' ? <Backups {...props} /> : null}
     {screen === 'logs' ? <Logs {...props} /> : null}
     {screen === 'reports' ? <SystemReports {...props} /> : null}
-    {screen === 'system' ? <SystemSettings {...props} /> : null}
+    {screen === 'system' ? <SystemSettings {...props} initialCategory={settingsCategory} /> : null}
     {screen === 'settings' ? <Info onMessage={toast.show} /> : null}
   </View>;
 }
@@ -160,7 +161,140 @@ function AcademicSetup({ data, refresh, toast }: Props) {
   </>;
 }
 function Roles({ data }: Props) { return <><Heading title="Roles & Permissions" subtitle="The revised APMS role model contains exactly System Admin, Academic Admin, and Faculty; Super Admin is merged and Grader is removed." /><Card><DataTable columns={['Role', 'Key', 'Assigned users', 'Permissions', 'Scope']} rows={data.roles.filter((role) => ['system_admin', 'academic_admin', 'faculty'].includes(role.key)).map((role) => [role.name, role.key, String(role.users), String(role.permissions), role.key === 'system_admin' ? 'Global' : 'Department / assigned classes'])} /></Card></>; }
-function Backups({ data, refresh, userId, toast }: Props) { const [saving, setSaving] = useState(false); const queue = async () => { setSaving(true); try { await queueBackup(userId); toast.show('Backup request queued. Completion requires the configured protected backup worker.'); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Backup could not be queued.')); } finally { setSaving(false); } }; return <><Heading title="System & Backup Status" subtitle="Queue and monitor protected backup requests without exposing database credentials." action={<Button label="Queue full backup" loading={saving} onPress={() => void queue()} />} /><Card>{data.backups.length ? <DataTable columns={['Created', 'Scope', 'Completed', 'Status']} rows={data.backups.map((row) => [date(row.createdAt), row.scope, date(row.completedAt), `${row.status[0].toUpperCase()}${row.status.slice(1)}`])} /> : <PageState kind="empty" title="No backup requests" message="Queue a backup after an institutional backup worker and protected destination are configured." />}</Card></>; }
+function Backups({ data, refresh, userId, toast }: Props) {
+  const [backupPassword, setBackupPassword] = useState('');
+  const [latestBackupUrl, setLatestBackupUrl] = useState<{ url: string; fileName: string } | null>(null);
+  const [restorePassword, setRestorePassword] = useState('');
+  const [creating, setCreating] = useState(false);
+  const [restoring, setRestoring] = useState(false);
+  const [restoreProgress, setRestoreProgress] = useState<number | null>(null);
+  const [restoreFile, setRestoreFile] = useState<{ file: File; name: string } | null>(null);
+  const [confirmRestore, setConfirmRestore] = useState(false);
+  const [restoreStoredId, setRestoreStoredId] = useState<string | null>(null);
+  const [frequency, setFrequency] = useState<'daily' | 'weekly' | 'monthly'>(data.backupSchedule?.frequency ?? 'daily');
+  const [retentionDays, setRetentionDays] = useState(String(data.backupSchedule?.retentionDays ?? 30));
+  const [scheduleEnabled, setScheduleEnabled] = useState(data.backupSchedule?.enabled ?? false);
+  const [savingSchedule, setSavingSchedule] = useState(false);
+  useEffect(() => {
+    setFrequency(data.backupSchedule?.frequency ?? 'daily');
+    setRetentionDays(String(data.backupSchedule?.retentionDays ?? 30));
+    setScheduleEnabled(data.backupSchedule?.enabled ?? false);
+  }, [data.backupSchedule]);
+  const makeBackup = async () => {
+    if (backupPassword.length < 12) return toast.show('Use a backup password with at least 12 characters.');
+    setCreating(true);
+    try {
+      const result = await createJsonBackup(backupPassword);
+      setLatestBackupUrl({ url: result.downloadUrl, fileName: result.fileName });
+      toast.show(`Encrypted JSON backup created (${(result.sizeBytes / 1024 / 1024).toFixed(1)} MB).`);
+      setBackupPassword('');
+      refresh();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Backup could not be created.')); }
+    finally { setCreating(false); }
+  };
+  const selectRestoreFile = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({ type: ['application/json', 'text/json', 'text/plain'], copyToCacheDirectory: true, multiple: false });
+      if (result.canceled || !result.assets[0]) return;
+      const asset = result.assets[0];
+      const blob = asset.file ?? await (await fetch(asset.uri)).blob();
+      const file = blob instanceof File ? blob : new File([blob], asset.name, { type: asset.mimeType ?? 'application/json' });
+      if (!file.name.toLowerCase().endsWith('.json')) return toast.show('Choose an APMS backup JSON file.');
+      if (file.size > 110 * 1024 * 1024) return toast.show('This backup is larger than the current 110 MB restore processing limit.');
+      setRestoreFile({ file, name: file.name });
+      setRestoreProgress(null);
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Backup file could not be opened.')); }
+  };
+  const runRestore = async () => {
+    if (!restoreFile || restorePassword.length < 12) return;
+    setRestoring(true);
+    try {
+      const uploaded = await uploadJsonBackup(restoreFile.file, setRestoreProgress);
+      const result = await restoreJsonBackup(uploaded.path, uploaded.name, restorePassword);
+      toast.show(`Restore complete. ${result.restored_rows.toLocaleString()} rows were recovered; existing rows were preserved.`);
+      setRestoreFile(null);
+      setRestorePassword('');
+      setRestoreProgress(null);
+      setConfirmRestore(false);
+      refresh();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Backup could not be restored.')); }
+    finally { setRestoring(false); }
+  };
+  const runStoredRestore = async () => {
+    if (!restoreStoredId) return;
+    setRestoring(true);
+    try {
+      const result = await restoreStoredScheduledBackup(restoreStoredId);
+      toast.show(`Restore complete. ${result.restored_rows.toLocaleString()} rows were recovered; existing rows were updated from the backup.`);
+      setRestoreStoredId(null);
+      refresh();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Scheduled backup could not be restored.')); }
+    finally { setRestoring(false); }
+  };
+  const saveSchedule = async () => {
+    const retention = Number(retentionDays);
+    if (!Number.isInteger(retention) || retention < 1 || retention > 3650) return toast.show('Retention must be a whole number from 1 to 3,650 days.');
+    setSavingSchedule(true);
+    try {
+      await saveBackupSchedule(userId, { id: data.backupSchedule?.id, frequency, enabled: scheduleEnabled, retentionDays: retention });
+      toast.show('Backup schedule saved. Scheduled execution requires the APMS backup scheduler to be enabled in Supabase.');
+      refresh();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Backup schedule could not be saved.')); }
+    finally { setSavingSchedule(false); }
+  };
+  const openBackup = async (path: string) => {
+    const popup = window.open('about:blank', '_blank');
+    if (popup) popup.opener = null;
+    try {
+      if (!supabase) throw new Error('APMS is not connected to Supabase.');
+      const { data: signed, error } = await supabase.storage.from('apms-backups').createSignedUrl(path, 300);
+      if (error || !signed) throw error ?? new Error('Download link could not be created.');
+      if (popup) popup.location.replace(signed.signedUrl);
+      else toast.show('Allow pop-ups to download the backup.');
+    } catch (cause) { popup?.close(); toast.show(getErrorMessage(cause, 'Backup could not be downloaded.')); }
+  };
+  return <>
+    <Heading title="Backup management" subtitle="Create password-protected JSON backups, restore them safely, and configure a recurring schedule." />
+    <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'stretch', gap: 16 }}>
+      <Card style={{ flex: 1, minWidth: 320, gap: 10 }}>
+        <Text style={styles.sectionTitle}>Create encrypted backup</Text>
+        <Text style={styles.sectionHelp}>The JSON backup contains APMS application records. Authentication passwords and AI provider credentials are excluded.</Text>
+        <Field label="Backup password" value={backupPassword} onChangeText={setBackupPassword} secureTextEntry autoCapitalize="none" placeholder="At least 12 characters" />
+        <Button label="Create encrypted JSON backup" loading={creating} disabled={creating || backupPassword.length < 12} onPress={() => void makeBackup()} />
+        {latestBackupUrl ? <Button label={`Download ${latestBackupUrl.fileName}`} variant="secondary" onPress={() => window.open(latestBackupUrl.url, '_blank', 'noopener,noreferrer')} /> : null}
+      </Card>
+      <Card style={{ flex: 1, minWidth: 320, gap: 10 }}>
+        <Text style={styles.sectionTitle}>Restore from JSON</Text>
+        <Text style={styles.sectionHelp}>Uploads above 6 MB use resumable chunks. The current restore processing limit is 110 MB. Matching rows are updated from the backup, and newer rows remain.</Text>
+        <Button label={restoreFile ? `Selected: ${restoreFile.name}` : 'Choose backup JSON'} variant="secondary" onPress={() => void selectRestoreFile()} />
+        <Field label="Backup password" value={restorePassword} onChangeText={setRestorePassword} secureTextEntry autoCapitalize="none" placeholder="Enter the password used for this backup" />
+        {restoreProgress !== null ? <Text style={styles.sectionHelp}>{restoreProgress < 100 ? `Uploading backup: ${restoreProgress}% · upload can resume if interrupted` : 'Upload complete · preparing restore'}</Text> : null}
+        <Button label="Restore backup" disabled={!restoreFile || restorePassword.length < 12 || restoring} loading={restoring} onPress={() => setConfirmRestore(true)} />
+      </Card>
+    </View>
+    <Card style={{ gap: 10 }}>
+      <Text style={styles.sectionTitle}>Scheduled backups</Text>
+      <Text style={styles.sectionHelp}>Scheduled copies use server-managed encryption. Configure the Supabase scheduler and backup encryption secrets to run while no one is signed in.</Text>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-end', gap: 12 }}>
+        <SelectField label="Frequency" value={frequency} options={[{ label: 'Daily', value: 'daily' }, { label: 'Weekly', value: 'weekly' }, { label: 'Monthly', value: 'monthly' }]} onChange={(value) => setFrequency(value as typeof frequency)} containerStyle={{ flex: 1, minWidth: 160 }} />
+        <Field label="Keep backups (days)" value={retentionDays} onChangeText={setRetentionDays} keyboardType="numeric" containerStyle={{ flex: 1, minWidth: 160 }} />
+        <Button label={scheduleEnabled ? 'Disable schedule' : 'Enable schedule'} variant="secondary" onPress={() => setScheduleEnabled((value) => !value)} />
+        <Button label="Save schedule" loading={savingSchedule} disabled={savingSchedule} onPress={() => void saveSchedule()} />
+      </View>
+      {data.backupSchedule ? <Text style={styles.sectionHelp}>{data.backupSchedule.enabled ? 'Enabled' : 'Disabled'} · Next scheduled run {date(data.backupSchedule.nextRunAt)} · Last run {date(data.backupSchedule.lastRunAt)}</Text> : null}
+    </Card>
+    <Card>
+      <Text style={styles.sectionTitle}>Backup history</Text>
+      {data.backups.length ? <DataTable columns={['Created', 'File', 'Size', 'Status', 'Actions']} rows={data.backups.map((row) => [date(row.createdAt), row.fileName ?? 'Backup', row.sizeBytes == null ? '—' : `${(row.sizeBytes / 1024 / 1024).toFixed(1)} MB`, row.safeError ? `Failed · ${row.safeError}` : `${row.status[0].toUpperCase()}${row.status.slice(1)}`, row.storagePath ? <View key={row.id} style={{ flexDirection: 'row', gap: 6 }}><Button compact label="Download" variant="secondary" onPress={() => void openBackup(row.storagePath!)} />{row.scheduleId ? <Button compact label="Restore" variant="secondary" onPress={() => setRestoreStoredId(row.id)} /> : null}</View> : '—'])} columnWidths={[160, 280, 96, 280, 220]} widthMode="content" /> : <PageState kind="empty" title="No backups yet" message="Create an encrypted JSON backup to see it here." />}
+    </Card>
+    <Card>
+      <Text style={styles.sectionTitle}>Restore history</Text>
+      {data.backupRestores.length ? <DataTable columns={['Started', 'Completed', 'Status', 'Details']} rows={data.backupRestores.map((row) => [date(row.createdAt), date(row.completedAt), `${row.status[0].toUpperCase()}${row.status.slice(1)}`, row.safeError ?? '—'])} /> : <Text style={styles.sectionHelp}>Completed and failed restore attempts will appear here.</Text>}
+    </Card>
+    <ConfirmDialog visible={confirmRestore} title="Restore this APMS backup?" message="Rows from the backup will be restored. Matching rows will be updated to the saved values, and records added after the backup will remain. The restore will be recorded in the audit log." confirmLabel="Restore backup" cancelLabel="Cancel" pending={restoring} onClose={() => { if (!restoring) setConfirmRestore(false); }} onConfirm={() => void runRestore()} />
+    <ConfirmDialog visible={Boolean(restoreStoredId)} title="Restore scheduled backup?" message="Rows in this scheduled backup will be restored, and existing rows with the same primary key will be updated to match the backup. Newer rows will remain. The action will be added to the audit log." confirmLabel="Restore scheduled backup" cancelLabel="Cancel" pending={restoring} onClose={() => { if (!restoring) setRestoreStoredId(null); }} onConfirm={() => void runStoredRestore()} />
+  </>;
+}
 function Logs({ data }: Props) { return <><Heading title="Access & System Logs" subtitle="Immutable audit trail for account, data, criteria, and administrative operations." />{data.logs.length ? <DataTable columns={['Log ref', 'Timestamp', 'Action', 'Entity', 'Actor', 'Status']} rows={data.logs.map((row) => [`Log ${compactReference(row.id)}`, date(row.createdAt), row.action, auditEntityLabel(row, data), auditActorLabel(row.actorId, data), 'Recorded'])} columnWidths={[112, 160, 240, 220, 170, 100]} columnFlex={[0.5, 0.7, 1, 1, 0.8, 0.3]} widthMode="container" /> : <PageState kind="empty" title="No logs" message="No audit records are visible." />}</>; }
 function SystemReports({ data }: Props) {
   const rows = useMemo(() => [
@@ -170,9 +304,10 @@ function SystemReports({ data }: Props) {
   ], [data.users, data.logs, data.backups]);
   return <><Heading title="System Reports" subtitle="Formatted operational reports for account, audit, and backup administration. Academic records are outside the System Admin reporting scope." /><ReportComposer title="System Operations Report" scopeLabel="System administration" description="Operational account status, role assignment, audit activity, and backup status. Report data is drawn from the System Admin workspace." rows={rows} /></>;
 }
-function SystemSettings({ data, refresh, userId, toast }: Props) {
-  const [category, setCategory] = useState('Core services');
+function SystemSettings({ data, refresh, userId, toast, initialCategory }: Props & { initialCategory?: string }) {
+  const [category, setCategory] = useState(initialCategory === 'Grade deadlines' ? initialCategory : 'Core services');
   const settingsCategories = ['Core services', 'Forecasting service', 'AI provider usage', 'Feedback email', 'Backup policy', 'Grading defaults', 'Grade deadlines'];
+  useEffect(() => { if (initialCategory === 'Grade deadlines') setCategory(initialCategory); }, [initialCategory]);
   const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(data.settings.map((row) => [row.key, typeof row.value === 'string' ? row.value : JSON.stringify(row.value)])));
   const storedFeedbackFromEmail = data.settings.find((row) => row.key === 'FEEDBACK_FROM_EMAIL')?.value;
   const [feedbackFromEmail, setFeedbackFromEmail] = useState(typeof storedFeedbackFromEmail === 'string' ? storedFeedbackFromEmail : '');
@@ -313,12 +448,15 @@ function SystemGradeDeadlines({ data, userId, toast }: Pick<Props, 'data' | 'use
   const [deadlines, setDeadlines] = useState<Record<string, string>>({ overall: '', p1: '', p2: '', p3: '' });
   const [configuredDeadlines, setConfiguredDeadlines] = useState<any[]>([]);
   const [requests, setRequests] = useState<any[]>([]);
+  const [classRecords, setClassRecords] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
+  const [rejectingRequest, setRejectingRequest] = useState<any | null>(null);
+  const [rejectionReason, setRejectionReason] = useState('');
   const load = useCallback(async () => {
     if (!supabase) return;
     const [deadlineResult, requestResult] = await Promise.all([
-      supabase.from('grade_encoding_deadlines').select('scope_type,department_id,program_id,year_level,period_key,deadline_at'),
-      supabase.from('grade_encoding_deadline_requests').select('id,department_id,scope_type,program_id,year_level,requested_deadlines,rationale,status,created_at').order('created_at', { ascending: false }).limit(100),
+      supabase.from('grade_encoding_deadlines').select('scope_type,department_id,program_id,year_level,class_record_id,period_key,deadline_at'),
+      supabase.from('grade_encoding_deadline_requests').select('id,department_id,requested_by,scope_type,program_id,year_level,class_record_id,requested_deadlines,rationale,status,review_note,created_at,reviewed_at').order('created_at', { ascending: true }),
     ]);
     const error = deadlineResult.error ?? requestResult.error;
     if (error) throw error;
@@ -327,7 +465,18 @@ function SystemGradeDeadlines({ data, userId, toast }: Pick<Props, 'data' | 'use
     for (const row of configured) if (row.scope_type === 'system' && row.period_key in next) next[row.period_key] = String(row.deadline_at).slice(0, 10);
     setDeadlines(next);
     setConfiguredDeadlines(configured);
-    setRequests(requestResult.data ?? []);
+    const requestRows = [...(requestResult.data ?? [])].sort((a, b) => {
+      const pendingOrder = Number(b.status === 'pending') - Number(a.status === 'pending');
+      if (pendingOrder) return pendingOrder;
+      if (a.status === 'pending') return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      return new Date(b.reviewed_at ?? b.created_at).getTime() - new Date(a.reviewed_at ?? a.created_at).getTime();
+    });
+    setRequests(requestRows);
+    const classIds = [...new Set(requestRows.flatMap((request) => request.class_record_id ? [request.class_record_id] : []))];
+    if (!classIds.length) { setClassRecords([]); return; }
+    const classResult = await supabase.from('system_admin_class_labels').select('id,section,subject_code,subject_title').in('id', classIds);
+    if (classResult.error) throw classResult.error;
+    setClassRecords(classResult.data ?? []);
   }, []);
   useEffect(() => { void load().catch((cause) => toast.show(getErrorMessage(cause, 'Grade deadlines could not be loaded.'))); }, [load, toast]);
   const save = async () => {
@@ -342,13 +491,14 @@ function SystemGradeDeadlines({ data, userId, toast }: Pick<Props, 'data' | 'use
     } catch (cause) { toast.show(getErrorMessage(cause, 'Grade deadlines could not be saved.')); }
     finally { setBusy(false); }
   };
-  const review = async (requestId: string, status: 'approved' | 'rejected') => {
+  const review = async (requestId: string, status: 'approved' | 'rejected', reason?: string) => {
     if (!supabase) return toast.show('APMS is not connected to Supabase.');
     setBusy(true);
     try {
-      const { error } = await supabase.from('grade_encoding_deadline_requests').update({ status, reviewed_by: userId, reviewed_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', requestId);
+      const { error } = await supabase.from('grade_encoding_deadline_requests').update({ status, review_note: status === 'rejected' ? reason?.trim() : null, reviewed_by: userId, reviewed_at: new Date().toISOString(), updated_at: new Date().toISOString() }).eq('id', requestId);
       if (error) throw error;
       toast.show(status === 'approved' ? 'Deadline request approved and applied.' : 'Deadline request declined.');
+      setRejectingRequest(null); setRejectionReason('');
       await load();
     } catch (cause) { toast.show(getErrorMessage(cause, 'The deadline request could not be reviewed.')); }
     finally { setBusy(false); }
@@ -359,7 +509,9 @@ function SystemGradeDeadlines({ data, userId, toast }: Pick<Props, 'data' | 'use
     return date ? new Date(`${date}T12:00:00`).toLocaleDateString() : new Date(value).toLocaleDateString();
   };
   const currentDeadlineFor = (request: any, periodKey: string) => {
-    const scope = request.scope_type === 'program'
+    const scope = request.scope_type === 'class'
+      ? configuredDeadlines.find((row) => row.scope_type === 'class' && row.class_record_id === request.class_record_id && row.period_key === periodKey)
+      : request.scope_type === 'program'
       ? configuredDeadlines.find((row) => row.scope_type === 'program' && row.program_id === request.program_id && row.period_key === periodKey)
       : configuredDeadlines.find((row) => row.scope_type === 'year_level' && row.department_id === request.department_id && row.year_level === request.year_level && row.period_key === periodKey);
     const system = configuredDeadlines.find((row) => row.scope_type === 'system' && row.period_key === periodKey);
@@ -368,31 +520,41 @@ function SystemGradeDeadlines({ data, userId, toast }: Pick<Props, 'data' | 'use
   return <>
     <Card style={styles.settingsCard}>
       <Text style={styles.sectionTitle}>System-wide encoding deadlines</Text>
-      <Text style={styles.sectionHelp}>These deadlines apply to every program unless an approved program or year-level request overrides them. Once a deadline passes, grade scores for that period cannot be added, edited, cleared, or restored.</Text>
+      <Text style={styles.sectionHelp}>These deadlines apply to every program unless an approved class, program, or year-level request overrides them. Once a deadline passes, grade scores for that period cannot be added, edited, cleared, or restored.</Text>
       <View style={styles.dateGrid}>{[...gradeDeadlinePeriods.filter(({ key }) => key !== 'overall'), ...gradeDeadlinePeriods.filter(({ key }) => key === 'overall')].map(({ key, label }) => <DateField key={key} label={`${label} deadline`} value={deadlines[key] ?? ''} onChange={(value) => setDeadlines((current) => ({ ...current, [key]: value }))} containerStyle={styles.dateField} />)}</View>
       <View style={[styles.actions, styles.deadlineSaveActions]}><Button label="Save system-wide deadlines" loading={busy} disabled={busy} onPress={() => void save()} /></View>
     </Card>
     <Card style={styles.settingsCard}>
       <Text style={styles.sectionTitle}>Academic Admin requests</Text>
-      <Text style={styles.sectionHelp}>Review requests to change deadlines for a program or a year level within a department.</Text>
+      <Text style={styles.sectionHelp}>Review requests to change deadlines for a specific class, program, or year level within a department.</Text>
       {requests.length ? <View style={{ gap: 8 }}>{requests.map((request) => {
         const department = data.departments.find((item) => item.id === request.department_id);
         const program = data.programs.find((item) => item.id === request.program_id);
+        const requester = data.users.find((item) => item.id === request.requested_by);
+        const requesterName = requester ? `${requester.firstName} ${requester.lastName}`.trim() : '';
+        const classRecord = classRecords.find((item) => item.id === request.class_record_id);
+        const classLabel = classRecord ? `${classRecord.subject_code} · ${classRecord.subject_title} · ${classRecord.section}` : 'Class';
         const statusTone = request.status === 'approved' ? 'success' : request.status === 'rejected' ? 'danger' : 'warning';
         return <View key={request.id} style={[styles.settingRow, styles.deadlineRequestRow]}>
           <View style={styles.deadlineRequestContent}>
-            <View style={styles.deadlineRequestHeader}><Text style={styles.settingLabel}>{request.scope_type === 'program' ? `${program?.code ?? 'Program'} · ${program?.name ?? ''}` : `Year ${request.year_level}`} · ${department?.code ?? 'Department'}</Text><Badge tone={statusTone}>{request.status}</Badge></View>
-            <Text style={styles.help}>Requested {new Date(request.created_at).toLocaleString()}</Text>
-            <View style={styles.deadlineChanges}>{gradeDeadlinePeriods.map(({ key, label }) => request.requested_deadlines?.[key] !== undefined ? <Text key={key} style={styles.help}>{label}: {displayDeadline(currentDeadlineFor(request, key))} → {displayDeadline(request.requested_deadlines[key])}</Text> : null)}</View>
-            <View style={styles.deadlineReason}><Text style={styles.deadlineReasonLabel}>Reason for request</Text><Text style={styles.help}>{request.rationale}</Text></View>
+            <View style={styles.deadlineRequestHeader}><Text style={styles.settingLabel}>{request.scope_type === 'program' ? `${program?.code ?? 'Program'} · ${program?.name ?? ''} · ${department?.code ?? 'Department'}` : request.scope_type === 'class' ? `${classLabel} · ${department?.code ?? 'Department'}` : `Year ${request.year_level} · ${department?.code ?? 'Department'}`}</Text><Badge tone={statusTone}>{request.status}</Badge></View>
+            <Text style={styles.help}>Requested by {requesterName || requester?.email || 'Academic Admin'} · {new Date(request.created_at).toLocaleString()}</Text>
+            <View style={styles.deadlineChanges}>{gradeDeadlinePeriods.map(({ key, label }) => request.requested_deadlines?.[key] !== undefined ? <View key={key} style={{ backgroundColor: colors.canvas, borderRadius: 8, padding: 8 }}><Text style={styles.deadlineReasonLabel}>{label}</Text><Text style={styles.help}>{displayDeadline(currentDeadlineFor(request, key))} → {displayDeadline(request.requested_deadlines[key])}</Text></View> : null)}</View>
+            <View style={styles.deadlineNotesGrid}><View style={[styles.deadlineReason, !request.review_note && styles.deadlineNoteFullWidth]}><Text style={styles.deadlineReasonLabel}>Reason for request</Text><Text style={styles.help}>{request.rationale}</Text></View>
+            {request.review_note ? <View style={styles.deadlineReason}><Text style={styles.deadlineReasonLabel}>{request.status === 'rejected' ? 'Reason for rejection' : 'Review note'}</Text><Text style={styles.help}>{request.review_note}</Text></View> : null}</View>
           </View>
-          {request.status === 'pending' ? <View style={styles.actions}><Button compact label="Approve" disabled={busy} onPress={() => void review(request.id, 'approved')} /><Button compact label="Decline" variant="secondary" disabled={busy} onPress={() => void review(request.id, 'rejected')} /></View> : null}
+          {request.status === 'pending' ? <View style={styles.actions}><Button compact label="Approve" disabled={busy} onPress={() => void review(request.id, 'approved')} /><Button compact label="Decline" variant="secondary" disabled={busy} onPress={() => { setRejectingRequest(request); setRejectionReason(''); }} /></View> : null}
         </View>;
       })}</View> : <Text style={styles.help}>No deadline requests have been submitted.</Text>}
     </Card>
+    <Dialog visible={!!rejectingRequest} title="Decline deadline request" onClose={() => { setRejectingRequest(null); setRejectionReason(''); }}>
+      <Text style={styles.dialogIntro}>Give the Academic Admin a clear reason for rejecting this deadline change.</Text>
+      <Field label="Reason for rejection" value={rejectionReason} onChangeText={setRejectionReason} multiline numberOfLines={4} maxLength={1000} placeholder="Explain why the requested deadline cannot be approved." style={{ paddingTop: 14 }} />
+      <View style={styles.dialogActions}><Button label="Cancel" variant="secondary" disabled={busy} onPress={() => { setRejectingRequest(null); setRejectionReason(''); }} /><Button label="Decline request" variant="danger" loading={busy} disabled={busy || rejectionReason.trim().length < 10} onPress={() => rejectingRequest && void review(rejectingRequest.id, 'rejected', rejectionReason)} /></View>
+    </Dialog>
   </>;
 }
 function PolicyItem({ label, value }: { label: string; value: string }) { return <View style={styles.policyItem}><Text style={styles.policyValue}>{value}</Text><Text style={styles.policyLabel}>{label}</Text></View>; }
 function Info({ onMessage }: { onMessage: (message: string) => void }) { return <><Heading title="Account settings" subtitle="Manage your profile, password, MFA, and notification preferences." /><AccountSettings role="system_admin" screen="settings" onMessage={onMessage} /></>; }
 function Dialog({ visible, title, onClose, children }: { visible: boolean; title: string; onClose: () => void; children: ReactNode }) { return <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}><View style={styles.overlay}><Card style={styles.dialog}><View style={styles.heading}><Text accessibilityRole="header" style={styles.dialogTitle}>{title}</Text><Pressable accessibilityLabel="Close dialog" onPress={onClose}><Text style={styles.close}>×</Text></Pressable></View><View style={styles.dialogBody}>{children}</View></Card></View></Modal>; }
-const styles = StyleSheet.create({ screen: { gap: 16 }, heading: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12 }, flex: { flex: 1 }, title: { color: colors.text, fontSize: 22, lineHeight: 30, fontWeight: '700' }, subtitle: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginTop: 3 }, metrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, cardTitle: { color: colors.text, fontSize: 15, fontWeight: '700', marginBottom: 8 }, help: { color: colors.textMuted, fontSize: 12, lineHeight: 18 }, formGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, dateGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, dateField: { flex: 1, flexBasis: 180, minWidth: 180 }, userChartFilters: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, filter: { flexGrow: 1, flexBasis: 180, minWidth: 160 }, chartCount: { color: colors.textMuted, fontSize: 11, marginTop: -10 }, analyticsCharts: { flexDirection: 'row', flexWrap: 'wrap', gap: 14 }, fieldHint: { color: colors.textMuted, fontSize: 11, marginTop: -6 }, dialogIntro: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginBottom: 2 }, actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, deadlineSaveActions: { marginTop: 5 }, dialogActions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8, marginTop: 4 }, overlay: { flex: 1, backgroundColor: '#00000066', alignItems: 'center', justifyContent: 'center', padding: 24 }, dialog: { width: '100%', maxWidth: 760, maxHeight: '90%', padding: 22 }, dialogTitle: { color: colors.text, fontSize: 19, fontWeight: '700' }, dialogBody: { gap: 14, marginTop: 16 }, close: { color: colors.textMuted, fontSize: 28 }, setting: { maxWidth: 920, gap: 12 }, settingsLayout: { gap: 10, maxWidth: 980 }, settingsCategoryNav: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, borderBottomWidth: 1, borderColor: colors.border }, settingsCategoryTab: { paddingHorizontal: 11, paddingVertical: 9, borderBottomWidth: 2, borderBottomColor: 'transparent' }, settingsCategoryTabActive: { borderBottomColor: colors.brand }, settingsCategoryText: { color: colors.textMuted, fontSize: 12, fontWeight: '600' }, settingsCategoryTextActive: { color: colors.brand }, settingsIntro: { gap: 7, padding: 14 }, settingsCard: { gap: 7, padding: 14 }, summaryRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, borderTopWidth: 1, borderColor: colors.border, paddingTop: 8, marginTop: 2 }, summaryLabel: { color: colors.textMuted, fontSize: 12 }, summaryValue: { color: colors.text, fontSize: 12, fontWeight: '600' }, sectionTitle: { color: colors.text, fontSize: 16, fontWeight: '700' }, sectionHelp: { color: colors.textMuted, fontSize: 12, lineHeight: 18, marginTop: 2 }, settingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 14, paddingVertical: 8, borderTopWidth: 1, borderColor: colors.border, marginTop: 2 }, deadlineRequestRow: { alignItems: 'flex-start', paddingVertical: 12 }, deadlineRequestContent: { flex: 1, gap: 5 }, deadlineRequestHeader: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 }, deadlineChanges: { gap: 2, marginTop: 3 }, deadlineReason: { gap: 4, padding: 10, marginTop: 5, backgroundColor: colors.canvas, borderRadius: 8 }, deadlineReasonLabel: { color: colors.text, fontSize: 12, fontWeight: '700' }, settingCopy: { flex: 1 }, settingLabel: { color: colors.text, fontSize: 14, fontWeight: '700' }, switch: { width: 42, height: 24, borderRadius: 14, padding: 2, justifyContent: 'center', backgroundColor: '#D0D5DD' }, switchOn: { backgroundColor: colors.brand }, switchThumb: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#FFF' }, switchThumbOn: { alignSelf: 'flex-end' }, inlineField: { flexDirection: 'row', alignItems: 'flex-end', gap: 10 }, retentionField: { width: 180 }, unit: { color: colors.textMuted, fontSize: 13, paddingBottom: 12 }, sectionHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }, badge: { color: colors.success, backgroundColor: '#DCFCE7', fontSize: 10, fontWeight: '800', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999 }, policyGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 6 }, policyItem: { minWidth: 130, flex: 1, backgroundColor: colors.canvas, borderRadius: 10, padding: 12 }, policyValue: { color: colors.brand, fontSize: 18, fontWeight: '800' }, policyLabel: { color: colors.textMuted, fontSize: 11, marginTop: 3 }, jsonField: { minHeight: 108, textAlignVertical: 'top' }, updatedNote: { color: colors.textMuted, fontSize: 11, textAlign: 'center', paddingBottom: 10 } });
+const styles = StyleSheet.create({ screen: { gap: 16 }, heading: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12 }, flex: { flex: 1 }, title: { color: colors.text, fontSize: 22, lineHeight: 30, fontWeight: '700' }, subtitle: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginTop: 3 }, metrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, cardTitle: { color: colors.text, fontSize: 15, fontWeight: '700', marginBottom: 8 }, help: { color: colors.textMuted, fontSize: 12, lineHeight: 18 }, formGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, dateGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, dateField: { flex: 1, flexBasis: 180, minWidth: 180 }, userChartFilters: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, filter: { flexGrow: 1, flexBasis: 180, minWidth: 160 }, chartCount: { color: colors.textMuted, fontSize: 11, marginTop: -10 }, analyticsCharts: { flexDirection: 'row', flexWrap: 'wrap', gap: 14 }, fieldHint: { color: colors.textMuted, fontSize: 11, marginTop: -6 }, dialogIntro: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginBottom: 2 }, actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, deadlineSaveActions: { marginTop: 5 }, dialogActions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8, marginTop: 4 }, overlay: { flex: 1, backgroundColor: '#00000066', alignItems: 'center', justifyContent: 'center', padding: 24 }, dialog: { width: '100%', maxWidth: 760, maxHeight: '90%', padding: 22 }, dialogTitle: { color: colors.text, fontSize: 19, fontWeight: '700' }, dialogBody: { gap: 14, marginTop: 16 }, close: { color: colors.textMuted, fontSize: 28 }, setting: { maxWidth: 920, gap: 12 }, settingsLayout: { gap: 10, maxWidth: 980 }, settingsCategoryNav: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, borderBottomWidth: 1, borderColor: colors.border }, settingsCategoryTab: { paddingHorizontal: 11, paddingVertical: 9, borderBottomWidth: 2, borderBottomColor: 'transparent' }, settingsCategoryTabActive: { borderBottomColor: colors.brand }, settingsCategoryText: { color: colors.textMuted, fontSize: 12, fontWeight: '600' }, settingsCategoryTextActive: { color: colors.brand }, settingsIntro: { gap: 7, padding: 14 }, settingsCard: { gap: 7, padding: 14 }, summaryRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, borderTopWidth: 1, borderColor: colors.border, paddingTop: 8, marginTop: 2 }, summaryLabel: { color: colors.textMuted, fontSize: 12 }, summaryValue: { color: colors.text, fontSize: 12, fontWeight: '600' }, sectionTitle: { color: colors.text, fontSize: 16, fontWeight: '700' }, sectionHelp: { color: colors.textMuted, fontSize: 12, lineHeight: 18, marginTop: 2 }, settingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 14, paddingVertical: 8, borderTopWidth: 1, borderColor: colors.border, marginTop: 2 }, deadlineRequestRow: { alignItems: 'flex-start', paddingVertical: 12 }, deadlineRequestContent: { flex: 1, gap: 5 }, deadlineRequestHeader: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 }, deadlineChanges: { gap: 2, marginTop: 3 }, deadlineNotesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 5 }, deadlineReason: { flex: 1, flexBasis: 240, minWidth: 220, gap: 4, padding: 10, marginTop: 5, backgroundColor: colors.canvas, borderRadius: 8 }, deadlineNoteFullWidth: { flexBasis: '100%' }, deadlineReasonLabel: { color: colors.text, fontSize: 12, fontWeight: '700' }, settingCopy: { flex: 1 }, settingLabel: { color: colors.text, fontSize: 14, fontWeight: '700' }, switch: { width: 42, height: 24, borderRadius: 14, padding: 2, justifyContent: 'center', backgroundColor: '#D0D5DD' }, switchOn: { backgroundColor: colors.brand }, switchThumb: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#FFF' }, switchThumbOn: { alignSelf: 'flex-end' }, inlineField: { flexDirection: 'row', alignItems: 'flex-end', gap: 10 }, retentionField: { width: 180 }, unit: { color: colors.textMuted, fontSize: 13, paddingBottom: 12 }, sectionHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }, badge: { color: colors.success, backgroundColor: '#DCFCE7', fontSize: 10, fontWeight: '800', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999 }, policyGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 6 }, policyItem: { minWidth: 130, flex: 1, backgroundColor: colors.canvas, borderRadius: 10, padding: 12 }, policyValue: { color: colors.brand, fontSize: 18, fontWeight: '800' }, policyLabel: { color: colors.textMuted, fontSize: 11, marginTop: 3 }, jsonField: { minHeight: 108, textAlignVertical: 'top' }, updatedNote: { color: colors.textMuted, fontSize: 11, textAlign: 'center', paddingBottom: 10 } });

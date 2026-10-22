@@ -196,7 +196,7 @@ describe('private AI service gateway', () => {
         device: 'cpu',
         synthetic_demo: false,
         institutionally_validated: true,
-        capabilities: { v1_predictions: true, v2_forecasts: true, admin_path: '/private' },
+        capabilities: { v1_predictions: true, v2_forecasts: true, partial_assessment_inventory: true, assessment_instance_conditioning: true, admin_path: '/private' },
         config: { api_key: 'must-not-escape' },
         artifact_source_url: 'https://must-not-escape',
       })
@@ -212,7 +212,7 @@ describe('private AI service gateway', () => {
       device: 'cpu',
       synthetic_demo: false,
       institutionally_validated: false,
-      capabilities: { v1_predictions: true, v2_forecasts: true, partial_assessment_inventory: false },
+      capabilities: { v1_predictions: true, v2_forecasts: true, partial_assessment_inventory: true, assessment_instance_conditioning: true },
       latency_ms: 13,
     })
     expect(JSON.stringify(probe)).not.toContain('must-not-escape')

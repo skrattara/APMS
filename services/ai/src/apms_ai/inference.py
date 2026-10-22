@@ -64,7 +64,7 @@ def bind_schema_queries(
     schema = example.schema
     grading, evaluation = schema.get("gradingSystem"), schema.get("evaluationCriteria")
     compile_schema_context(grading, evaluation)
-    instances = assessment_instances or []
+    instances = assessment_instances if assessment_instances is not None else example.assessment_instances
     if instances:
         if not grading:
             raise ValueError("Assessment instances require a grading representation")
@@ -83,6 +83,10 @@ def bind_schema_queries(
         }
         if len(reference) > 1:
             raise ValueError("A scalar query cannot bind two different schema entities")
+        if "assessment_ref" in reference:
+            # Keep the local join on the query until tensor preparation. It is
+            # consumed by the shared context compiler and never embedded.
+            query["assessment_ref"] = reference["assessment_ref"]
         spec = specs.get(query.get("field"))
         if spec is None:
             raise ValueError("Query identifies an undeclared field")
@@ -190,8 +194,16 @@ def bind_schema_queries(
         else field
         for field in example.fields
     ]
-    result = replace(example, queries=queries, fields=request_fields)
+    result = replace(
+        example,
+        queries=queries,
+        fields=request_fields,
+        assessment_instances=list(instances),
+    )
     validate_example(result)
+    # Runtime marker avoids re-running complete-inventory validation in the
+    # shared tensorizer after a caller explicitly bound a partial inventory.
+    result._schema_bound = True
     return result, references
 
 
@@ -206,10 +218,13 @@ def predict_example(
 ):
     """Use exactly the shared training encoder, then decode every typed query."""
     import torch
+    from .assessment_context import validate_assessment_context_metadata
 
     from .evaluation import query_identity
     from .model import constrain_numeric
     from .training import _prepare
+
+    validate_assessment_context_metadata(metadata)
 
     example, references = bind_schema_queries(
         example,
@@ -338,6 +353,11 @@ def predict_record(
     model=None,
 ) -> dict[str, Any]:
     """Preserve the gateway's exact allowlisted response; no extra metadata."""
+    from .assessment_context import (
+        assessment_query_horizon,
+        validate_assessment_context_metadata,
+    )
+
     if adapter != {"name": "apms_custom_v1", "version": 1}:
         raise ValueError("Unsupported inference adapter version")
     grading, evaluation = payload["grading_system"], payload["evaluation_criteria"]
@@ -404,13 +424,53 @@ def predict_record(
     queries = [{"field": primary, "horizon": 1, "minimum": lower, "maximum": upper}]
     allowed = set(task_contract.get("allowed_outputs", []))
     instances = payload.get("assessment_instances") or []
+    context_version = validate_assessment_context_metadata(metadata)
+    raw_results = record.get("assessment_results", [])
+    if not isinstance(raw_results, list):
+        raise ValueError("Assessment results must be an array")
+    assessment_results = []
+    for item in raw_results:
+        if not isinstance(item, dict):
+            raise ValueError("Assessment results must be objects")
+        if "value" in item:
+            assessment_results.append(
+                {
+                    "assessment_ref": item.get("assessment_ref"),
+                    "value": item.get("value"),
+                    **(
+                        {"observed_day": item["observed_day"]}
+                        if "observed_day" in item
+                        else {}
+                    ),
+                }
+            )
+        elif context_version == 1:
+            # Accept the old privacy-projected gateway row only as an adapter;
+            # the context compiler receives a single canonical raw `value`.
+            raw_value = item.get("raw_score")
+            if raw_value is None:
+                raw_value = item.get("score")
+            if raw_value is None:
+                raw_value = item.get("categorical_value")
+            if raw_value is not None:
+                assessment_results.append(
+                    {
+                        "assessment_ref": item.get("assessment_ref"),
+                        "value": raw_value,
+                        **(
+                            {"observed_day": item["observed_day"]}
+                            if "observed_day" in item
+                            else {}
+                        ),
+                    }
+                )
     scored = {
         item.get("assessment_ref")
         for item in record.get("assessment_results", [])
         if isinstance(item, dict)
         and any(
             item.get(key) is not None
-            for key in ("score", "percentage", "categorical_value")
+            for key in ("value", "raw_score", "score", "percentage", "categorical_value")
         )
     }
     if "assessment_score_predictions" in allowed:
@@ -426,6 +486,8 @@ def predict_record(
                 else metadata.get("assessment_mapped_target")
                 or next(iter(metadata.get("mapped_target_fields", [])), None)
                 if mode == "numeric_mapping"
+                else metadata.get("assessment_numeric_target")
+                if context_version == 1
                 else primary
             )
             if target not in by_name:
@@ -435,7 +497,13 @@ def predict_record(
             queries.append(
                 {
                     "field": target,
-                    "horizon": 1,
+                    "horizon": (
+                        assessment_query_horizon(
+                            instance, instances, assessment_results
+                        )
+                        if context_version == 1
+                        else 1
+                    ),
                     "assessment_ref": instance["assessment_ref"],
                 }
             )
@@ -480,6 +548,8 @@ def predict_record(
         fields,
         origin="real",
         schema={"gradingSystem": grading, "evaluationCriteria": evaluation},
+        assessment_instances=instances,
+        assessment_results=assessment_results,
     )
     outputs = predict_example(
         state,

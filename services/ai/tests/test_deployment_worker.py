@@ -185,9 +185,15 @@ def test_registry_uses_remote_cache_and_does_not_fallback_when_remote_fetch_fail
     assert failed.error == "ValueError"
 
 
+@pytest.mark.parametrize("assessment_context_version", [0, 1])
 def test_release_package_contains_only_model_weights_and_runtime_bundle_files(
-    tmp_path: Path,
+    tmp_path: Path, assessment_context_version: int,
 ):
+    from apms_ai.assessment_context import (
+        ASSESSMENT_CONTEXT_FEATURE_NAMES,
+        ASSESSMENT_CONTEXT_NORMALIZATION_VERSION,
+        ASSESSMENT_RESULT_CUTOFF,
+    )
     script = Path(__file__).parents[1] / "deploy" / "package_model.py"
     spec = importlib.util.spec_from_file_location("package_model", script)
     module = importlib.util.module_from_spec(spec)
@@ -203,10 +209,16 @@ def test_release_package_contains_only_model_weights_and_runtime_bundle_files(
             "rng_torch": torch.tensor([1, 2], dtype=torch.uint8),
         },
         metadata={
+            "model_config": {"assessment_context_version": assessment_context_version},
+            "assessment_context_version": assessment_context_version,
+            "assessment_context_feature_names": list(ASSESSMENT_CONTEXT_FEATURE_NAMES),
+            "assessment_context_normalization_version": ASSESSMENT_CONTEXT_NORMALIZATION_VERSION,
+            "assessment_result_cutoff": ASSESSMENT_RESULT_CUTOFF,
             "fields": ["score"],
             "target_fields": ["score"],
             "training": {
                 "source_counts": {"train": 1},
+                "assessment_query_counts": {"train": 17, "validation": 4},
                 "data_fingerprint": "must-not-be-released",
                 "split_group_hashes": {"train": ["hashed-learner-group"]},
             },
@@ -224,7 +236,10 @@ def test_release_package_contains_only_model_weights_and_runtime_bundle_files(
     assert metadata["deployment_package"]["format"] == "inference-weights-only-v1"
     assert metadata["deployment_package"]["requires_target_runtime_smoke_test"] is True
     assert metadata["deployment_package"]["cross_version_parity_guaranteed"] is False
-    assert metadata["training"] == {"source_counts": {"train": 1}}
+    expected_training = {"source_counts": {"train": 1}}
+    if assessment_context_version == 1:
+        expected_training["assessment_query_counts"] = {"train": 17}
+    assert metadata["training"] == expected_training
     assert "training_baselines" not in metadata
     assert "task_weights" not in metadata and "distillation" not in metadata
     assert {path.name for path in packaged.iterdir()} == {

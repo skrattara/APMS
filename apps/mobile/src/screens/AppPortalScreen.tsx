@@ -8,6 +8,8 @@ import { useAuth, type AuthUser } from "@/auth/AuthProvider";
 import { AppShell } from "@/components/AppShell";
 import { AppIcon } from "@/components/Icon";
 import { AIProviderSettings } from "@/components/AIProviderSettings";
+import { AIUsageStatistics } from "@/components/AIUsageStatistics";
+import { NotificationCenter } from "@/components/NotificationCenter";
 import {
   Button,
   Card,
@@ -160,10 +162,9 @@ const SCREENS: Record<string, ScreenDefinition> = {
     action: "Add Criteria",
   },
   evaluation: {
-    title: "Performance & Prediction",
-    subtitle: "Run decision-support analysis from approved academic records.",
+    title: "At-Risk Students",
+    subtitle: "Review criteria-based risk alongside available AI forecasts.",
     kind: "analytics",
-    action: "Run Evaluation",
   },
   analytics: {
     title: "Analytics & Insights",
@@ -215,9 +216,14 @@ const SCREENS: Record<string, ScreenDefinition> = {
     subtitle: "Update your profile, notifications, and password.",
     kind: "settings",
   },
+  "ai-usage": {
+    title: "AI Usage",
+    subtitle: "Review your third-party model usage and authorized department totals.",
+    kind: "analytics",
+  },
   notifications: {
     title: "Notifications",
-    subtitle: "Configure delivery channels and notification rules.",
+    subtitle: "Review notifications for your APMS account.",
     kind: "settings",
   },
   security: {
@@ -240,9 +246,11 @@ const SCREENS: Record<string, ScreenDefinition> = {
 export function AppPortalScreen({
   role,
   screen,
+  settingsCategory,
 }: {
   role: Role;
   screen: string;
+  settingsCategory?: string | string[];
 }) {
   const baseDefinition = SCREENS[screen] ?? {
     title: "Unavailable",
@@ -328,14 +336,18 @@ export function AppPortalScreen({
       actions={action}
     hidePageHeader={(liveRolePortal || role === "faculty") && screen !== "settings"}
     >
-      {role === "faculty" && screen !== "settings" ? (
+      {screen === "notifications" ? (
+        <NotificationCenter />
+      ) : screen === "ai-usage" ? (
+        <AIUsageStatistics role={role} demoMode={demoMode} />
+      ) : role === "faculty" && screen !== "settings" ? (
         demoMode ? <Suspense fallback={<PageState kind="loading" title="Loading Faculty dashboard" message="Preparing your dashboard." />}><LazyFacultyPortalContent screen={screen} /></Suspense> : <FacultyLivePortalContent screen={screen} />
       ) : role === "academic_admin" && !demoMode ? (
-        <Suspense fallback={<PageState kind="loading" title="Loading academic workspace" message="Preparing your workspace." />}><LazyAcademicAdminPortalContent screen={screen} /></Suspense>
+        <Suspense fallback={<PageState kind="loading" title="Loading academic workspace" message="Preparing your workspace." />}><CompactControlsProvider><LazyAcademicAdminPortalContent screen={screen} /></CompactControlsProvider></Suspense>
       ) : role === "system_admin" && screen === "data-generator" && __DEV__ && !demoMode ? (
         <Suspense fallback={<PageState kind="loading" title="Loading data generator" message="Preparing the generator." />}><LazyDataGeneratorDevScreen /></Suspense>
       ) : role === "system_admin" && !demoMode ? (
-        <Suspense fallback={<PageState kind="loading" title="Loading system workspace" message="Preparing your workspace." />}><LazySystemAdminPortalContent screen={screen} /></Suspense>
+        <Suspense fallback={<PageState kind="loading" title="Loading system workspace" message="Preparing your workspace." />}><LazySystemAdminPortalContent screen={screen} settingsCategory={typeof settingsCategory === "string" ? settingsCategory : undefined} /></Suspense>
       ) : (
         <>
           {definition.kind === "dashboard" ? <Dashboard role={role} /> : null}

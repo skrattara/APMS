@@ -1,13 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import { Field } from '@/components/ui';
-import type { ClassWorkspace } from '@/services/faculty';
-export function valueMappingForType(system: any, typeId: string) {
-  for (const component of system.components ?? []) {
-    const definition = component.assessmentDefinition;
-    if (definition?.typeId === typeId && definition.scoring?.mode === 'value_mapping') return definition.scoring.mapping as { value: string; percentage: number }[];
-  }
-  return undefined;
-}
+import { storedAssessmentValue, valueMappingForType } from './modelHelpers';
+export { storedAssessmentValue, valueMappingForType } from './modelHelpers';
 
 const gradebookSelectOptionsCache = new WeakMap<object, { label: string; value: string }[]>();
 export const EMPTY_GRADEBOOK_VALUES: Record<string, string> = {};
@@ -17,11 +11,6 @@ export function gradebookSelectOptions(mapping: { value: string; percentage: num
   const options = [{ label: 'Unscored', value: '' }, ...mapping.map((option) => ({ label: `${option.value} · ${option.percentage}%`, value: option.value }))];
   gradebookSelectOptionsCache.set(mapping, options);
   return options;
-}
-
-export function storedAssessmentValue(workspace: ClassWorkspace, enrollmentId: string, assessmentId: string) {
-  const key = `${enrollmentId}:${assessmentId}`;
-  return workspace.categoricalScores[key] ?? workspace.scores[key] ?? null;
 }
 
 export function DebouncedGradebookScoreField({

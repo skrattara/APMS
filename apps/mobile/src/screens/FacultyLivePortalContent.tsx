@@ -21,7 +21,7 @@ import { AIAdvisoryForecast } from '@/components/AIAdvisoryForecast';
 import { evaluationRiskOptions, evaluationRiskValue } from '@/services/evaluationRiskOptions';
 import { styles } from '@/screens/FacultyLivePortalContent.styles';
 import { storedAssessmentValue, valueMappingForType } from '@/components/gradebook/shared';
-import { assessmentComponentPath, assessmentGroupLabel, assessmentPeriodLabel, componentLabel, gradingComponentPath, groupHierarchyName } from '@/components/gradebook/model';
+import { adaptAssessmentForecastOverlay, assessmentComponentPath, assessmentGroupLabel, assessmentPeriodLabel, componentLabel, gradingComponentPath, groupHierarchyName } from '@/components/gradebook/model';
 import {
   addStudentToClass, applyFacultyEvaluationSystemToClasses, createAssessment, createAttendanceSession, deleteFacultyClassEvaluationSystem, encodePredictionInput, exportClassCsv, invalidateFacultyClassWorkspaceCache, invalidateFacultyClassesCache, loadAssessmentScoreHistory, loadGradebookScoreHistory, nameGradebookScoreVersion, restoreAssessmentInstanceVersion, restoreAssessmentScoreVersion, restoreGradebookToVersion,
   importRosterCsv, importRosterExcel, loadClassWorkspace, loadFacultyClasses, loadFacultyEvaluationCriteriaLibrary, loadFacultyReferenceData, loadMyClassRequests, loadMySubjectRequests, removeStudentsFromClass,
@@ -410,14 +410,7 @@ export function FacultyLivePortalContent({ screen }: { screen: string }) {
     const isCurrentDomainPredictionValid = createAssessmentForecastDomainValidator(gradingDefinition, constraints);
     return buildUnscoredAssessmentForecastOverlays({ ...state.workspace, isPredictionValid: (assessmentId, prediction) => {
       return isCurrentDomainPredictionValid(assessmentId, prediction);
-    } }).map((overlay) => ({
-      enrollmentId: overlay.enrollmentId,
-      columnId: overlay.assessmentId,
-      mode: 'value' as const,
-      value: overlay.value,
-      label: overlay.label,
-      color: overlay.color,
-    }));
+    } }).map(adaptAssessmentForecastOverlay);
   }, [screen, showAiAssessmentPredictions, state.workspace]);
   if (!isFocused) return null;
   if (screen !== 'overview' && state.loading) return <PageState kind="loading" title="Loading Faculty workspace" message="Retrieving your assigned classes and monitoring records." />;
@@ -450,7 +443,7 @@ export function FacultyLivePortalContent({ screen }: { screen: string }) {
       /></Suspense> : null}
       {screen === 'attendance' ? <Attendance {...props} /> : null}
       {screen === 'criteria' ? <Criteria {...props} /> : null}
-      {screen === 'risk' || screen === 'evaluation' ? <Risk {...props} prediction={screen === 'evaluation'} /> : null}
+      {screen === 'risk' || screen === 'evaluation' ? <Risk {...props} /> : null}
       {screen === 'analytics' ? <Analytics {...props} /> : null}
       {screen === 'feedback' ? <Feedback {...props} /> : null}
     </View>
@@ -853,7 +846,8 @@ function Classes(props: StateProps) {
   // Subject Request Form
   const [reqCode, setReqCode] = useState('');
   const [reqTitle, setReqTitle] = useState('');
-  const [reqUnits, setReqUnits] = useState('3');
+  const [reqLectureUnits, setReqLectureUnits] = useState(3);
+  const [reqLaboratoryUnits, setReqLaboratoryUnits] = useState(0);
   const [reqRationale, setReqRationale] = useState('');
 
   const loadRequests = useCallback(async () => {
@@ -899,20 +893,23 @@ function Classes(props: StateProps) {
   };
 
   const submitRequest = async () => {
-    if (!reqCode.trim() || !reqTitle.trim() || !Number(reqUnits) || reqRationale.trim().length < 10) {
-      return props.toast.show('Code, title, units, and a rationale (10+ characters) are required.');
+    if (!reqCode.trim() || !reqTitle.trim() || reqLectureUnits + reqLaboratoryUnits < 1 || reqRationale.trim().length < 10) {
+      return props.toast.show('Enter a code, title, valid lecture and laboratory units (at least 1 total), and a rationale of at least 10 characters.');
     }
     setSaving(true);
     try {
       await submitSubjectRequest({
         code: reqCode.trim(),
         title: reqTitle.trim(),
-        units: Number(reqUnits),
+        lectureUnits: reqLectureUnits,
+        laboratoryUnits: reqLaboratoryUnits,
         rationale: reqRationale.trim(),
       });
       setReqOpen(false);
       setReqCode('');
       setReqTitle('');
+      setReqLectureUnits(3);
+      setReqLaboratoryUnits(0);
       setReqRationale('');
       props.toast.show('Subject request submitted to your Academic Admin for review.');
       await loadRequests();
@@ -964,14 +961,14 @@ function Classes(props: StateProps) {
       {classRequests.length ? (
         <Card>
           <Text style={styles.cardTitle}>My Class Requests</Text>
-          <DataTable columns={['Subject', 'Section', 'Term', 'Lecture / lab units', 'Status', 'Review note', 'Submitted']} rows={classRequests.map((request) => [
+          <DataTable columns={['Subject', 'Section', 'Term', 'Lecture / lab units', 'Status', 'Submitted', 'Review note']} columnWidths={[220, 110, 110, 130, 90, 90, 180]} columnFlex={[0, 0, 0, 0, 0, 0, 1]} widthMode="container" rows={classRequests.map((request) => [
             request.subject,
             request.section,
             request.term,
             `${request.lectureUnits} / ${request.laboratoryUnits}`,
-            <Badge key={`class-request-${request.id}`} tone={request.status === 'approved' ? 'success' : request.status === 'rejected' ? 'danger' : 'warning'}>{request.status.toUpperCase()}</Badge>,
-            request.reviewNote ?? '—',
+            <Badge key={`class-request-${request.id}`} tone={request.status === 'approved' ? 'success' : request.status === 'rejected' ? 'danger' : 'warning'}>{request.status.charAt(0).toUpperCase() + request.status.slice(1)}</Badge>,
             new Date(request.createdAt).toLocaleDateString(),
+            request.reviewNote ?? '—',
           ])} />
         </Card>
       ) : null}
@@ -980,19 +977,23 @@ function Classes(props: StateProps) {
         <Card>
           <Text style={styles.cardTitle}>My Subject Requests</Text>
           <DataTable
-            columns={['Code', 'Title', 'Units', 'Status', 'Reviewer Note', 'Submitted']}
+            columns={['Code', 'Title', 'Lecture units', 'Laboratory units', 'Status', 'Submitted', 'Review note']}
+            columnWidths={[80, 300, 100, 100, 90, 140, 180]}
+            columnFlex={[0, 0, 0, 0, 0, 0, 1]}
+            widthMode="container"
             rows={requests.map((req) => [
               req.code,
               req.title,
-              `${req.units} units`,
+              String(req.lectureUnits),
+              String(req.laboratoryUnits),
               <Badge
                 key={`req-${req.id}`}
                 tone={req.status === 'approved' ? 'success' : req.status === 'rejected' ? 'danger' : 'warning'}
               >
-                {req.status.toUpperCase()}
+                {req.status.charAt(0).toUpperCase() + req.status.slice(1)}
               </Badge>,
-              req.reviewNote || '—',
               new Date(req.createdAt).toLocaleDateString(),
+              req.reviewNote || '—',
             ])}
           />
         </Card>
@@ -1036,7 +1037,10 @@ function Classes(props: StateProps) {
       <Dialog visible={reqOpen} title="Request New Subject" onClose={() => setReqOpen(false)}>
         <Field label="Subject Code" value={reqCode} onChangeText={setReqCode} placeholder="e.g. IT311" />
         <Field label="Subject Title" value={reqTitle} onChangeText={setReqTitle} placeholder="e.g. Advanced Web Development" />
-        <Field label="Units" value={reqUnits} onChangeText={setReqUnits} keyboardType="numeric" placeholder="3" />
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 16 }}>
+          <View style={{ flex: 1, flexBasis: 240, minWidth: 200 }}><RangeSlider label="Lecture units" value={reqLectureUnits} onChange={setReqLectureUnits} /></View>
+          <View style={{ flex: 1, flexBasis: 240, minWidth: 200 }}><RangeSlider label="Laboratory units" value={reqLaboratoryUnits} onChange={setReqLaboratoryUnits} /></View>
+        </View>
         <Field
           label="Rationale (Min 10 characters)"
           value={reqRationale}
@@ -1048,7 +1052,7 @@ function Classes(props: StateProps) {
         <Button
           label="Submit Subject Request"
           loading={saving}
-          disabled={!reqCode.trim() || !reqTitle.trim() || !Number(reqUnits) || reqRationale.trim().length < 10}
+          disabled={!reqCode.trim() || !reqTitle.trim() || reqLectureUnits + reqLaboratoryUnits < 1 || reqRationale.trim().length < 10}
           onPress={() => void submitRequest()}
         />
       </Dialog>
@@ -1284,9 +1288,9 @@ Requirements:
         subtitle="Students are entered here manually or imported from an Excel workbook, then enrolled in the selected APMS class."
         action={
           <View style={styles.actions}>
-            <Button label="Download Excel template" variant="ghost" onPress={() => void downloadRosterTemplate()} />
+            {/* <Button label="Download Excel template" variant="ghost" onPress={() => void downloadRosterTemplate()} /> */}
             <Button label="Import roster" variant="secondary" onPress={() => setCsvOpen(true)} />
-            <Button label={selectedEnrollmentIds.length ? `Remove selected (${selectedEnrollmentIds.length})` : 'Remove selected'} variant="danger" disabled={!selectedEnrollmentIds.length} onPress={() => setDeleteSelectedOpen(true)} />
+              {selectedEnrollmentIds.length ? <Button label={selectedEnrollmentIds.length ? `Remove selected (${selectedEnrollmentIds.length})` : ""} variant="danger" disabled={!selectedEnrollmentIds.length} onPress={() => setDeleteSelectedOpen(true)} /> : null }
             <Button label="Add student" onPress={openAdd} />
           </View>
         }
@@ -1806,18 +1810,17 @@ function GradingCriteria(props: StateProps) {
   </>;
 }
 
-function Risk(props: StateProps & { prediction: boolean }) {
+function Risk(props: StateProps) {
   const [selected, setSelected] = useState<RosterStudent | null>(null);
   const [query, setQuery] = useState('');
   const [riskFilter, setRiskFilter] = useState('attention');
   const [trendFilter, setTrendFilter] = useState<'all' | 'declining' | 'stable' | 'improving'>('all');
   const [concernFilter, setConcernFilter] = useState('all');
-  const [predictionQuery, setPredictionQuery] = useState('');
-  const [predictionRiskFilter, setPredictionRiskFilter] = useState('all');
+  const [showPredictionMetadata, setShowPredictionMetadata] = useState(false);
   const [gradeColumnView, setGradeColumnView] = useState<'summary' | 'recorded'>('summary');
   const gradingDefinition = props.workspace.criteria?.gradingSystemDefinition ?? props.workspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
   const evaluationDefinition = props.workspace.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
-  useEffect(() => { setRiskFilter('attention'); setPredictionRiskFilter('all'); setGradeColumnView('summary'); }, [props.selectedClassId, evaluationDefinition.id]);
+  useEffect(() => { setRiskFilter('attention'); setGradeColumnView('summary'); setShowPredictionMetadata(false); }, [props.selectedClassId, evaluationDefinition.id]);
   const gradingPeriods = [...(gradingDefinition.periods ?? [])].sort((left: any, right: any) => (left.sequence ?? 0) - (right.sequence ?? 0));
   const gradingComponents = [...(gradingDefinition.components ?? [])];
   const gradingGroups = [...(gradingDefinition.groups ?? [])];
@@ -1878,6 +1881,8 @@ function Risk(props: StateProps & { prediction: boolean }) {
   const concernOptions = [{ label: 'All evaluation factors', value: 'all' }, ...evaluationDefinition.factors.filter((factor) => usedEvaluationFactorIds.has(factor.id)).map((factor) => ({ label: factor.name, value: factor.id }))];
   const missingAssessmentFactorId = evaluationDefinition.factors.find((factor) => factor.source === 'missing_assessment_count')?.id;
   const hasPredictedStandingOutput = isForecastOutputEnabled(evaluationDefinition, 'predicted_standing');
+  const supportsPredictionMetadata = evaluationDefinition.ai?.enabled === true
+    && ['generated_at', 'model_version'].some((field) => isForecastOutputEnabled(evaluationDefinition, field));
   const configuredRiskOptions = evaluationRiskOptions(evaluationDefinition, 'All students');
   const recordedGradeColumns = [
     ...gradingPeriods.map((period: any) => ({ key: period.id, label: period.name, kind: 'period' as const })),
@@ -1897,22 +1902,15 @@ function Risk(props: StateProps & { prediction: boolean }) {
     return formatForecastAggregate(values?.[column.key]);
   });
   const riskFilterOptions = [
+    { label: 'All students', value: 'all' },
     { label: 'Requires Attention', value: 'attention' },
+    ...configuredRiskOptions.filter((option) => option.value.startsWith('level:')),
     { label: 'Any high-severity level', value: 'severity:high' },
     { label: 'Any medium-severity level', value: 'severity:medium' },
     { label: 'Any low-severity level', value: 'severity:low' },
-    ...configuredRiskOptions,
+    ...configuredRiskOptions.filter((option) => option.value === 'unmatched' || option.value === 'unavailable'),
   ];
-  const predictionRows = useMemo(() => {
-    const normalizedQuery = predictionQuery.trim().toLowerCase();
-    return studentRows.filter((row) => {
-      if (normalizedQuery && !row.student.name.toLowerCase().includes(normalizedQuery) && !normalizeStudentId(row.student.institutionalId).includes(normalizeStudentId(normalizedQuery))) return false;
-      if (predictionRiskFilter === 'all') return true;
-      if (predictionRiskFilter.startsWith('severity:')) return row.risk === predictionRiskFilter.slice('severity:'.length);
-      return row.riskValue === predictionRiskFilter;
-    });
-  }, [predictionQuery, predictionRiskFilter, studentRows]);
-  const attentionColumns = ['Student', ...visibleGradeColumns.map((column) => column.label), 'Final percentage', 'Point / letter grade', 'Risk level', 'Matched evaluation rules', ...(hasPredictedStandingOutput ? ['Predicted standing'] : []), 'AI risk probability'];
+  const attentionColumns = ['Student', ...visibleGradeColumns.map((column) => column.label), 'Final percentage', 'Point / letter grade', 'Risk level', 'Matched evaluation rules', ...(hasPredictedStandingOutput ? ['Predicted standing'] : []), 'AI risk probability', ...(showPredictionMetadata ? ['Prediction generated', 'AI provider', 'AI model', 'Model version'] : [])];
   const attentionTableRows = filteredRows.map((row) => [
     `${row.student.name} · ${formatStudentId(row.student.institutionalId)}`,
     ...gradeCells(row),
@@ -1922,30 +1920,19 @@ function Risk(props: StateProps & { prediction: boolean }) {
     row.concern,
     ...(hasPredictedStandingOutput ? [row.predicted == null ? 'Unavailable' : `${row.predicted.toFixed(1)}%`] : []),
     row.riskProbability == null ? 'Unavailable' : `${(row.riskProbability * 100).toFixed(1)}%`,
-  ]);
-  const predictionColumns = ['Student', ...visibleGradeColumns.map((column) => column.label), 'Final percentage', 'Point / letter grade', ...(hasPredictedStandingOutput ? ['Predicted standing'] : []), 'Risk level', 'Matched evaluation rules', 'AI risk probability', 'Generated', 'AI model / version'];
-  const predictionTableRows = predictionRows.map((row) => [
-    `${row.student.name} · ${formatStudentId(row.student.institutionalId)}`,
-    ...gradeCells(row),
-    row.calculated.finalGrade == null ? '—' : `${row.calculated.finalGrade.toFixed(1)}%`,
-    row.calculated.pointGrade == null ? '—' : `${row.calculated.pointGrade.toFixed(2)}${row.calculated.letterGrade ? ` / ${row.calculated.letterGrade}` : ''}`,
-    ...(hasPredictedStandingOutput ? [row.predicted == null ? 'Unavailable' : `${row.predicted.toFixed(1)}%`] : []),
-    riskLevelBadge(row),
-    row.concern,
-    row.riskProbability == null ? 'Unavailable' : `${(row.riskProbability * 100).toFixed(1)}%`,
-    summarizeSavedForecast({ predictionGeneratedAt: row.predictionGeneratedAt }).generatedAt ? new Date(row.predictionGeneratedAt!).toLocaleString() : 'Not recorded',
-    [row.modelProvider, row.modelName, row.modelVersion].filter(Boolean).join(' · ') || '—',
+    ...(showPredictionMetadata ? [
+      summarizeSavedForecast({ predictionGeneratedAt: row.predictionGeneratedAt }).generatedAt ? new Date(row.predictionGeneratedAt!).toLocaleString() : 'Not recorded',
+      row.modelProvider ?? '—',
+      row.modelName ?? '—',
+      row.modelVersion ?? '—',
+    ] : []),
   ]);
   return <>
-    <Heading title={props.prediction ? 'AI-Assisted At-Risk Prediction' : 'Students Requiring Attention'} subtitle={props.prediction ? 'Stored predictions are advisory, traceable, and not institutionally validated.' : 'Identify students who may need academic intervention based on grades, attendance, missing work, mastery, and available predictions.'} action={<Button label={props.prediction ? 'Run AI predictions' : 'Refresh AI forecasts'} loading={props.predictionRunning} disabled={props.predictionRunning} onPress={() => void run()} />} />
+    <Heading title="At-Risk Students" subtitle="Review criteria-based risk alongside available AI forecasts. Predictions are advisory, not official grades." action={<View style={styles.actions}>{supportsPredictionMetadata ? <Button compact label={showPredictionMetadata ? 'Hide model details' : 'Show model details'} variant="secondary" onPress={() => setShowPredictionMetadata((visible) => !visible)} /> : null}<Button label="Run AI predictions" loading={props.predictionRunning} disabled={props.predictionRunning} onPress={() => void run()} /></View>} />
     <ClassSelect {...props} />
-    {!props.prediction ? <Card><Text style={styles.help}>The action covers the selected class roster (up to {props.forecastRosterCount} students), regardless of risk filters. Only eligible records are sent. Risk levels are calculated using the applied evaluation criteria; forecasts remain advisory.</Text></Card> : null}
-    {!props.prediction && props.predictionRunError ? <Card><Text style={styles.help}>{props.predictionRunError}</Text></Card> : null}
-     {props.prediction ? <Card style={styles.predictionNotice}><View style={styles.predictionNoticeRow}><Badge tone="warning">{predictionRows[0]?.modelProvider && predictionRows[0]?.modelName ? `${predictionRows[0].modelProvider} · ${predictionRows[0].modelName}` : 'AI · advisory only'}</Badge><Text style={styles.predictionNoticeTitle}>Use these estimates to prioritize review</Text></View><Text style={styles.help}>The system estimates likely standing from recorded indicators. It does not produce official grades or automatic decisions. The table records the provider and model used for each saved estimate.</Text></Card> : null}
-    {props.prediction && props.predictionRunError ? <Card><Text style={styles.help}>{props.predictionRunError}</Text></Card> : null}
-    {props.prediction ? <Card><Text style={styles.help}>Run covers the selected class roster (up to {props.forecastRosterCount} students), regardless of the current table filters. Only eligible records are sent; classes over 100 students are saved in separate batches.</Text></Card> : null}
-    {props.prediction && props.predictionRunning ? <Card><Text style={styles.help}>Saving forecasts for this class. This can take longer for larger classes; each saved batch is a separate run.</Text></Card> : null}
-    {!props.prediction ? <>
+    {props.predictionRunError ? <Card><Text style={styles.help}>{props.predictionRunError}</Text></Card> : null}
+    {props.predictionRunning ? <Card><Text style={styles.help}>Saving forecasts for this class. Larger rosters may take longer.</Text></Card> : null}
+    <>
       <View style={styles.attentionMetrics}>
         <Pressable style={styles.attentionMetric} onPress={() => setRiskFilter('attention')}><Text style={styles.attentionMetricValue}>{attentionCount}</Text><Text style={styles.attentionMetricLabel}>Require attention</Text></Pressable>
         <Pressable style={styles.attentionMetric} onPress={() => setRiskFilter('severity:high')}><Text style={[styles.attentionMetricValue, styles.dangerText]}>{highCount}</Text><Text style={styles.attentionMetricLabel}>High risk</Text></Pressable>
@@ -1963,30 +1950,13 @@ function Risk(props: StateProps & { prediction: boolean }) {
         </View>
         <Text style={styles.help}>Grades use {gradingDefinition.name}; risk levels and matched rules use {evaluationDefinition.name}.</Text>
         {filteredRows.length ? (
-          <DataTable columns={attentionColumns} rows={attentionTableRows} onRowPress={(tableRow) => { const match = filteredRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === String(tableRow[0])); if (match) setSelected(match.student); }} highlightCell={(tableRow, columnIndex) => columnIndex === visibleGradeColumns.length + 2 && filteredRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === String(tableRow[0]))?.calculated.remarks === 'failing'} columnWidths={[...visibleGradeColumnWidths, 104, 118, 132, 290, ...(hasPredictedStandingOutput ? [120] : []), 120]} />
+          <DataTable columns={attentionColumns} rows={attentionTableRows} onRowPress={(tableRow) => { const match = filteredRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === String(tableRow[0])); if (match) setSelected(match.student); }} highlightCell={(tableRow, columnIndex) => columnIndex === visibleGradeColumns.length + 2 && filteredRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === String(tableRow[0]))?.calculated.remarks === 'failing'} columnWidths={[...visibleGradeColumnWidths, 104, 118, 132, 290, ...(hasPredictedStandingOutput ? [120] : []), 120, ...(showPredictionMetadata ? [175, 130, 180, 130] : [])]} />
         ) : (
           <PageState kind="empty" title={riskFilter === 'attention' && !attentionCount ? 'No students currently require attention' : 'No students match the selected filters'} message={riskFilter === 'attention' && !attentionCount ? 'Based on the applied evaluation criteria and available records, no students in this class currently meet the attention criteria.' : 'Try clearing one or more filters.'} action={<Button label={riskFilter === 'attention' && !attentionCount ? 'View all students' : 'Clear filters'} variant="secondary" onPress={() => riskFilter === 'attention' && !attentionCount ? setRiskFilter('all') : clearFilters()} />} />
         )}
         <Text style={styles.attentionCount}>{filteredRows.length} student{filteredRows.length === 1 ? '' : 's'} shown · sorted by risk and urgency</Text>
       </Card>
-     </> : <>
-       <View style={styles.predictionMetrics}>
-         <View style={styles.predictionMetric}><Text style={styles.predictionMetricValue}>{studentRows.length}</Text><Text style={styles.predictionMetricLabel}>Students evaluated</Text></View>
-         <View style={styles.predictionMetric}><Text style={[styles.predictionMetricValue, styles.dangerText]}>{highCount}</Text><Text style={styles.predictionMetricLabel}>High risk</Text></View>
-         <View style={styles.predictionMetric}><Text style={[styles.predictionMetricValue, styles.warningText]}>{mediumCount}</Text><Text style={styles.predictionMetricLabel}>Medium risk</Text></View>
-         <View style={styles.predictionMetric}><Text style={[styles.predictionMetricValue, styles.successText]}>{studentRows.filter((row) => row.risk === 'low').length}</Text><Text style={styles.predictionMetricLabel}>Low risk</Text></View>
-       </View>
-       <Card>
-         <View style={styles.predictionToolbar}>
-           <SearchFilter value={predictionQuery} onChange={setPredictionQuery} placeholder="Search students..." accessibilityLabel="Search prediction results" />
-           <SelectField label="Risk" value={predictionRiskFilter} options={configuredRiskOptions} onChange={setPredictionRiskFilter} containerStyle={styles.predictionFilter} />
-           <SelectField label="Grade columns" value={gradeColumnView} options={[{ label: 'Summary', value: 'summary' }, { label: 'Recorded details', value: 'recorded' }]} onChange={(value) => setGradeColumnView(value as typeof gradeColumnView)} containerStyle={styles.predictionFilter} />
-         </View>
-         <Text style={styles.predictionSectionLabel}>{gradeColumnView === 'summary' ? 'Summary keeps grading periods and forecast fields together. Choose Recorded details to review component totals, groups, and individual assessment scores.' : 'Recorded details show saved assessment scores and grading summaries. Missing values remain blank; AI forecast fields stay unavailable until a forecast is saved.'}</Text>
-         {predictionRows.length ? <DataTable columns={predictionColumns} rows={predictionTableRows} onRowPress={(tableRow) => { const match = predictionRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === tableRow[0]); if (match) setSelected(match.student); }} highlightCell={(tableRow, columnIndex) => columnIndex === visibleGradeColumns.length + 2 && predictionRows.find((row) => `${row.student.name} · ${formatStudentId(row.student.institutionalId)}` === String(tableRow[0]))?.calculated.remarks === 'failing'} columnWidths={[...visibleGradeColumnWidths, 104, 118, ...(hasPredictedStandingOutput ? [120] : []), 132, 290, 120, 170, 230]} /> : <PageState kind="empty" title="No matching estimates" message="Try another student name or risk level." />}
-         <Text style={styles.attentionCount}>{predictionRows.length} student{predictionRows.length === 1 ? '' : 's'} shown · select a student to review the underlying indicators</Text>
-       </Card>
-     </>}
+     </>
     <StudentDetail student={selected} workspace={props.workspace} onClose={() => setSelected(null)} />
   </>;
 }
@@ -2005,6 +1975,11 @@ function Feedback(props: StateProps) {
   const [historyStatusFilter, setHistoryStatusFilter] = useState('all');
   const [historyUpdatedFrom, setHistoryUpdatedFrom] = useState('');
   const [historyUpdatedTo, setHistoryUpdatedTo] = useState('');
+  const [selectedHistoryFeedbackIds, setSelectedHistoryFeedbackIds] = useState<string[]>([]);
+  const [bulkFeedbackAction, setBulkFeedbackAction] = useState<'email' | null>(null);
+  const [bulkFeedbackPending, setBulkFeedbackPending] = useState(false);
+  const [bulkFeedbackProgress, setBulkFeedbackProgress] = useState('');
+  const [bulkFeedbackFailures, setBulkFeedbackFailures] = useState<string[]>([]);
   const [stylePreset, setStylePreset] = useState('supportive');
   const [styleInstructions, setStyleInstructions] = useState('');
   const [generationProgress, setGenerationProgress] = useState('');
@@ -2025,7 +2000,7 @@ function Feedback(props: StateProps) {
     if (!available.includes(studentId)) setStudentId(available[0] ?? '');
   }, [props.workspace.students, props.selectedClassId, studentId]);
   useEffect(() => { setBody(''); setStatus('draft'); setEditingFeedbackId(null); }, [props.selectedClassId, studentId]);
-  useEffect(() => { setHistoryStudentFilter('all'); setHistoryRiskFilter('all'); setHistoryStatusFilter('all'); setHistoryUpdatedFrom(''); setHistoryUpdatedTo(''); }, [props.selectedClassId]);
+  useEffect(() => { setHistoryStudentFilter('all'); setHistoryRiskFilter('all'); setHistoryStatusFilter('all'); setHistoryUpdatedFrom(''); setHistoryUpdatedTo(''); setSelectedHistoryFeedbackIds([]); setBulkFeedbackProgress(''); setBulkFeedbackFailures([]); }, [props.selectedClassId]);
   useEffect(() => { setGenerationFailures([]); setGenerationProgress(''); }, [props.selectedClassId, props.workspace.students]);
   useEffect(() => { if (selectedStudentIds.length !== 1) setStatus('draft'); }, [selectedStudentIds.length]);
   const student = props.workspace.students.find((item) => item.enrollmentId === studentId);
@@ -2158,13 +2133,12 @@ function Feedback(props: StateProps) {
     if (!student || selectedStudentIds.length !== 1 || !body.trim()) return;
     setSaving(true);
     try {
-      const publishing = status === 'ready';
-      if (publishing) {
+      if (status === 'ready') {
         await sendFacultyFeedbackEmail(student.enrollmentId, body, evaluationContext?.result.severity ?? 'unavailable', editingFeedbackId ?? undefined);
       } else {
         await saveFacultyFeedback(student.enrollmentId, body, evaluationContext?.result.severity ?? 'unavailable', 'draft', editingFeedbackId ?? undefined);
       }
-      props.toast.show(publishing ? 'Feedback email accepted for delivery and published in the student portal.' : editingFeedbackId ? 'Draft feedback updated.' : 'Feedback draft saved.');
+      props.toast.show(status === 'ready' ? 'Feedback emailed and published.' : editingFeedbackId ? 'Draft feedback updated.' : 'Feedback draft saved.');
       setBody('');
       setStatus('draft');
       setEditingFeedbackId(null);
@@ -2182,10 +2156,47 @@ function Feedback(props: StateProps) {
     const updatedDay = record.updatedAt.slice(0, 10);
     return (historyStudentFilter === 'all' || historyStudent.enrollmentId === historyStudentFilter)
       && (historyRiskFilter === 'all' || risk?.risk === historyRiskFilter)
-      && (historyStatusFilter === 'all' || record.status === historyStatusFilter || (historyStatusFilter === 'published' && record.status === 'sent'))
+      && (historyStatusFilter === 'all' || (historyStatusFilter === 'draft' ? record.status === 'draft' || record.status === 'ready' : record.status === historyStatusFilter || (historyStatusFilter === 'published' && record.status === 'sent')))
       && (!historyUpdatedFrom || updatedDay >= historyUpdatedFrom)
       && (!historyUpdatedTo || updatedDay <= historyUpdatedTo);
   }).sort((left, right) => right.record.updatedAt.localeCompare(left.record.updatedAt)), [props.workspace.students, props.workspace.feedback, historyStudents, historyStudentFilter, historyRiskFilter, historyStatusFilter, historyUpdatedFrom, historyUpdatedTo]);
+  const historySelectable = history.filter(({ record }) => record.status === 'draft' || record.status === 'ready');
+  const selectedHistoryItems = historySelectable.filter(({ record }) => selectedHistoryFeedbackIds.includes(record.id));
+  const selectedHistoryReady = selectedHistoryItems;
+  const allVisibleHistorySelected = historySelectable.length > 0 && historySelectable.every(({ record }) => selectedHistoryFeedbackIds.includes(record.id));
+  const toggleHistoryFeedback = (feedbackId: string) => setSelectedHistoryFeedbackIds((current) => current.includes(feedbackId) ? current.filter((id) => id !== feedbackId) : [...current, feedbackId]);
+  const toggleAllVisibleHistory = () => setSelectedHistoryFeedbackIds((current) => allVisibleHistorySelected
+    ? current.filter((id) => !historySelectable.some(({ record }) => record.id === id))
+    : [...new Set([...current, ...historySelectable.map(({ record }) => record.id)])]);
+  const processBulkFeedback = async () => {
+    const targets = selectedHistoryReady;
+    if (!targets.length) return;
+    setBulkFeedbackPending(true);
+    setBulkFeedbackProgress('');
+    setBulkFeedbackFailures([]);
+    const failures: string[] = [];
+    const completedIds: string[] = [];
+    try {
+      for (let index = 0; index < targets.length; index += 1) {
+        const { record, student: targetStudent } = targets[index];
+        setBulkFeedbackProgress(`Emailing ${index + 1} of ${targets.length}: ${targetStudent.name}`);
+        try {
+          await sendFacultyFeedbackEmail(targetStudent.enrollmentId, record.body, record.category, record.id);
+          completedIds.push(record.id);
+        } catch (cause) {
+          failures.push(`${targetStudent.name}: ${getErrorMessage(cause, 'Email could not be sent.')}`);
+        }
+      }
+      setSelectedHistoryFeedbackIds((current) => current.filter((id) => !completedIds.includes(id)));
+      setBulkFeedbackFailures(failures);
+      setBulkFeedbackProgress(`Emailed ${completedIds.length} of ${targets.length}${failures.length ? ` · ${failures.length} failed` : ''}.`);
+      props.toast.show(`Emailed ${completedIds.length} of ${targets.length} selected feedback${targets.length === 1 ? '' : ' items'}${failures.length ? `; ${failures.length} failed` : ''}.`);
+      if (completedIds.length) props.refresh();
+    } finally {
+      setBulkFeedbackPending(false);
+      setBulkFeedbackAction(null);
+    }
+  };
   const toggleStudent = (enrollmentId: string) => {
     if (selectedStudentIds.includes(enrollmentId)) {
       const remaining = selectedStudentIds.filter((id) => id !== enrollmentId);
@@ -2264,7 +2275,7 @@ function Feedback(props: StateProps) {
             </View>
             <Field label="Feedback message" value={body} onChangeText={setBody} multiline numberOfLines={8} style={styles.feedbackBox} />
             <View style={styles.feedbackSaveRow}>
-              <Text style={styles.help}>{status === 'ready' ? 'This emails the student’s registered address and publishes the feedback in the portal.' : 'Drafts remain private to you until emailed.'}</Text>
+              <Text style={styles.help}>{status === 'ready' ? 'Email this feedback now and publish it in the student portal.' : 'Drafts remain private to you until you email them.'}</Text>
               <Button label={status === 'ready' ? 'Email feedback' : editingFeedbackId ? 'Save draft changes' : 'Save feedback'} icon={status === 'ready' ? 'email' : 'save'} loading={saving} disabled={!student || !body.trim() || generating} onPress={() => void save()} />
             </View>
           </> : selectedStudentIds.length > 1 ? <View style={styles.feedbackBulkFooter}>
@@ -2276,22 +2287,32 @@ function Feedback(props: StateProps) {
       </View>
     </Card> : null}
     {activeTab === 'Feedback history' ? <Card style={styles.feedbackHistoryCard}>
-      <View style={styles.feedbackHistoryHeading}><View style={styles.flex}><Text style={styles.cardTitle}>Feedback history</Text><Text style={styles.help}>Select a draft to continue editing. Emailed feedback is read-only.</Text></View></View>
+      <View style={styles.feedbackHistoryHeading}><View style={styles.flex}><Text style={styles.cardTitle}>Feedback history</Text><Text style={styles.help}>Select drafts to email them immediately. Published feedback is read-only.</Text></View></View>
       <View style={styles.feedbackHistoryFilters}>
         <SelectField label="Student" value={historyStudentFilter} options={[{ label: 'All students', value: 'all' }, ...props.workspace.students.map((item) => ({ label: `${item.name} · ${item.email || formatStudentId(item.institutionalId)}`, value: item.enrollmentId }))]} onChange={setHistoryStudentFilter} placeholder="Search student name or email" searchable containerStyle={styles.feedbackHistoryStudentFilter} />
         <SelectField label="Risk level" value={historyRiskFilter} options={riskOptions} onChange={setHistoryRiskFilter} containerStyle={styles.feedbackHistorySelectFilter} />
-        <SelectField label="Feedback status" value={historyStatusFilter} options={[{ label: 'All statuses', value: 'all' }, { label: 'Draft', value: 'draft' }, { label: 'Ready to email', value: 'ready' }, { label: 'Published', value: 'published' }, { label: 'Failed', value: 'failed' }, { label: 'Archived', value: 'archived' }]} onChange={setHistoryStatusFilter} containerStyle={styles.feedbackHistorySelectFilter} />
+        <SelectField label="Feedback status" value={historyStatusFilter} options={[{ label: 'All statuses', value: 'all' }, { label: 'Draft', value: 'draft' }, { label: 'Published', value: 'published' }, { label: 'Failed', value: 'failed' }, { label: 'Archived', value: 'archived' }]} onChange={setHistoryStatusFilter} containerStyle={styles.feedbackHistorySelectFilter} />
       </View>
       <View style={styles.feedbackHistoryDateFilters}>
         <DateField label="Updated from" value={historyUpdatedFrom} onChange={setHistoryUpdatedFrom} containerStyle={styles.feedbackHistoryDateField} />
         <DateField label="Updated to" value={historyUpdatedTo} onChange={setHistoryUpdatedTo} containerStyle={styles.feedbackHistoryDateField} />
         <Button compact label="Clear filters" variant="ghost" onPress={() => { setHistoryStudentFilter('all'); setHistoryRiskFilter('all'); setHistoryStatusFilter('all'); setHistoryUpdatedFrom(''); setHistoryUpdatedTo(''); }} />
       </View>
+      {historySelectable.length ? <View style={styles.feedbackHistoryBulkBar}>
+        <Pressable accessibilityRole="checkbox" accessibilityLabel="Select visible drafts" accessibilityState={{ checked: allVisibleHistorySelected }} onPress={toggleAllVisibleHistory} disabled={bulkFeedbackPending} style={[styles.feedbackBulkCheck, allVisibleHistorySelected && styles.feedbackBulkCheckSelected]}>{allVisibleHistorySelected ? <Text style={styles.feedbackBulkCheckMark}>✓</Text> : null}</Pressable>
+        <Text style={styles.help}>{selectedHistoryItems.length} selected</Text>
+        <View style={styles.feedbackActions}>
+          {selectedHistoryReady.length ? <Button compact label={`Email feedback (${selectedHistoryReady.length})`} icon="email" disabled={bulkFeedbackPending} loading={bulkFeedbackPending && bulkFeedbackAction === 'email'} onPress={() => setBulkFeedbackAction('email')} /> : null}
+        </View>
+      </View> : null}
+      {bulkFeedbackProgress ? <Text style={styles.help}>{bulkFeedbackProgress}</Text> : null}
+      {bulkFeedbackFailures.length ? <View style={styles.feedbackBulkFailures}><Text style={styles.feedbackBulkFailureTitle}>Some feedback could not be processed</Text>{bulkFeedbackFailures.map((failure) => <Text key={failure} style={styles.feedbackBulkFailure}>{failure}</Text>)}</View> : null}
       {history.length ? <View style={styles.feedbackHistoryList}>{history.map(({ record, student: historyStudent, risk }) => <View key={record.id} style={styles.feedbackHistoryItem}>
-        <View style={styles.feedbackHistoryItemHeader}><View style={styles.flex}><Text style={styles.feedbackBulkStudentName}>{historyStudent.name}</Text><Text style={styles.help}>{historyStudent.email || 'No email on file'} · {risk?.riskLabel ?? 'Risk unavailable'}</Text></View><View style={styles.feedbackHistoryMeta}><Text style={styles.feedbackHistoryStatus}>{record.status === 'published' || record.status === 'sent' ? 'Published' : record.status === 'draft' ? 'Draft' : record.status === 'ready' ? 'Ready to publish' : record.status}</Text><Text style={styles.help}>Updated {new Date(record.updatedAt).toLocaleString()}</Text></View>{record.status === 'draft' || record.status === 'ready' ? <Button label={record.status === 'ready' ? 'Continue to publish' : 'Edit draft'} variant="secondary" onPress={() => { setStudentId(historyStudent.enrollmentId); setSelectedStudentIds([historyStudent.enrollmentId]); setEditingFeedbackId(record.id); setBody(record.body); setStatus(record.status === 'ready' ? 'ready' : 'draft'); setActiveTab('Compose'); }} /> : null}</View>
+        <View style={styles.feedbackHistoryItemHeader}>{record.status === 'draft' || record.status === 'ready' ? <Pressable accessibilityRole="checkbox" accessibilityLabel={`Select draft feedback for ${historyStudent.name}`} accessibilityState={{ checked: selectedHistoryFeedbackIds.includes(record.id) }} onPress={() => toggleHistoryFeedback(record.id)} disabled={bulkFeedbackPending} style={[styles.feedbackBulkCheck, selectedHistoryFeedbackIds.includes(record.id) && styles.feedbackBulkCheckSelected]}>{selectedHistoryFeedbackIds.includes(record.id) ? <Text style={styles.feedbackBulkCheckMark}>✓</Text> : null}</Pressable> : null}<View style={styles.flex}><Text style={styles.feedbackBulkStudentName}>{historyStudent.name}</Text><Text style={styles.help}>{historyStudent.email || 'No email on file'} · {risk?.riskLabel ?? 'Risk unavailable'}</Text></View><View style={styles.feedbackHistoryMeta}><Text style={styles.feedbackHistoryStatus}>{record.status === 'published' || record.status === 'sent' ? 'Published' : record.status === 'draft' || record.status === 'ready' ? 'Draft' : record.status}</Text><Text style={styles.help}>Updated {new Date(record.updatedAt).toLocaleString()}</Text></View>{record.status === 'draft' || record.status === 'ready' ? <Button label="Edit feedback" variant="secondary" onPress={() => { setStudentId(historyStudent.enrollmentId); setSelectedStudentIds([historyStudent.enrollmentId]); setEditingFeedbackId(record.id); setBody(record.body); setStatus('draft'); setActiveTab('Compose'); }} /> : null}</View>
         <Text numberOfLines={4} style={styles.feedbackHistoryBody}>{record.body}</Text>
       </View>)}</View> : <PageState kind="empty" title="No matching feedback" message="Adjust the filters or choose another date range to see saved feedback." />}
     </Card> : null}
+    <ConfirmDialog visible={bulkFeedbackAction === 'email'} title={`Email ${selectedHistoryReady.length} feedback item${selectedHistoryReady.length === 1 ? '' : 's'}?`} message="Each selected feedback message will be emailed to its student's registered address and published in the student portal. This cannot be undone." confirmLabel={`Email ${selectedHistoryReady.length} feedback item${selectedHistoryReady.length === 1 ? '' : 's'}`} cancelLabel="Review selection" pending={bulkFeedbackPending} onClose={() => { if (!bulkFeedbackPending) setBulkFeedbackAction(null); }} onConfirm={() => void processBulkFeedback()} />
   </>;
 }
 
@@ -2306,7 +2327,7 @@ function DetailSection({ title, summary, defaultExpanded = false, children }: { 
   </View>;
 }
 
-function StudentDetail({ student, workspace, onClose }: { student: RosterStudent | null; workspace: ClassWorkspace; onClose: () => void }) {
+export function StudentDetail({ student, workspace, onClose }: { student: RosterStudent | null; workspace: ClassWorkspace; onClose: () => void }) {
   if (!student) return null;
   const grading = workspace.criteria?.gradingSystemDefinition ?? workspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
   const gradingResult = calculateEnrollmentGrade(workspace, student.enrollmentId);

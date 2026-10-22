@@ -90,3 +90,63 @@ def test_export_dynamic_shapes_and_int8_labeled_gate(tmp_path):
         quantize_dynamic_onnx(
             tmp_path / "model.onnx", tmp_path / "bad.onnx", validation_inputs=[feed]
         )
+
+
+def test_v1_export_keeps_nonzero_assessment_context_projection(tmp_path):
+    """The exported graph must retain the newly learned assessment features."""
+    torch.manual_seed(117)
+    model = SchemaForecaster(
+        width=16,
+        heads=2,
+        layers=1,
+        categories=4,
+        max_history=16,
+        max_queries=4,
+        dropout=0,
+        assessment_context_version=1,
+    ).eval()
+    # A nonzero projection makes this a useful export regression: a dropped
+    # context branch would otherwise still pass parity at zero initialization.
+    with torch.no_grad():
+        model.assessment_context_projection.weight.fill_(0.04)
+
+    batch, history, queries, schemas = 1, 2, 2, 3
+    inputs = (
+        torch.tensor([[0.25, -0.5]]),
+        torch.tensor([[0, 1]]),
+        torch.tensor([[0, 0]]),
+        torch.randn(batch, schemas, 16),
+        torch.zeros(batch, history, dtype=torch.bool),
+        torch.tensor([[0, 1]]),
+        torch.zeros(batch, queries, dtype=torch.bool),
+        torch.ones(batch, queries, 4, dtype=torch.bool),
+        torch.zeros(batch, schemas, dtype=torch.bool),
+        torch.tensor([[[[-2.0, 2.0]], [[-1.0, 1.0]]]]),
+        torch.zeros(batch, queries, 42),
+    )
+    contextual = list(inputs)
+    contextual[-1] = contextual[-1].clone()
+    contextual[-1][..., 8:] = 0.5
+    with torch.inference_mode():
+        expected = model(*contextual)
+        without_assessment = model(*inputs)
+    assert any(
+        not torch.allclose(expected[name], without_assessment[name])
+        for name in expected
+    )
+
+    report = export_onnx(model, tuple(contextual), tmp_path / "assessment.onnx")
+    assert report["parity"] == "passed"
+    import onnxruntime as ort
+
+    session = ort.InferenceSession(
+        str(tmp_path / "assessment.onnx"), providers=["CPUExecutionProvider"]
+    )
+    feed = {name: value.numpy() for name, value in zip(INPUT_NAMES, contextual)}
+    actual = session.run(None, feed)
+    with torch.inference_mode():
+        reference = model(*contextual)
+    for candidate, name in zip(actual, ("quantiles", "categorical", "trend", "failure")):
+        assert torch.allclose(
+            torch.from_numpy(candidate), reference[name], atol=1e-4, rtol=1e-4
+        )

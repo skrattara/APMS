@@ -2,7 +2,7 @@ import { loadClassWorkspace, summarizeEnrollmentStanding, type ClassWorkspace, t
 import { supabase } from './supabase';
 import { DEFAULT_EVALUATION_SYSTEM, removeStandaloneMasteryFactor, validateEvaluationSystem, type EvaluationDefinition } from '@apms/domain';
 
-export type AcademicClass = FacultyClass & { workspace: ClassWorkspace };
+export type AcademicClass = FacultyClass & { workspace: ClassWorkspace; assignedFaculty: DepartmentFacultyMember[] };
 export type SavedEvaluationSystem = { id: string; name: string; description?: string; definition: EvaluationDefinition; version: number; updatedAt: string; updatedBy: string | null };
 export type AcademicWorkspace = {
   department: { id: string; code: string; name: string } | null;
@@ -54,6 +54,8 @@ export type AcademicSubjectRequest = {
   code: string;
   title: string;
   units: number;
+  lectureUnits: number;
+  laboratoryUnits: number;
   rationale: string;
   status: 'pending' | 'approved' | 'rejected';
   reviewNote: string | null;
@@ -129,6 +131,25 @@ export async function loadAcademicWorkspace(userId: string): Promise<AcademicWor
   }));
 
   const classIds = classSummaries.map((item) => item.id);
+  const { data: facultyAssignmentRows, error: facultyAssignmentError } = classIds.length
+    ? await client().from('faculty_assignments')
+      .select('class_record_id,faculty_profiles!inner(profile_id,employee_id,profiles!faculty_profiles_profile_id_fkey(first_name,last_name))')
+      .eq('status', 'active')
+      .in('class_record_id', classIds)
+    : { data: [], error: null };
+  if (facultyAssignmentError) throw facultyAssignmentError;
+  const assignedFacultyByClass = new Map<string, DepartmentFacultyMember[]>();
+  for (const row of facultyAssignmentRows ?? []) {
+    const profile = (row as any).faculty_profiles;
+    const member: DepartmentFacultyMember = {
+      userId: profile.profile_id,
+      employeeId: profile.employee_id,
+      name: `${profile.profiles?.first_name ?? ''} ${profile.profiles?.last_name ?? ''}`.trim() || profile.employee_id,
+    };
+    const entries = assignedFacultyByClass.get(row.class_record_id) ?? [];
+    if (!entries.some((entry) => entry.userId === member.userId)) entries.push(member);
+    assignedFacultyByClass.set(row.class_record_id, entries);
+  }
   const { data: privateAssignments, error: privateAssignmentsError } = classIds.length
     ? await client().from('academic_admin_class_evaluation_systems').select('class_record_id,definition').eq('department_id', departmentId).eq('user_id', userId).in('class_record_id', classIds)
     : { data: [], error: null };
@@ -140,7 +161,7 @@ export async function loadAcademicWorkspace(userId: string): Promise<AcademicWor
   const classes = await Promise.all(
     classSummaries.map(async (item) => {
       const privateDefinition = privateDefinitions.get(item.id);
-      return { ...item, workspace: await loadClassWorkspace(item.id, undefined, undefined, privateDefinition) };
+      return { ...item, assignedFaculty: assignedFacultyByClass.get(item.id) ?? [], workspace: await loadClassWorkspace(item.id, undefined, undefined, privateDefinition) };
     })
   );
 
@@ -358,6 +379,14 @@ export async function createAcademicAdminClass(input: {
   return data as string;
 }
 
+export async function updateAcademicAdminClassFaculty(classRecordId: string, facultyUserIds: string[]): Promise<void> {
+  const { error } = await client().rpc('academic_admin_update_class_faculty', {
+    p_class_record_id: classRecordId,
+    p_faculty_user_ids: facultyUserIds,
+  });
+  if (error) throw error;
+}
+
 export async function rejectAcademicAdminClassRequest(requestId: string, reviewNote: string): Promise<void> {
   const { error } = await client().rpc('academic_admin_reject_class_request', {
     p_request_id: requestId,
@@ -406,7 +435,7 @@ export async function manageSubject(input: {
 export async function loadSubjectRequests(): Promise<AcademicSubjectRequest[]> {
   const { data, error } = await client()
     .from('subject_requests')
-    .select('id,department_id,requested_by,code,title,units,rationale,status,review_note,reviewed_at,created_at,profiles!subject_requests_requested_by_fkey(first_name,last_name)')
+    .select('id,department_id,requested_by,code,title,units,lecture_units,laboratory_units,rationale,status,review_note,reviewed_at,created_at,profiles!subject_requests_requested_by_fkey(first_name,last_name)')
     .order('created_at', { ascending: false });
   if (error) throw error;
   return (data ?? []).map((row: any) => ({
@@ -419,6 +448,8 @@ export async function loadSubjectRequests(): Promise<AcademicSubjectRequest[]> {
     code: row.code,
     title: row.title,
     units: Number(row.units),
+    lectureUnits: Number(row.lecture_units),
+    laboratoryUnits: Number(row.laboratory_units),
     rationale: row.rationale,
     status: row.status,
     reviewNote: row.review_note ?? null,

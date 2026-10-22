@@ -68,6 +68,9 @@ def save_bundle(
     overwrite=False,
 ) -> Path:
     import torch
+    from .assessment_context import validate_assessment_context_metadata
+
+    validate_assessment_context_metadata(metadata)
 
     dest = Path(directory)
     if dest.exists() and not overwrite:
@@ -126,9 +129,11 @@ def save_bundle(
 
 def load_bundle(directory: str | Path) -> tuple[dict[str, Any], dict[str, Any]]:
     import torch
+    from .assessment_context import validate_assessment_context_metadata
 
     path = Path(directory)
     meta = json.loads((path / "metadata.json").read_text(encoding="utf-8"))
+    validate_assessment_context_metadata(meta)
     weights = (path / "weights.pt").read_bytes()
     if hashlib.sha256(weights).hexdigest() != meta.get("weights_sha256"):
         raise ValueError("Artifact digest mismatch")

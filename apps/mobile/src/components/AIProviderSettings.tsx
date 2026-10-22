@@ -61,7 +61,7 @@ export function AIProviderSettings({ onMessage }: { onMessage: (message: string)
   return <Card style={{ gap: 12 }}>
     <Text style={{ color: colors.text, fontSize: 16, fontWeight: '700' }}>AI provider keys and usage</Text>
     <Text style={{ color: colors.textMuted, fontSize: 12, lineHeight: 18 }}>Department keys are used for authorized classes in that department. System Admin configured Edge Function keys are used when no department key is configured. Requests use separately authorized, request-specific student context; sharing a key does not share prompts or records. Secrets are stored in Supabase Vault and are never shown again after saving.</Text>
-    <Text style={{ color: colors.warning, fontSize: 12, lineHeight: 18 }}>Before saving keys, disable database statement logging in Supabase. Vault documentation warns that plaintext key arguments can otherwise be captured in SQL logs.</Text>
+    {/* <Text style={{ color: colors.warning, fontSize: 12, lineHeight: 18 }}>Before saving keys, disable database statement logging in Supabase. Vault documentation warns that plaintext key arguments can otherwise be captured in SQL logs.</Text> */}
     <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
       {visibleScopes.length > 1 ? <SelectField label="Department" value={scopeId} options={visibleScopes.map((item) => ({ label: item.label ?? 'Authorized department', value: item.scope_id }))} onChange={setScopeId} /> : null}
       <SelectField label="Provider" value={provider} options={[{ label: 'Google Gemini', value: 'gemini' }, { label: 'OpenAI', value: 'openai' }]} onChange={setProvider} />

@@ -5,6 +5,8 @@ export type ForecastErrorCode =
   | 'invalid_criteria'
   | 'request_status'
   | 'partial_inventory_unsupported'
+  | 'assessment_context_unsupported'
+  | 'assessment_context_invalid'
   | 'assessment_count_constraint'
   | 'applied_schema_changed'
   | 'request_too_large_local'
@@ -57,6 +59,8 @@ export function forecastRequestError(context: unknown): SafeForecastError {
       : null;
     const allowedCodes: ForecastErrorCode[] = [
       'partial_inventory_unsupported', 'assessment_count_constraint', 'applied_schema_changed',
+      'assessment_context_unsupported',
+      'assessment_context_invalid',
       'request_too_large', 'provider_timeout', 'request_timeout', 'provider_unavailable',
       'provider_authentication_failed', 'provider_request_rejected', 'provider_busy',
       'provider_connection_failed', 'invalid_response',
@@ -106,6 +110,10 @@ export function formatForecastError(error: unknown): string {
         : `The forecast request failed (HTTP ${error.status}). Check saved predictions before retrying.`;
     case 'partial_inventory_unsupported':
       return 'This model runtime does not support forecasting from the assessments currently recorded. Update the model service, or turn off Assessment score predictions to run standing and risk forecasts using Recent scores.';
+    case 'assessment_context_unsupported':
+      return 'The active model artifact does not support assessment-specific score forecasts. Ask an administrator to upgrade the model artifact, or turn off Assessment score predictions to continue with standing and risk forecasts.';
+    case 'assessment_context_invalid':
+      return 'Some recorded assessment values or dates do not match the active grading system. Review the class assessment records and grading setup before trying again.';
     case 'assessment_count_constraint':
       return 'The recorded assessments exceed an active grading-system count limit. Ask an administrator to review the assessment setup.';
     case 'applied_schema_changed':

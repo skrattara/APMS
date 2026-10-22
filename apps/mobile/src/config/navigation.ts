@@ -19,23 +19,23 @@ export const NAVIGATION: Record<Role, NavItem[]> = {
     { key: 'gradebook', label: 'Gradebook', icon: 'grades' }, { key: 'attendance', label: 'Attendance', icon: 'criteria' },
     { key: 'students', label: 'Students', icon: 'students' }, { key: 'risk', label: 'At-Risk Students', icon: 'evaluation' },
     { key: 'criteria', label: 'Grading Criteria', icon: 'criteria' }, { key: 'feedback', label: 'Feedback', icon: 'feedback' },
-    { key: 'analytics', label: 'Analytics & Reports', icon: 'analytics' }, { key: 'evaluation', label: 'AI Prediction', icon: 'assistant' },
-    { key: 'settings', label: 'Settings', icon: 'settings', hidden: true },
+    { key: 'analytics', label: 'Analytics & Reports', icon: 'analytics' },
+    { key: 'ai-usage', label: 'AI Usage', icon: 'analytics' }, { key: 'notifications', label: 'Notifications', icon: 'notifications', hidden: true }, { key: 'settings', label: 'Settings', icon: 'settings', hidden: true },
   ],
   academic_admin: [
     { key: 'overview', label: 'Dashboard', icon: 'home' }, { key: 'units', label: 'Academic Units', icon: 'faculty' },
     { key: 'subjects', label: 'Subjects', icon: 'records' }, { key: 'classes', label: 'Classes Overview', icon: 'records' },
     { key: 'students', label: 'Student Monitoring', icon: 'students' }, { key: 'risk', label: 'At-Risk Overview', icon: 'evaluation' },
     { key: 'criteria', label: 'Evaluation Criteria', icon: 'criteria' }, { key: 'deadlines', label: 'Grade Deadlines', icon: 'grades' }, { key: 'analytics', label: 'Analytics & Reports', icon: 'analytics' },
-    { key: 'settings', label: 'Settings', icon: 'settings' },
+    { key: 'ai-usage', label: 'AI Usage', icon: 'analytics' }, { key: 'notifications', label: 'Notifications', icon: 'notifications', hidden: true }, { key: 'settings', label: 'Settings', icon: 'settings' },
   ],
   system_admin: [
     { key: 'overview', label: 'Dashboard', icon: 'home' }, { key: 'admins', label: 'User Management', icon: 'admins' },
     { key: 'setup', label: 'Academic Setup', icon: 'records' },
-    { key: 'roles', label: 'Roles & Permissions', icon: 'roles' }, { key: 'backup', label: 'System & Backup Status', icon: 'backup' },
+    { key: 'roles', label: 'Roles & Permissions', icon: 'roles' }, { key: 'backup', label: 'Backup Management', icon: 'backup' },
     { key: 'logs', label: 'Access & System Logs', icon: 'logs' }, { key: 'reports', label: 'System Reports', icon: 'analytics' }, { key: 'system', label: 'System Settings', icon: 'system' },
     { key: 'data-generator', label: 'Data Generator (Dev)', icon: 'records', hidden: !__DEV__ },
-    { key: 'settings', label: 'Settings', icon: 'settings' },
+    { key: 'ai-usage', label: 'AI Usage', icon: 'analytics' }, { key: 'notifications', label: 'Notifications', icon: 'notifications', hidden: true }, { key: 'settings', label: 'Settings', icon: 'settings' },
   ],
 };
 

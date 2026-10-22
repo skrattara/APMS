@@ -1,5 +1,6 @@
 // Portable reference adapter for the APMS eleven-input ONNX tensor contract.
 // Runtime construction is injected so this file has no native or ORT dependency.
+import { bindAssessmentQueries, compileAssessmentContexts, validateAssessmentContextMetadata } from './assessment-context.mjs';
 const INPUT_NAMES = ["values", "field_ids", "kinds", "schema_tokens", "history_mask", "query_ids", "query_mask", "legal_category_mask", "schema_mask", "numeric_bounds", "query_features"];
 const KINDS = { float: 0, integer: 1, boolean: 2, category: 3 };
 const MISSING = { float: 4, integer: 5, boolean: 6, category: 7 };
@@ -13,6 +14,7 @@ const tf = (ort, type, data, dims) => new ort.Tensor(type, data, dims);
 
 function validateExample(ex, metadata) {
   if (!ex || !Array.isArray(ex.fields) || !Array.isArray(ex.history) || !Array.isArray(ex.queries)) throw new TypeError("Example requires fields, history, and queries arrays");
+  const assessmentContextVersion=validateAssessmentContextMetadata(metadata);
   const cfg=metadata.model_config||{}, limits={fields:cfg.max_fields??512,history:cfg.max_history??512,queries:cfg.max_queries??128,categories:cfg.categories??16};
   if (ex.fields.length>limits.fields || ex.history.length>limits.history || !ex.queries.length || ex.queries.length>limits.queries) throw new RangeError("Example exceeds model sequence limits or has no output queries");
   const ids=new Map();
@@ -25,7 +27,8 @@ function validateExample(ex, metadata) {
   for(const row of ex.history){if(!row||typeof row!=="object"||Array.isArray(row)||Object.keys(row).some(k=>!specs.has(k))) throw new TypeError("History contains undeclared fields");
     for(const [k,v] of Object.entries(row)) validateValue(specs.get(k),v,k);}
   for(const q of ex.queries){if(!q||typeof q!=="object"||!specs.has(q.field)) throw new TypeError("Each query must identify a declared field");
-    if(["assessment_ref","factor_ref"].some(k=>own(q,k))) throw new TypeError("Schema-bound assessment/factor queries must be resolved by the app domain validator before mobile inference");
+    if(own(q,"factor_ref")) throw new TypeError("Schema-bound factor queries must be resolved by the app domain validator before mobile inference");
+    if(own(q,"assessment_ref")&&(typeof q.assessment_ref!=="string"||!q.assessment_ref)) throw new TypeError("Assessment query reference must be a nonempty opaque identifier");
     if(!Number.isInteger(q.horizon??1)||(q.horizon??1)<1||(q.horizon??1)>128) throw new RangeError("Query horizon must be an integer from 1 to 128");
     const s=specs.get(q.field); for(const v of [q.minimum??s.minimum,q.maximum??s.maximum]) if(v!=null) finite(v,"query bound");
     const lo=q.minimum??s.minimum, hi=q.maximum??s.maximum; if(lo!=null&&hi!=null&&lo>hi) throw new RangeError("Query bounds are inverted");
@@ -34,7 +37,8 @@ function validateExample(ex, metadata) {
     if(q.choices!==undefined){if(!Array.isArray(q.choices)||!q.choices.length||q.choices.length>limits.categories||new Set(q.choices.map(x=>JSON.stringify(x))).size!==q.choices.length) throw new TypeError("Query choices must be unique and within model capacity"); for(const v of q.choices) validateValue(s,v,q.field);}
   }
   if(ex.schema && typeof ex.schema!=="object") throw new TypeError("Schema snapshots must be an object");
-  return {ids,specs,limits};
+  if(assessmentContextVersion===1 && ex.queries.some(q=>own(q,"assessment_ref")) && !ex.schema?.gradingSystem) throw new TypeError("Assessment-bound queries require a grading schema snapshot");
+  return {ids,specs,limits,assessmentContextVersion};
 }
 function validateValue(s,v,label){if(v===null)return; if(s.kind==="float"||s.kind==="integer"){if(typeof v!=="number"||!Number.isFinite(v)||s.kind==="integer"&&!Number.isInteger(v)) throw new TypeError(`Invalid ${s.kind} value for ${label}`); if(s.minimum!=null&&v<s.minimum||s.maximum!=null&&v>s.maximum) throw new RangeError(`Value outside bounds for ${label}`);} else if(s.kind==="boolean"&&typeof v!=="boolean") throw new TypeError(`Invalid boolean for ${label}`); else if(s.kind==="category"&&!s.categories.includes(v)) throw new TypeError(`Unknown category for ${label}`);}
 
@@ -65,7 +69,8 @@ function compileSchema(schema, symbolIds) {
 }
 
 export function prepareExample(ex, metadata, ort) {
-  const {ids,specs,limits}=validateExample(ex,metadata), fields=metadata.fields;
+  ex=bindAssessmentQueries(ex);
+  const {ids,specs,limits,assessmentContextVersion}=validateExample(ex,metadata), fields=metadata.fields;
   if(!Array.isArray(fields)||ex.fields.some(f=>!fields.includes(f.name))) throw new TypeError("Example fields must be a subset of trained manifest fields");
   const maxCats=limits.categories, prep=metadata.preprocessing||{}, history=[];
   for(const row of ex.history) for(const name of fields) if(own(row,name)) {const s=specs.get(name),v=row[name];let value=0,kind;
@@ -74,19 +79,22 @@ export function prepareExample(ex, metadata, ort) {
     if(!Number.isFinite(value))throw new TypeError("Non-finite encoded history value"); history.push([value,fields.indexOf(name),kind]); }
   if(!history.length)history.push([0,0,4]); if(history.length>limits.history)throw new RangeError("History token limit exceeded");
   const schema=compileSchema(ex.schema||{},metadata.schema_symbols||{}), H=history.length,Q=ex.queries.length,S=schema.length;
+  const assessmentContexts=assessmentContextVersion===1?compileAssessmentContexts(ex):ex.queries.map(()=>Array(34).fill(0));
   if(S>(metadata.maximum_schema_tokens??4096))throw new RangeError("Applied schema exceeds configured context token limit");
   const values=new Float32Array(H),fieldIds=new BigInt64Array(H),kinds=new BigInt64Array(H); history.forEach(([v,f,k],i)=>{values[i]=v;fieldIds[i]=BigInt(f);kinds[i]=BigInt(k);});
   const schemaTokens=new Float32Array(S*16);schema.forEach((r,i)=>r.forEach((x,j)=>schemaTokens[i*16+j]=x));
-  const queryIds=new BigInt64Array(Q),legal=new Uint8Array(Q*maxCats),bounds=new Float32Array(Q*2),features=new Float32Array(Q*8);bounds.fill(Infinity);for(let i=0;i<Q;i++)bounds[i*2]=-Infinity;
+  const queryFeatureWidth=assessmentContextVersion===1?42:8;
+  const queryIds=new BigInt64Array(Q),legal=new Uint8Array(Q*maxCats),bounds=new Float32Array(Q*2),features=new Float32Array(Q*queryFeatureWidth);bounds.fill(Infinity);for(let i=0;i<Q;i++)bounds[i*2]=-Infinity;
   ex.queries.forEach((q,j)=>{const s=specs.get(q.field),kind=q.choices?.length?"mapped":s.kind,[center=0,scale0=1]=prep[q.field]||[0,1],scale=Math.max(scale0,1e-6),lo=q.minimum??s.minimum,hi=q.maximum??s.maximum; queryIds[j]=BigInt(fields.indexOf(q.field));
     if(["float","integer","mapped"].includes(kind)){if(lo!=null)bounds[j*2]=(lo-center)/scale;if(hi!=null)bounds[j*2+1]=(hi-center)/scale;}
-    const f=j*8;features[f]=Math.min(1,Math.log1p(q.horizon??1)/Math.log(129));features[f+1]=({float:0,integer:1,boolean:2,category:3,mapped:4})[kind];features[f+2]=Number(lo!=null);features[f+3]=Number(hi!=null);
+    const f=j*queryFeatureWidth;features[f]=Math.min(1,Math.log1p(q.horizon??1)/Math.log(129));features[f+1]=({float:0,integer:1,boolean:2,category:3,mapped:4})[kind];features[f+2]=Number(lo!=null);features[f+3]=Number(hi!=null);
     if(lo!=null)features[f+4]=Math.max(-10,Math.min(10,(lo-center)/scale))/10;if(hi!=null)features[f+5]=Math.max(-10,Math.min(10,(hi-center)/scale))/10;
     const choices=q.choices||(kind==="category"?s.categories:kind==="boolean"?[false,true]:[]); if(choices.length>maxCats)throw new RangeError("Output query exceeds configured category limit");choices.forEach((_,i)=>legal[j*maxCats+i]=1);features[f+6]=choices.length/maxCats;features[f+7]=Number(Boolean(ex.schema?.gradingSystem||ex.schema?.evaluationCriteria));
+    if(assessmentContextVersion===1){const context=assessmentContexts[j];if(context.length!==34||context.some(x=>!Number.isFinite(x)))throw new TypeError("Assessment context compiler returned an invalid feature vector");context.forEach((value,index)=>{features[f+8+index]=value;});}
   });
   const tensor=(type,data,dims)=>tf(ort,type,data,dims);
-  const feed={values:tensor("float32",values,[1,H]),field_ids:tensor("int64",fieldIds,[1,H]),kinds:tensor("int64",kinds,[1,H]),schema_tokens:tensor("float32",schemaTokens,[1,S,16]),history_mask:tensor("bool",new Uint8Array(H),[1,H]),query_ids:tensor("int64",queryIds,[1,Q]),query_mask:tensor("bool",Uint8Array.from({length:Q},(_,i)=>Number(i>=ex.queries.length)),[1,Q]),legal_category_mask:tensor("bool",legal,[1,Q,maxCats]),schema_mask:tensor("bool",new Uint8Array(S),[1,S]),numeric_bounds:tensor("float32",bounds,[1,Q,1,2]),query_features:tensor("float32",features,[1,Q,8])};
-  return {feed,fields,specs,queryCount:ex.queries.length,maxCats};
+  const feed={values:tensor("float32",values,[1,H]),field_ids:tensor("int64",fieldIds,[1,H]),kinds:tensor("int64",kinds,[1,H]),schema_tokens:tensor("float32",schemaTokens,[1,S,16]),history_mask:tensor("bool",new Uint8Array(H),[1,H]),query_ids:tensor("int64",queryIds,[1,Q]),query_mask:tensor("bool",Uint8Array.from({length:Q},(_,i)=>Number(i>=ex.queries.length)),[1,Q]),legal_category_mask:tensor("bool",legal,[1,Q,maxCats]),schema_mask:tensor("bool",new Uint8Array(S),[1,S]),numeric_bounds:tensor("float32",bounds,[1,Q,1,2]),query_features:tensor("float32",features,[1,Q,queryFeatureWidth])};
+  return {feed,fields,specs,queryCount:ex.queries.length,maxCats,example:ex};
 }
 
 function softmax(a){const m=Math.max(...a),e=a.map(x=>Math.exp(x-m)),z=e.reduce((x,y)=>x+y,0);return e.map(x=>x/z);}
@@ -105,6 +113,7 @@ function roundTiesToEven(value) {
   return lower%2===0?lower:lower+1;
 }
 export function decodeOutputs(raw, ex, metadata, prepared) {
+  ex=prepared.example||ex;
   const {specs,maxCats}=prepared, qs=ex.queries, calibration=metadata.calibration||{}, predictions=[];
   const same=(a,b)=>JSON.stringify(canonical(a))===JSON.stringify(canonical(b));
   const canonical=x=>Array.isArray(x)?x.map(canonical):x&&typeof x==="object"?Object.fromEntries(Object.keys(x).sort().map(k=>[k,canonical(x[k])])):x;
@@ -133,7 +142,7 @@ export async function predictExample({ort,session,metadata,example,validateSchem
   if((example.schema?.gradingSystem||example.schema?.evaluationCriteria)&&typeof validateSchemas!=="function")throw new TypeError("Applied schema snapshots require the app's full domain schema and semantic validator");
   if(validateSchemas)await validateSchemas(example.schema||{});
   const prepared=prepareExample(example,metadata,ort), raw=await session.run(prepared.feed);
-  return decodeOutputs(raw,example,metadata,prepared);
+  return decodeOutputs(raw,prepared.example||example,metadata,prepared);
 }
 
 export const inputNames=INPUT_NAMES;

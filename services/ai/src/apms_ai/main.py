@@ -43,6 +43,7 @@ class ForecastInput(BaseModel):
     queries: list[dict[str, Any]]
     schema_context: dict[str, Any] = Field(default_factory=dict)
     assessment_instances: list[dict[str, Any]] = Field(default_factory=list)
+    assessment_results: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ModelRegistry:
@@ -364,6 +365,17 @@ def status(authorization: str | None = Header(default=None)):
             "v1_predictions": True,
             "v2_forecasts": True,
             "partial_assessment_inventory": True,
+            "assessment_instance_conditioning": bool(
+                registry.metadata.get("assessment_context_version", 0)
+                == registry.metadata.get("model_config", {}).get(
+                    "assessment_context_version", 0
+                )
+                == 1
+                and registry.metadata.get("training", {})
+                .get("assessment_query_counts", {})
+                .get("train", 0)
+                > 0
+            ),
         },
     }
 
@@ -413,6 +425,8 @@ def forecast(payload: ForecastInput, authorization: str | None = Header(default=
             [FieldSpec(**field) for field in payload.fields],
             origin="real",
             schema=payload.schema_context,
+            assessment_instances=payload.assessment_instances,
+            assessment_results=payload.assessment_results,
         )
         result = predict_example(
             registry.state,

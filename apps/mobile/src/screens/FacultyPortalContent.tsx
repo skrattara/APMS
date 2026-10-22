@@ -37,7 +37,7 @@ export function FacultyPortalContent({ screen }: { screen: string }) {
   if (screen === "attendance") return <FacultyAttendance />;
   if (screen === "risk") return <FacultyRisk />;
   if (screen === "criteria") return <FacultyCriteria />;
-  if (screen === "evaluation") return <FacultyPrediction />;
+  if (screen === "evaluation") return <FacultyRisk />;
   if (screen === "events") return <FacultyEvents />;
   if (screen === "feedback") return <FacultyFeedback />;
   if (screen === "analytics") return <FacultyAnalytics />;
@@ -106,20 +106,6 @@ function FacultyCriteria() {
         <Text style={[styles.rowMeta, { color: total === 100 ? colors.success : colors.danger }]}>Total: {total}% · {total === 100 ? 'Valid' : 'Weights must total 100%'}</Text>
         <Text style={styles.rowMeta}>Changes apply to monitoring calculations only and are recorded in the audit log.</Text>
       </Card>
-    </View>
-  );
-}
-
-function FacultyPrediction() {
-  return (
-    <View style={styles.screen}>
-      <View><Text style={styles.pageTitle}>AI-Assisted At-Risk Prediction</Text><Text style={styles.pageSubtitle}>Synthetic logistic prototype · not institutionally validated</Text></View>
-      <Card>
-        <Badge tone="warning">Advisory only</Badge>
-        <Text style={styles.cardTitle}>Prediction service is isolated from grade entry</Text>
-        <Text style={styles.rowMeta}>The service analyzes current standing, recent score direction, attendance, and missing assessments. If it is unavailable, gradebook, attendance, and calculated standing remain accessible.</Text>
-      </Card>
-      <FacultyRisk />
     </View>
   );
 }
@@ -244,14 +230,13 @@ function FacultyOverview() {
           ))}
         </Card>
         <Card style={styles.half}>
-          <Text style={styles.cardTitle}>AI Prediction Status</Text>
+          <Text style={styles.cardTitle}>AI forecast status</Text>
           <View style={styles.prediction}>
             <Text style={styles.predictionLabel}>
               Synthetic prototype available
             </Text>
             <Text style={styles.rowMeta}>
-              Run advisory analysis from the AI Prediction page. The prototype
-              is not institutionally validated and never replaces faculty judgment.
+              Advisory forecasts are available alongside risk indicators on the At-Risk Students page. They do not replace faculty judgment.
             </Text>
           </View>
         </Card>

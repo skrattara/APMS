@@ -73,6 +73,26 @@ class Example:
     group: str | None = None
     origin: str = "real"
     schema: dict[str, Any] = field(default_factory=dict)
+    # These optional joins are local to one example. Their opaque references
+    # are validated but never used as model tokens or vocabulary entries.
+    assessment_instances: list[dict[str, Any]] = field(default_factory=list)
+    assessment_results: list[dict[str, Any]] = field(default_factory=list)
+
+
+def example_fingerprint_record(example: Example) -> dict[str, Any]:
+    """Stable serialization; empty v1 fields preserve legacy dataset hashes."""
+    from dataclasses import asdict
+
+    record = asdict(example)
+    if not example.assessment_instances:
+        record.pop("assessment_instances", None)
+    if not example.assessment_results:
+        record.pop("assessment_results", None)
+    if example.assessment_instances:
+        record["assessment_instances"] = example.assessment_instances
+    if example.assessment_results:
+        record["assessment_results"] = example.assessment_results
+    return record
 
 
 @lru_cache(maxsize=2)
@@ -322,11 +342,38 @@ def _validate_assessment_instances(
         if not isinstance(instance, dict):
             raise ValueError("Each assessment instance must be an object")
         required = {"assessment_ref", "assessment_type_ref", "maximum_score", "scoring"}
-        optional_keys = {"period_ref", "group_ref", "weight", "optional", "has_result"}
+        optional_keys = {
+            "period_ref", "group_ref", "weight", "optional", "has_result",
+            "sequence", "relative_day", "due_in_days",
+        }
         if required - set(instance) or set(instance) - required - optional_keys:
             raise ValueError(
                 "Assessment instance fields do not match the supported contract"
             )
+        if "sequence" in instance:
+            sequence = instance["sequence"]
+            if (
+                isinstance(sequence, bool)
+                or not isinstance(sequence, (int, float))
+                or not math.isfinite(float(sequence))
+                or sequence < 0
+                or sequence > 1_000_000_000
+            ):
+                raise ValueError("Assessment sequence must be finite and nonnegative")
+        for temporal_key in ("relative_day", "due_in_days"):
+            if temporal_key in instance:
+                day = instance[temporal_key]
+                if day is None:
+                    continue
+                if (
+                    isinstance(day, bool)
+                    or not isinstance(day, (int, float))
+                    or not math.isfinite(float(day))
+                    or not -36500 <= day <= 36500
+                ):
+                    raise ValueError(
+                        f"{temporal_key} must be finite and within 36500 days"
+                    )
         ref, type_ref = instance["assessment_ref"], instance["assessment_type_ref"]
         if not isinstance(ref, str) or not ref or ref in seen:
             raise ValueError("Assessment references must be nonempty and unique")
@@ -536,10 +583,11 @@ def validate_assessment_instances(
 
 
 def compile_assessment_constraint(
-    grading: dict[str, Any], instance: dict[str, Any]
+    grading: dict[str, Any], instance: dict[str, Any], *, validate: bool = True
 ) -> dict[str, Any]:
     """Compile a validated assessment instance into a model output constraint."""
-    _validate_assessment_instances(grading, [instance], enforce_counts=False)
+    if validate:
+        _validate_assessment_instances(grading, [instance], enforce_counts=False)
     component = _assessment_component(grading, instance["assessment_type_ref"])
     kind, minimum, maximum, choices = _assessment_domain(grading, component)
     if instance["scoring"]["mode"] == "linear":
@@ -816,6 +864,7 @@ def validate_example(ex: Example, limits: dict[str, int] | None = None) -> None:
             "choices",
             "minimum",
             "maximum",
+            "assessment_ref",
         }:
             raise ValueError(
                 "Queries must use the declared field/horizon/choice/bounds contract"
@@ -870,6 +919,41 @@ def validate_example(ex: Example, limits: dict[str, int] | None = None) -> None:
             and math.ceil(lower) > math.floor(upper)
         ):
             raise ValueError("Query domain contains no legal integer")
+
+    instance_refs = set()
+    for instance in ex.assessment_instances:
+        if not isinstance(instance, dict):
+            raise ValueError("Assessment instances must be objects")
+        ref = instance.get("assessment_ref")
+        if not isinstance(ref, str) or not ref or ref in instance_refs:
+            raise ValueError("Assessment references must be nonempty and unique")
+        instance_refs.add(ref)
+    result_refs = set()
+    for result in ex.assessment_results:
+        if not isinstance(result, dict) or set(result) - {
+            "assessment_ref", "value", "observed_day"
+        } or {"assessment_ref", "value"} - set(result):
+            raise ValueError("Assessment results require a reference and raw value")
+        ref = result["assessment_ref"]
+        if not isinstance(ref, str) or ref not in instance_refs or ref in result_refs:
+            raise ValueError("Assessment results must uniquely reference an instance")
+        result_refs.add(ref)
+        if "observed_day" in result:
+            day = result["observed_day"]
+            if day is not None and (
+                isinstance(day, bool)
+                or not isinstance(day, (int, float))
+                or not math.isfinite(float(day))
+                or day > 0
+            ):
+                raise ValueError("Observed assessment results must be at or before the cutoff")
+    for query in ex.queries:
+        if "assessment_ref" in query:
+            ref = query["assessment_ref"]
+            if not isinstance(ref, str) or ref not in instance_refs:
+                raise ValueError("Query references an unknown assessment instance")
+            if ref in result_refs:
+                raise ValueError("Assessment query must reference an unscored instance")
 
     if ex.labels and len(ex.labels) != len(ex.queries):
         raise ValueError("Labels must align with query positions")

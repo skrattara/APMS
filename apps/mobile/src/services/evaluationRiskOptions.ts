@@ -19,7 +19,7 @@ export function evaluationRiskOptions(
   return [
     { label: allLabel, value: 'all' },
     ...levels.map(({ definition, level }) => ({
-      label: `${level.name}${duplicateNames.has(level.name) ? ` · ${definition.name}` : ''} (${level.severity} risk)`,
+      label: `${level.name}${duplicateNames.has(level.name) ? ` · ${definition.name}` : ''}`,
       value: `level:${definition.id}:${level.id}`,
     })),
     { label: 'No matching risk level', value: 'unmatched' },

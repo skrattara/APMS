@@ -398,6 +398,8 @@ export type SubjectRequest = {
   code: string;
   title: string;
   units: number;
+  lectureUnits: number;
+  laboratoryUnits: number;
   rationale: string;
   status: 'pending' | 'approved' | 'rejected';
   reviewNote: string | null;
@@ -407,13 +409,15 @@ export type SubjectRequest = {
 export async function submitSubjectRequest(input: {
   code: string;
   title: string;
-  units: number;
+  lectureUnits: number;
+  laboratoryUnits: number;
   rationale: string;
 }): Promise<string> {
   const { data, error } = await connected().rpc('faculty_submit_subject_request', {
     p_code: input.code.trim(),
     p_title: input.title.trim(),
-    p_units: input.units,
+    p_lecture_units: input.lectureUnits,
+    p_laboratory_units: input.laboratoryUnits,
     p_rationale: input.rationale.trim(),
   });
   if (error) throw error;
@@ -423,7 +427,7 @@ export async function submitSubjectRequest(input: {
 export async function loadMySubjectRequests(): Promise<SubjectRequest[]> {
   const { data, error } = await connected()
     .from('subject_requests')
-    .select('id,department_id,code,title,units,rationale,status,review_note,created_at')
+    .select('id,department_id,code,title,units,lecture_units,laboratory_units,rationale,status,review_note,created_at')
     .order('created_at', { ascending: false });
   if (error) throw error;
   return (data ?? []).map((row: any) => ({
@@ -432,6 +436,8 @@ export async function loadMySubjectRequests(): Promise<SubjectRequest[]> {
     code: row.code,
     title: row.title,
     units: Number(row.units),
+    lectureUnits: Number(row.lecture_units),
+    laboratoryUnits: Number(row.laboratory_units),
     rationale: row.rationale,
     status: row.status,
     reviewNote: row.review_note ?? null,
@@ -1291,6 +1297,18 @@ export async function saveFacultyFeedback(enrollmentId: string, body: string, ca
 }
 
 export async function sendFacultyFeedbackEmail(enrollmentId: string, body: string, category: string, feedbackId?: string) {
+  if (feedbackId) {
+    const { data: feedback, error: feedbackError } = await connected()
+      .from('feedback_records')
+      .select('status')
+      .eq('id', feedbackId)
+      .eq('enrollment_id', enrollmentId)
+      .maybeSingle();
+    if (feedbackError) throw feedbackError;
+    if (feedback?.status === 'published' || feedback?.status === 'sent') {
+      throw new Error('This feedback has already been published and cannot be edited or emailed again.');
+    }
+  }
   const { data, error } = await connected().functions.invoke('apms-feedback-send', {
     body: { enrollment_id: enrollmentId, body, category, feedback_id: feedbackId ?? null },
   });

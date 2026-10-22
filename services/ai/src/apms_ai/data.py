@@ -23,6 +23,8 @@ def _example_from_mapping(raw, label="record") -> Example:
         raw.get("group"),
         raw.get("origin", "real"),
         raw.get("schema", {}),
+        raw.get("assessment_instances", []),
+        raw.get("assessment_results", []),
     )
     validate_example(ex)
     return ex

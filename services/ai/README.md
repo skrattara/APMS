@@ -1,5 +1,7 @@
 # APMS advisory forecasting service
 
+Assessment-specific forecasting adds a versioned query-context projection, shared schema-bound encoding, a frozen comparison runner and a playground. See [the upgrade guide](../../docs/AI_ASSESSMENT_CONTEXT_UPGRADE.md) for data fields, training/validation gates and Docker/cloud rollout. Existing context-version-zero weights retain their original behavior.
+
 This private service provides schema-conditioned sequence forecasts. It predicts only fields explicitly requested by the existing gateway contract. The APMS grading and evaluation engines remain authoritative for official grades and risk classifications. Predictions are advisory, require human review, and have not been institutionally validated.
 
 The checked-in component grading example is semantically invalid: it references assessment types absent from its declaration. The validator rejects it. The service does not repair the fixture or silently accept aliases that the domain engine rejects.

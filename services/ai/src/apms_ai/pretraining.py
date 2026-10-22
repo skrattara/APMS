@@ -5,12 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import random
-from dataclasses import asdict
 from pathlib import Path
 
 import torch
 
-from .contracts import Example, validate_example
+from .contracts import Example, example_fingerprint_record, validate_example
 from .data import RobustPreprocessor, group_split
 from .encoding import history_tokens, token_rows
 from .lifecycle import make_fabric, save_bundle, seed_everything
@@ -126,7 +125,7 @@ def pretrain(
             optimizer.step()
     fingerprint = hashlib.sha256(
         json.dumps(
-            [asdict(x) for x in examples],
+            [example_fingerprint_record(x) for x in examples],
             sort_keys=True,
             separators=(",", ":"),
             default=list,

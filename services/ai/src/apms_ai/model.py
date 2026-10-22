@@ -35,6 +35,7 @@ if torch is not None:
             numeric_residual=False,
             residual_link="logit",
             numeric_history_context=False,
+            assessment_context_version=0,
         ):
             super().__init__()
             if width <= 0 or heads <= 0 or width % heads or layers < 1:
@@ -59,6 +60,13 @@ if torch is not None:
             # This optional branch is constructed only when requested. Old
             # bundles therefore keep the same parameters and state-dict keys.
             self.numeric_history_context = bool(numeric_history_context)
+            if (
+                isinstance(assessment_context_version, bool)
+                or not isinstance(assessment_context_version, int)
+                or assessment_context_version not in (0, 1)
+            ):
+                raise ValueError("assessment_context_version must be integer 0 or 1")
+            self.assessment_context_version = assessment_context_version
             # These are small learned lookup tables: each field/type/position
             # becomes a fixed-width vector. They are structured-data features,
             # not text tokens or word embeddings.
@@ -135,6 +143,12 @@ if torch is not None:
                 nn.init.zeros_(self.numeric_context_to_forecast.bias)
                 nn.init.zeros_(self.numeric_context_to_quantiles.weight)
                 nn.init.zeros_(self.numeric_context_to_quantiles.bias)
+            if self.assessment_context_version == 1:
+                # Constructed last so shared v0/v1 weights start identically.
+                # A neutral start avoids artificial differences in ablations;
+                # training gradients can still learn this projection.
+                self.assessment_context_projection = nn.Linear(34, width, bias=False)
+                nn.init.zeros_(self.assessment_context_projection.weight)
 
         def forward(
             self,
@@ -152,6 +166,10 @@ if torch is not None:
         ):
             batch, history_length = values.shape
             query_length = query_ids.shape[1]
+            if query_features is None and self.assessment_context_version == 1:
+                raise ValueError(
+                    "Assessment-context v1 requires explicit query feature tensors"
+                )
             if history_length > self.max_history or query_length > self.max_queries:
                 raise ValueError("Input length exceeds configured model limits")
             if (
@@ -184,11 +202,16 @@ if torch is not None:
                 # equivariant to reordering or selecting a query subset.
                 query = query + self.query_position(query_pos)[None, :, :]
             if query_features is not None:
-                if query_features.shape != (batch, query_length, 8):
+                expected_width = 42 if self.assessment_context_version == 1 else 8
+                if query_features.shape != (batch, query_length, expected_width):
                     raise ValueError(
-                        "Query features must have shape [batch, queries, 8]"
+                        f"Query features must have shape [batch, queries, {expected_width}]"
                     )
-                query = query + self.query_features(query_features)
+                query = query + self.query_features(query_features[..., :8])
+                if self.assessment_context_version == 1:
+                    query = query + self.assessment_context_projection(
+                        query_features[..., 8:]
+                    )
             schema_context, _ = self.schema_attention(
                 query, schema, schema, key_padding_mask=schema_mask, need_weights=False
             )

@@ -38,7 +38,7 @@ export function AppShell({
 }>) {
   const router = useRouter();
   const { user, demoMode, signOut } = useAuth();
-  const { width } = useWindowDimensions();
+  const { width, height } = useWindowDimensions();
   const compact = width < 800;
   const narrow = width < 560;
   const [menuOpen, setMenuOpen] = useState(false);
@@ -227,13 +227,11 @@ export function AppShell({
           </View>
         </View>
         {notificationsOpen ? (
-          <Card style={styles.notificationPanel}>
+          <Card style={[styles.notificationPanel, { right: compact ? 8 : 58, width: Math.max(250, Math.min(380, width - 16)), maxHeight: Math.max(200, Math.min(493, height - 78)) }]}>
             <View style={styles.noticeHeader}>
               <View>
                 <Text style={styles.popoverTitle}>Notifications</Text>
-                <Text style={styles.noticeCount}>
-                  {notifications.unread} new
-                </Text>
+                <Text style={styles.noticeCount}>{notifications.unread ? `${notifications.unread} unread` : 'You’re all caught up'}</Text>
               </View>
               {notifications.unread ? (
                 <Button
@@ -244,7 +242,7 @@ export function AppShell({
               ) : null}
             </View>
             {notifications.loading ? (
-              <ActivityIndicator color={colors.brand} />
+              <View style={styles.noticeLoading}><ActivityIndicator color={colors.brand} /><Text style={styles.noticeText}>Loading recent notifications…</Text></View>
             ) : notifications.error ? (
               <>
                 <Text style={styles.noticeText}>{notifications.error}</Text>
@@ -255,34 +253,31 @@ export function AppShell({
                 />
               </>
             ) : notifications.items.length ? (
-              notifications.items.map((item) => (
-                <Pressable
-                  key={item.id}
-                  onPress={() =>
-                    void notifications.markRead(item.id).then(() => {
-                      if (item.target) {
-                        setNotificationsOpen(false);
-                        navigate(item.target);
-                      }
-                    })
+              <ScrollView style={styles.notificationList} showsVerticalScrollIndicator nestedScrollEnabled>
+              {notifications.items.slice(0, 5).map((item) => {
+                const openNotification = () => void notifications.markRead(item.id).then(() => {
+                  if (item.target) {
+                    setNotificationsOpen(false);
+                    navigate(item.target);
                   }
-                  style={[styles.notice, !item.read && styles.noticeUnread]}
-                >
-                  <Text style={styles.noticeTitle}>
-                    {item.message.split(": ")[0]}
-                  </Text>
-                  <Text style={styles.noticeText}>
-                    {item.message.split(": ").slice(1).join(": ")}
-                  </Text>
-                  <Text style={styles.noticeDate}>
-                    {new Date(item.createdAt).toLocaleString()}
-                  </Text>
-                </Pressable>
-              ))
+                });
+                return <View key={item.id} style={[styles.notice, !item.read && styles.noticeUnread]}>
+                  <View style={[styles.noticeDot, item.read && styles.noticeDotRead]} />
+                  <Pressable onPress={openNotification} style={{ gap: 2 }}>
+                    <Text style={styles.noticeTitle}>{item.message.split(": ")[0]}</Text>
+                    <Text style={styles.noticeText}>{item.message.split(": ").slice(1).join(": ")}</Text>
+                    <Text style={styles.noticeDate}>{new Date(item.createdAt).toLocaleString()}</Text>
+                  </Pressable>
+                  {item.actionLabel && item.target ? <View style={styles.noticeActions}><Button compact label={item.actionLabel} variant="secondary" onPress={openNotification} /></View> : null}
+                </View>;
+              })}
+              </ScrollView>
             ) : (
-              <Text style={styles.noticeText}>You have no notifications.</Text>
+              <View style={styles.noticeEmpty}><AppIcon name="notifications" size={22} color={colors.textMuted} /><Text style={styles.noticeText}>You have no notifications yet.</Text></View>
             )}
-            <Text style={styles.viewAll}>View All Notifications</Text>
+            <Pressable accessibilityRole="link" onPress={() => { setNotificationsOpen(false); navigate('notifications'); }} style={styles.viewAllButton}>
+              <Text style={styles.viewAll}>View all notifications</Text><AppIcon name="next" size={13} color={colors.brand} />
+            </Pressable>
           </Card>
         ) : null}
         {profileOpen ? (
@@ -521,11 +516,14 @@ const styles = StyleSheet.create({
   graderTopbar: { height: 65 },
   notificationPanel: {
     position: "absolute",
-    zIndex: 20,
+    zIndex: 2000,
+    elevation: 24,
     right: 58,
     top: 58,
     width: 380,
     maxHeight: 493,
+    padding: 12,
+    gap: 8,
   },
   profilePanel: {
     position: "absolute",
@@ -571,12 +569,23 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   notice: {
+    position: "relative",
     paddingVertical: 10,
+    paddingHorizontal: 10,
+    marginVertical: 2,
+    borderRadius: 9,
     borderBottomWidth: 1,
     borderColor: colors.border,
+    gap: 4,
   },
-  noticeUnread: { backgroundColor: "#FDF1ED" },
-  noticeText: { color: colors.textMuted, fontSize: 12 },
+  noticeUnread: { backgroundColor: "#FFF7F3", borderColor: "#F2DDD5" },
+  noticeDot: { position: "absolute", left: 2, top: 15, width: 6, height: 6, borderRadius: 4, backgroundColor: colors.brand },
+  noticeDotRead: { backgroundColor: colors.border },
+  notificationList: { flexShrink: 1, minHeight: 40 },
+  noticeLoading: { minHeight: 90, alignItems: "center", justifyContent: "center", gap: 8 },
+  noticeEmpty: { minHeight: 110, alignItems: "center", justifyContent: "center", gap: 8 },
+  noticeActions: { alignItems: "flex-start", marginTop: 5 },
+  noticeText: { color: colors.textMuted, fontSize: 12, lineHeight: 17 },
   noticeDate: { color: "#99A1AF", fontSize: 10, marginTop: 4 },
   profileEmail: { color: colors.textMuted, fontSize: 11 },
   noticeHeader: {
@@ -593,8 +602,9 @@ const styles = StyleSheet.create({
     color: colors.brand,
     fontSize: 11,
     textAlign: "center",
-    paddingTop: 10,
+    fontWeight: "600",
   },
+  viewAllButton: { minHeight: 34, flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 5, borderTopWidth: 1, borderColor: colors.border, paddingTop: 6 },
   content: { flex: 1 },
   contentInner: {
     width: "100%",

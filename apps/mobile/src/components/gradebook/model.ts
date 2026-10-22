@@ -1,6 +1,6 @@
-import { calculateGradingSystem, IT_GLOBAL_GRADING_SYSTEM, swunextAssessmentComponents, type SwunextAssessmentComponent } from '@apms/domain';
+import { calculateGradingSystem, IT_GLOBAL_GRADING_SYSTEM, swunextAssessmentComponents, type AssessmentForecastForDisplay, type SwunextAssessmentComponent } from '@apms/domain';
 import type { ClassWorkspace, FacultyAssessment } from '@/services/faculty';
-import { storedAssessmentValue, valueMappingForType } from './shared';
+import { storedAssessmentValue, valueMappingForType } from './modelHelpers';
 export type FullViewColumn = {
   id: string;
   kind: 'assessment' | 'component' | 'group' | 'period' | 'non_period' | 'final' | 'final_equivalent' | 'final_status';
@@ -15,6 +15,32 @@ export type FullViewColumn = {
   groupId?: string;
   nonPeriodScope?: boolean;
 };
+
+/** Stable key shared by generated Gradebook columns and forecast-cell overlays. */
+export function assessmentColumnId(assessmentId: string): string {
+  return `assessment:${assessmentId}`;
+}
+
+/** Give active read-only previews enough room to be legible without widening the saved gradebook. */
+export function assessmentPreviewColumnWidth(baseWidth: number, previewLabels: readonly string[]): number {
+  const longestLabel = previewLabels.reduce((length, label) => Math.max(length, label.length), 0);
+  if (!longestLabel) return baseWidth;
+  // Approximate 10px text width at ~6.4px per character, with padding; cap growth
+  // so a single unusually long category cannot dominate the full spreadsheet.
+  return Math.max(baseWidth, Math.min(320, Math.max(80, Math.ceil(longestLabel * 6.4 + 18))));
+}
+
+/** Adapt a validated, read-only forecast into the key format consumed by FullAssessmentView. */
+export function adaptAssessmentForecastOverlay(overlay: AssessmentForecastForDisplay) {
+  return {
+    enrollmentId: overlay.enrollmentId,
+    columnId: assessmentColumnId(overlay.assessmentId),
+    mode: 'value' as const,
+    value: overlay.value,
+    label: overlay.label,
+    color: overlay.color,
+  };
+}
 
 export function componentLabel(component: SwunextAssessmentComponent, typeId?: string | null, gradingSystem?: any) {
   const configuredType = gradingSystem?.assessmentTypes?.find((item: any) => item.id === typeId);
@@ -234,7 +260,7 @@ export function fullViewColumns(assessments: FacultyAssessment[], system: any, c
   const visit = (node: TreeNode, parent?: TreeNode) => {
     if (node.kind === 'assessment' && node.assessment) {
       const assessment = node.assessment;
-      columns.push({ id: `assessment:${assessment.id}`, kind: 'assessment', assessment, period: { key: node.periodId ?? 'no-period', label: roots.find((item) => item.key === (node.periodId ?? 'no-period'))?.label ?? 'No period' }, group: { key: node.groupId ?? 'no-group', label: node.groupLabel ?? 'No group' }, componentPath: node.componentPath, leafLabel: `${assessment.title} · ${assessment.maximumScore}`, width: columnWidth(assessment), periodId: node.periodId, groupId: node.groupId });
+      columns.push({ id: assessmentColumnId(assessment.id), kind: 'assessment', assessment, period: { key: node.periodId ?? 'no-period', label: roots.find((item) => item.key === (node.periodId ?? 'no-period'))?.label ?? 'No period' }, group: { key: node.groupId ?? 'no-group', label: node.groupLabel ?? 'No group' }, componentPath: node.componentPath, leafLabel: `${assessment.title} · ${assessment.maximumScore}`, width: columnWidth(assessment), periodId: node.periodId, groupId: node.groupId });
       return;
     }
     for (const child of node.children) visit(child, node);

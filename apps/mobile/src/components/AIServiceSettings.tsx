@@ -25,7 +25,7 @@ type ProbeResult = {
   device: string | null;
   synthetic_demo: boolean;
   institutionally_validated: boolean;
-  capabilities: { v1_predictions: boolean; v2_forecasts: boolean };
+  capabilities: { v1_predictions: boolean; v2_forecasts: boolean; assessment_instance_conditioning?: boolean };
   latency_ms: number | null;
   artifact_source?: 'local' | 'supabase_storage' | 'unavailable' | null;
   manifest_sha256?: string | null;
@@ -61,6 +61,7 @@ function isProbeResult(value: unknown): value is ProbeResult {
     && !!capabilities
     && typeof capabilities.v1_predictions === 'boolean'
     && typeof capabilities.v2_forecasts === 'boolean'
+    && (capabilities.assessment_instance_conditioning === undefined || typeof capabilities.assessment_instance_conditioning === 'boolean')
     && (typeof probe.latency_ms === 'number' || probe.latency_ms === null);
 }
 
@@ -138,6 +139,7 @@ export function AIServiceSettings() {
     ['Response time', probe?.latency_ms == null ? 'Not checked' : `${Math.round(probe.latency_ms)} ms`],
     ['Gateway predictions route', probe ? yesNo(probe.capabilities.v1_predictions) : 'Not checked'],
     ['Typed forecasts route', probe ? yesNo(probe.capabilities.v2_forecasts) : 'Not checked'],
+    ['Assessment-specific forecast support', probe?.capabilities.assessment_instance_conditioning === undefined ? 'Not reported' : yesNo(probe.capabilities.assessment_instance_conditioning)],
   ] : [];
 
   return <Card style={{ gap: 12 }}>

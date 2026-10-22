@@ -107,7 +107,9 @@ def _train(args):
                 numeric_center_loss_kind=args.numeric_center_loss_kind,
                 input_dropout=args.input_dropout,
                 numeric_history_context=args.numeric_history_context,
+                assessment_context_version=args.assessment_context_version,
                 selection_metric=args.selection_metric,
+                primary_target_field=getattr(args, "primary_target_field", None),
             )
         )
     )
@@ -445,6 +447,12 @@ def _export(args):
     report = export_onnx(model, sample, args.output)
     safe_inputs = list(sample)
     safe_inputs[0] = torch.zeros_like(safe_inputs[0])
+    if safe_inputs[-1].shape[-1] == 42:
+        # Assessment summaries are student-derived evidence. The conformance
+        # fixture is public-mobile test input, so keep its optional context
+        # branch structural but blank even when export was run on a real set.
+        safe_inputs[-1] = safe_inputs[-1].clone()
+        safe_inputs[-1][..., 8:] = 0
     with torch.inference_mode():
         expected = model(*safe_inputs)
     import numpy as np
@@ -465,6 +473,14 @@ def _export(args):
         "input_names": list(INPUT_NAMES),
         "output_names": list(OUTPUT_NAMES),
         "model_config": config,
+        "assessment_context_version": meta.get("assessment_context_version", 0),
+        "assessment_context_feature_names": meta.get(
+            "assessment_context_feature_names", []
+        ),
+        "assessment_context_normalization_version": meta.get(
+            "assessment_context_normalization_version"
+        ),
+        "assessment_result_cutoff": meta.get("assessment_result_cutoff"),
         "schema_encoding_version": meta["schema_encoding_version"],
         "schema_sha256": meta["schema_sha256"],
         "schema_symbols": _schema_symbols(),
@@ -477,6 +493,9 @@ def _export(args):
         "calibration": meta.get("calibration", {}),
         "fixture": fixture_path.name,
         "fixture_inputs_are_centered_zero_observations": True,
+        "fixture_assessment_context_is_zeroed": config.get(
+            "assessment_context_version", 0
+        ) == 1,
         "decode": {
             "numeric_quantile_index": config.get("quantiles", 3) // 2,
             "numeric_target_field": meta.get("target_field"),
@@ -602,6 +621,13 @@ def build_parser():
                 action=argparse.BooleanOptionalAction,
                 default=None,
             )
+            sub.add_argument(
+                "--assessment-context-version",
+                type=int,
+                choices=(0, 1),
+                default=None,
+            )
+            sub.add_argument("--primary-target-field", default=None)
             sub.add_argument(
                 "--selection-metric",
                 choices=("weighted_loss", "numeric_rmse"),

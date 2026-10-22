@@ -1037,16 +1037,20 @@ export function RangeSlider({
   const [trackWidth, setTrackWidth] = useState(0);
   const range = Math.max(1, maximum - minimum);
   const ratio = Math.max(0, Math.min(1, (value - minimum) / range));
+  const scaleValues = Array.from({ length: range + 1 }, (_, index) => minimum + index);
+  const noTextSelection = Platform.OS === "web" ? ({ userSelect: "none", WebkitUserSelect: "none" } as any) : null;
   const setFromPosition = (event: any) => {
     if (!trackWidth) return;
     const x = Number(event.nativeEvent.locationX);
     if (!Number.isFinite(x)) return;
-    const position = Math.max(0, Math.min(1, x / trackWidth));
+    const sliderInset = 8;
+    const usableTrackWidth = Math.max(1, trackWidth - sliderInset * 2);
+    const position = Math.max(0, Math.min(1, (x - sliderInset) / usableTrackWidth));
     onChange(minimum + Math.round(position * range));
   };
   const adjust = (direction: number) => onChange(Math.max(minimum, Math.min(maximum, value + direction)));
   return (
-    <View style={styles.rangeSlider}>
+    <View style={[styles.rangeSlider, noTextSelection]}>
       <View style={styles.rangeSliderLabelRow}>
         <Text style={styles.label}>{label}</Text>
         <Text accessibilityLiveRegion="polite" style={styles.rangeSliderValue}>{value} {value === 1 ? 'unit' : 'units'}</Text>
@@ -1062,14 +1066,25 @@ export function RangeSlider({
         onMoveShouldSetResponder={() => true}
         onResponderGrant={setFromPosition}
         onResponderMove={setFromPosition}
-        style={styles.rangeSliderTouchArea}
+        style={[styles.rangeSliderTouchArea, noTextSelection]}
       >
         <View pointerEvents="none" style={styles.rangeSliderTrack}>
           <View style={[styles.rangeSliderProgress, { width: `${ratio * 100}%` }]} />
           <View style={[styles.rangeSliderThumb, { left: `${ratio * 100}%` }]} />
         </View>
       </View>
-      <View style={styles.rangeSliderEndpoints}><Text style={styles.rangeSliderEndpoint}>{minimum}</Text><Text style={styles.rangeSliderEndpoint}>{maximum}</Text></View>
+      <View style={styles.rangeSliderScaleMarks}>
+        {scaleValues.map((step) => (
+          <View key={step} style={styles.rangeSliderScaleSlot}>
+            <View style={[styles.rangeSliderScaleMark, step <= value && styles.rangeSliderScaleMarkActive]} />
+          </View>
+        ))}
+      </View>
+      <View style={styles.rangeSliderScale}>
+        {scaleValues.map((step) => (
+          <Text key={step} style={styles.rangeSliderScaleValue}>{step}</Text>
+        ))}
+      </View>
     </View>
   );
 }
@@ -1213,14 +1228,15 @@ const styles = StyleSheet.create({
     height: 38,
     border: "1px solid #D1D5DB",
     borderRadius: radius.medium,
-    paddingHorizontal: 16,
+    paddingLeft: 19,
+    paddingRight: 10,
     paddingVertical: 0,
     backgroundColor: "#FFF",
     color: colors.text,
     fontSize: 14,
     fontFamily: "Arial, sans-serif",
   } as never,
-  webDateInputDense: { boxSizing: "border-box", width: "100%", height: 40, border: "1px solid #D1D5DB", borderRadius: radius.small, paddingHorizontal: 16, paddingVertical: 0, backgroundColor: "#FFF", color: colors.text, fontSize: 14, fontFamily: "Arial, sans-serif" } as never,
+  webDateInputDense: { boxSizing: "border-box", width: "100%", height: 40, border: "1px solid #D1D5DB", borderRadius: radius.small, paddingLeft: 19, paddingRight: 10, paddingVertical: 0, backgroundColor: "#FFF", color: colors.text, fontSize: 14, fontFamily: "Arial, sans-serif" } as never,
   inputDense: { minHeight: 36, height: 36, paddingHorizontal: 8, paddingVertical: 0, fontSize: Platform.OS === "web" ? 13 : 15, borderRadius: radius.small },
   inputError: { borderColor: colors.danger },
   secureInput: { paddingRight: 48 },
@@ -1490,6 +1506,10 @@ const styles = StyleSheet.create({
   rangeSliderTrack: { height: 6, borderRadius: 4, backgroundColor: colors.border, justifyContent: "center" },
   rangeSliderProgress: { height: 6, borderRadius: 4, backgroundColor: colors.brand },
   rangeSliderThumb: { position: "absolute", marginLeft: -9, width: 18, height: 18, borderRadius: 9, borderWidth: 2, borderColor: colors.brand, backgroundColor: "#FFF", shadowColor: "#000", shadowOpacity: 0.16, shadowRadius: 2, elevation: 2 },
-  rangeSliderEndpoints: { flexDirection: "row", justifyContent: "space-between", marginTop: -2 },
-  rangeSliderEndpoint: { color: colors.textMuted, fontSize: 11 },
+  rangeSliderScaleMarks: { flexDirection: "row", justifyContent: "space-between", marginHorizontal: 8, height: 6, marginTop: 1 },
+  rangeSliderScaleSlot: { width: 2, marginHorizontal: -1, alignItems: "center" },
+  rangeSliderScaleMark: { width: 1, height: 5, backgroundColor: colors.border },
+  rangeSliderScaleMarkActive: { backgroundColor: colors.brand },
+  rangeSliderScale: { flexDirection: "row", justifyContent: "space-between", marginHorizontal: 8, marginTop: 1 },
+  rangeSliderScaleValue: { width: 16, marginHorizontal: -8, color: colors.textMuted, fontSize: 9, lineHeight: 12, textAlign: "center" },
 });

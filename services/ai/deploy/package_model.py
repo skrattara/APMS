@@ -26,6 +26,14 @@ def package_model(source: str | Path, output: str | Path) -> Path:
     metadata["training"] = {
         "source_counts": source_training.get("source_counts", {})
     }
+    if metadata.get("assessment_context_version", 0) == 1:
+        # Readiness must attest to learned assessment conditioning after
+        # packaging too. Preserve this aggregate count, never learner hashes,
+        # labels, optimizer state or the full training resume contract.
+        assessment_count = source_training.get("assessment_query_counts", {}).get("train", 0)
+        if isinstance(assessment_count, bool) or not isinstance(assessment_count, int) or assessment_count < 0:
+            raise ValueError("Assessment training count must be a nonnegative integer")
+        metadata["training"]["assessment_query_counts"] = {"train": assessment_count}
     # These training-only summaries and fingerprints are not used by serving
     # and could expose lineage about the dataset or a separately trained model.
     metadata.pop("training_baselines", None)

@@ -1,5 +1,5 @@
 import { createClient } from 'npm:@supabase/supabase-js@2.57.4'
-import { anonymizeAcademicData, anonymizeEvaluationValues, anonymizeSchemaRepresentation, opaqueRecordRef, restoreSchemaCategory, shuffleForProvider } from '../_shared/aiPrivacy.ts'
+import { anonymizeAcademicData, anonymizeEvaluationValues, anonymizeSchemaRepresentation, buildAssessmentTemporalContext, opaqueRecordRef, restoreSchemaCategory, shuffleForProvider } from '../_shared/aiPrivacy.ts'
 import { aiServiceConfigurationFromEnvironment, createAIServiceConnector, finalizeCustomServiceUsage, reserveCustomServiceUsage, safeAIServiceFailure, type AIServiceConfiguration, type AIServiceProbe, type CustomUsageClient } from '../_shared/aiService.ts'
 import { persistableAIScores } from '../_shared/persistableAIScores.ts'
 import defaultGradingSystem from '../_shared/defaultGradingSystem.json' with { type: 'json' }
@@ -436,12 +436,16 @@ async function handlePredictionRequest(request: Request, trace: RequestTrace): P
   const mapKnownStructuralRef = (value: string) => schemaPrivacyMap.ids.get(value)
   const assessmentRefs = new Map<string, string>()
   const assessmentIdsByRef = new Map<string, string>()
+  const assessmentContextCutoffMs = Date.now()
+  let assessmentRowsForContext: any[] = []
+  const assessmentScoringById = new Map<string, { mode: string; maximum: number; mapping: { value: unknown; percentage: number }[] }>()
   let safeAssessmentInstances: Record<string, unknown>[] = []
   if (inputFeatures.has('assessment_results') || inputFeatures.has('assessment_instance_details')) {
     const { data: assessmentRows, error: assessmentError } = await adminClient.from('assessments')
-      .select('id,type,component_key,maximum_score,grading_type_id,grading_group_id,grading_period_id,grading_instance_weight,optional')
+      .select('id,type,component_key,maximum_score,grading_type_id,grading_group_id,grading_period_id,grading_instance_weight,optional,assessment_date,due_at')
       .eq('class_record_id', body.class_id).neq('status', 'archived')
     if (assessmentError) return json({ error: 'Assessment instance context could not be verified' }, 503)
+    assessmentRowsForContext = assessmentRows ?? []
     const builtinAliases: Record<string, string> = { start_of_class: 'soc', lets_practice: 'lp', reflection: 'tb', wrap_up_quiz: 'wuq', project_checkin: 'cig', final_project: 'fo', 'start of class': 'soc', "let's practice": 'lp', reflection_work: 'tb', 'wrap-up quiz': 'wuq', project: 'fo', soc: 'soc', lp: 'lp', tb: 'tb', wuq: 'wuq', cig: 'cig', fo: 'fo' }
     const resolveType = (value: unknown) => typeof value === 'string' ? value : ''
     const resolveDefinition = (row: any) => {
@@ -463,6 +467,11 @@ async function handlePredictionRequest(request: Request, trace: RequestTrace): P
       assessmentIdsByRef.set(assessmentRef, row.id)
       if (!inputFeatures.has('assessment_instance_details') && !inputFeatures.has('assessment_results')) continue
       const scoring = component.assessmentDefinition.scoring
+      assessmentScoringById.set(row.id, {
+        mode: scoring.mode,
+        maximum,
+        mapping: Array.isArray(scoring.mapping) ? scoring.mapping.map((item: any) => ({ value: item.value, percentage: item.percentage })) : [],
+      })
       const safeScoring = scoring.mode === 'linear'
         ? { mode: 'linear', maximum_score: maximum }
         : { mode: scoring.mode, mapping: scoring.mapping.map((item: any) => ({ value: typeof item.value === 'string' ? mapKnownCategory(item.value) : item.value, percentage: item.percentage })) }
@@ -545,7 +554,9 @@ async function handlePredictionRequest(request: Request, trace: RequestTrace): P
     const model = configuration.model ?? 'custom-model'
     const connector = createAIServiceConnector(configuration, requestBoundFetch(trace))
     let probedWorkerStatus: AIServiceProbe | null = null
-    if (incompleteAssessmentInventory) {
+    let conditionedInputs: typeof safeInputs | null = null
+    let conditionedInstances: typeof safeAssessmentInstances | null = null
+    if (incompleteAssessmentInventory || outputFields.has('assessment_score_predictions')) {
       trace.phase = 'status'
       setRequestStage(trace, 'provider_status')
       try { probedWorkerStatus = await connector.probe() }
@@ -559,8 +570,75 @@ async function handlePredictionRequest(request: Request, trace: RequestTrace): P
         trace.failureCode = 'provider_unavailable'
         return json({ error: 'The custom AI service is not ready; no prediction request was sent.' }, 503, trace.failureCode)
       }
-      if (probedWorkerStatus.capabilities.partial_assessment_inventory !== true) {
+      if (outputFields.has('assessment_score_predictions') && probedWorkerStatus.capabilities.assessment_instance_conditioning !== true) {
+        return json({ error: 'The loaded model does not support assessment-specific score prediction. Update the model artifact or disable Assessment score predictions to continue with standing and risk forecasts.' }, 409, 'assessment_context_unsupported')
+      }
+      if (incompleteAssessmentInventory && probedWorkerStatus.capabilities.partial_assessment_inventory !== true) {
         return json({ error: 'The custom model does not advertise support for partial assessment inventories. Update the runtime image or disable Assessment score predictions for this test.' }, 409, 'partial_inventory_unsupported')
+      }
+      if (outputFields.has('assessment_score_predictions')) {
+        try {
+          const temporalContext = buildAssessmentTemporalContext(assessmentRowsForContext.map((row: any) => ({
+            id: row.id,
+            assessment_date: row.assessment_date ?? null,
+            due_at: row.due_at ?? null,
+          })), assessmentContextCutoffMs)
+          const undatedAssessmentIds = new Set(assessmentRowsForContext
+            .filter((row: any) => typeof row.assessment_date !== 'string' || !row.assessment_date)
+            .map((row: any) => String(row.id)))
+          conditionedInstances = safeAssessmentInstances.map((instance) => {
+            const assessmentId = assessmentIdsByRef.get(String(instance.assessment_ref))
+            const temporal = assessmentId ? temporalContext.get(assessmentId) : undefined
+            if (!temporal) throw new TypeError('Assessment context metadata is unavailable')
+            return { ...instance, ...temporal }
+          })
+          conditionedInputs = safeInputs.map((input) => {
+            const sourceRecords = body.inputs[input.original_index].records
+            const contextResults = anonymizeAcademicData(
+              { assessment_results: sourceRecords?.assessment_results },
+              true,
+              false,
+              mapKnownCategory,
+              (id) => assessmentRefs.get(id),
+              mapKnownStructuralRef,
+              {
+                version: 1,
+                cutoffMs: assessmentContextCutoffMs,
+                undatedAssessmentIds,
+                resolveValue: (source, assessmentId) => {
+                  const domain = assessmentScoringById.get(assessmentId)
+                  if (!domain) return undefined
+                  const raw = domain.mode === 'value_mapping'
+                    ? source.categorical_value ?? source.score ?? source.raw_score
+                    : source.raw_score ?? source.score
+                  if (typeof raw === 'number' && Number.isFinite(raw)) {
+                    if (domain.mode === 'linear') return raw >= 0 && raw <= domain.maximum ? raw : undefined
+                    return domain.mapping.some((entry) => typeof entry.value === 'number' && entry.value === raw) ? raw : undefined
+                  }
+                  if (typeof raw === 'string' && domain.mode === 'value_mapping'
+                    && domain.mapping.some((entry) => typeof entry.value === 'string' && entry.value === raw)) {
+                    // The v1 projector applies the privacy category mapping
+                    // once. Return the validated canonical value here so the
+                    // projector does not try to anonymize an already-anonymous
+                    // category a second time.
+                    if (mapKnownCategory(raw) === undefined) throw new TypeError('Assessment category is not in the active privacy map')
+                    return raw
+                  }
+                  return undefined
+                },
+              },
+            ).assessment_results
+            return {
+              ...input,
+              records: {
+                ...input.records,
+                ...(contextResults === undefined ? {} : { assessment_results: contextResults }),
+              },
+            }
+          })
+        } catch {
+          return json({ error: 'Recorded assessment values or dates do not match the active grading system.' }, 409, 'assessment_context_invalid')
+        }
       }
     }
     setRequestStage(trace, 'database_quota')
@@ -575,6 +653,8 @@ async function handlePredictionRequest(request: Request, trace: RequestTrace): P
 
     let workerStatus: AIServiceProbe
     let workerResults: Record<string, unknown>[]
+    let wireAssessmentInstances: typeof safeAssessmentInstances = safeAssessmentInstances
+    let wireInputs: typeof safeInputs = safeInputs
     try {
       if (!probedWorkerStatus) {
         trace.phase = 'status'
@@ -585,9 +665,14 @@ async function handlePredictionRequest(request: Request, trace: RequestTrace): P
         trace.failureCode = 'provider_unavailable'
         return json({ error: 'The selected custom AI service is not ready' }, 503, trace.failureCode)
       }
+      const useAssessmentConditioning = outputFields.has('assessment_score_predictions')
+        && workerStatus.capabilities.assessment_instance_conditioning === true
+      if (useAssessmentConditioning && (!conditionedInputs || !conditionedInstances)) throw new Error('Assessment context was not prepared')
+      wireAssessmentInstances = useAssessmentConditioning ? conditionedInstances! : safeAssessmentInstances
+      wireInputs = useAssessmentConditioning ? conditionedInputs! : safeInputs
       trace.phase = 'prediction'
       setRequestStage(trace, 'provider')
-      const requests = safeInputs.map((input) => ({
+      const requests = wireInputs.map((input) => ({
         record_id: input.record_ref,
         grading_system: safeGrading,
         evaluation_criteria: safeEvaluation,
@@ -603,7 +688,7 @@ async function handlePredictionRequest(request: Request, trace: RequestTrace): P
         },
         evaluation_values: input.factor_values,
         student_records: input.records,
-        ...(inputFeatures.has('assessment_instance_details') ? { assessment_instances: safeAssessmentInstances } : {}),
+        ...(inputFeatures.has('assessment_instance_details') ? { assessment_instances: wireAssessmentInstances } : {}),
       }))
       workerResults = await connector.predictBatch(requests)
     } catch (error) {
@@ -631,8 +716,8 @@ async function handlePredictionRequest(request: Request, trace: RequestTrace): P
         trace.failureCode = 'invalid_response'
         return json({ error: `The configured prediction provider returned an invalid prediction: ${validationError}` }, 502, trace.failureCode)
       }
-      const existingRefs = new Set<string>((((safeInputs[index].records as any)?.assessment_results ?? []).filter((item: any) => item?.score !== undefined || item?.percentage !== undefined || item?.categorical_value !== undefined).map((item: any) => String(item.assessment_ref))) as string[])
-      const assessmentValidation = validateAssessmentPredictions(result.assessment_predictions, safeAssessmentInstances as Record<string, any>[], outputFields, schemaPrivacyMap, existingRefs)
+      const existingRefs = new Set<string>((((wireInputs[index].records as any)?.assessment_results ?? []).filter((item: any) => item?.score !== undefined || item?.percentage !== undefined || item?.categorical_value !== undefined || item?.value !== undefined).map((item: any) => String(item.assessment_ref))) as string[])
+      const assessmentValidation = validateAssessmentPredictions(result.assessment_predictions, wireAssessmentInstances as Record<string, any>[], outputFields, schemaPrivacyMap, existingRefs)
       if (assessmentValidation.error) {
         trace.failureCode = 'invalid_response'
         return json({ error: `The configured prediction provider returned an invalid prediction: ${assessmentValidation.error}` }, 502, trace.failureCode)

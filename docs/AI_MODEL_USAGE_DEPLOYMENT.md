@@ -1,5 +1,7 @@
 # APMS forecasting model: data, evaluation, and deployment
 
+For the assessment-specific context-version-one model, use the [assessment upgrade guide](AI_ASSESSMENT_CONTEXT_UPGRADE.md). It covers the new typed context, matched training experiment, existing-artifact compatibility, Docker transfer commands and ordered gateway rollout. Rebuilding the runtime with the original artifact does not enable assessment-specific conditioning.
+
 This guide covers a controlled workflow for the isolated `services/ai` package. The model is advisory; APMS grading and evaluation remain authoritative. Do not use synthetic demonstrations as evidence of student-level accuracy or institutional validity. Keep student data inside approved institutional systems and keep provider credentials on the server side.
 
 ## 1. Prepare the environment

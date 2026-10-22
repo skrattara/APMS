@@ -163,8 +163,67 @@ function boundedNumber(value: unknown, minimum: number, maximum: number): number
   return parsed !== undefined && parsed >= minimum && parsed <= maximum ? parsed : undefined
 }
 
+const ASSESSMENT_CONTEXT_DAY_LIMIT = 36500
+const MILLISECONDS_PER_DAY = 86_400_000
+
+/**
+ * Project canonical assessment dates to request-local ordinal/relative context.
+ * The returned objects contain no identifiers or absolute date strings; callers
+ * should use the input row's id only as a private in-memory lookup key.
+ */
+export function buildAssessmentTemporalContext(
+  rows: readonly { id: string; assessment_date?: string | null; due_at?: string | null }[],
+  cutoffMs: number,
+): Map<string, { sequence: number; relative_day?: number; due_in_days?: number }> {
+  if (!Number.isFinite(cutoffMs)) throw new TypeError('Assessment context cutoff must be finite')
+  const parsed = rows.map((row) => {
+    if (!row || typeof row.id !== 'string' || !row.id) {
+      throw new TypeError('Assessment context requires canonical identifiers')
+    }
+    if (row.assessment_date != null && typeof row.assessment_date !== 'string') {
+      throw new TypeError('Assessment context contains an invalid assessment date')
+    }
+    const date = row.assessment_date == null || row.assessment_date === ''
+      ? undefined
+      : Date.parse(`${row.assessment_date}T00:00:00.000Z`)
+    if (date !== undefined && !Number.isFinite(date)) throw new TypeError('Assessment context contains an invalid assessment date')
+    const dueAt = typeof row.due_at === 'string' && row.due_at.length ? Date.parse(row.due_at) : undefined
+    if (dueAt !== undefined && !Number.isFinite(dueAt)) throw new TypeError('Assessment context contains an invalid due date')
+    return { id: row.id, date, dueAt }
+  })
+  const distinctDates = [...new Set(parsed.flatMap((row) => row.date === undefined ? [] : [row.date]))].sort((a, b) => a - b)
+  // Undated instances tie at sequence zero; dated ranks start at one. This
+  // encodes no arbitrary ordering for missing dates and keeps their time flag off.
+  const rankByDate = new Map(distinctDates.map((date, rank) => [date, rank + 1]))
+  const output = new Map<string, { sequence: number; relative_day?: number; due_in_days?: number }>()
+  for (const row of parsed) {
+    if (output.has(row.id)) throw new TypeError('Assessment context contains duplicate assessment identifiers')
+    const relativeDay = row.date === undefined ? undefined : (row.date - cutoffMs) / MILLISECONDS_PER_DAY
+    const dueInDays = row.dueAt === undefined ? undefined : (row.dueAt - cutoffMs) / MILLISECONDS_PER_DAY
+    output.set(row.id, {
+      sequence: row.date === undefined ? 0 : rankByDate.get(row.date)!,
+      ...(relativeDay !== undefined && Math.abs(relativeDay) <= ASSESSMENT_CONTEXT_DAY_LIMIT ? { relative_day: relativeDay } : {}),
+      ...(dueInDays !== undefined && Math.abs(dueInDays) <= ASSESSMENT_CONTEXT_DAY_LIMIT ? { due_in_days: dueInDays } : {}),
+    })
+  }
+  return output
+}
+
 /** Keeps numeric academic features only; it never forwards arbitrary record fields or strings. */
-export function anonymizeAcademicData(records: Record<string, unknown>, allowAssessmentData: boolean, allowAttendance: boolean, mapCategory?: (value: string) => string | undefined, mapAssessmentRef?: (value: string) => string | undefined, mapStructuralRef?: (value: string) => string | undefined) {
+export function anonymizeAcademicData(
+  records: Record<string, unknown>,
+  allowAssessmentData: boolean,
+  allowAttendance: boolean,
+  mapCategory?: (value: string) => string | undefined,
+  mapAssessmentRef?: (value: string) => string | undefined,
+  mapStructuralRef?: (value: string) => string | undefined,
+  assessmentContext?: {
+    version: 1
+    cutoffMs: number
+    resolveValue?: (source: Record<string, unknown>, assessmentId: string) => number | string | undefined
+    undatedAssessmentIds?: ReadonlySet<string>
+  },
+) {
   const output: Record<string, unknown> = {}
   if (allowAssessmentData) {
     for (const key of ['current_standing', 'predicted_standing', 'risk_probability', 'missing_assessment_count', 'recent_scores', 'period_grades', 'component_grades', 'group_grades']) {
@@ -185,7 +244,7 @@ export function anonymizeAcademicData(records: Record<string, unknown>, allowAss
       output.assessment_results = records.assessment_results.map((item) => {
         if (!item || typeof item !== 'object') return null
         const source = item as Record<string, unknown>
-        const safe: Record<string, number | string> = {}
+        const safe: Record<string, number | string | null> = {}
         const maximum = boundedNumber(source.maximum_score ?? source.max_score ?? source.maximum, 0.000001, 100000)
         const score = maximum === undefined ? undefined : boundedNumber(source.score ?? source.raw_score, 0, maximum)
         const percentage = boundedNumber(source.percentage ?? source.mapped_percentage, 0, 100)
@@ -202,6 +261,60 @@ export function anonymizeAcademicData(records: Record<string, unknown>, allowAss
         if (typeof assessmentId === 'string' && mapAssessmentRef) {
           const reference = mapAssessmentRef(assessmentId)
           if (reference !== undefined) safe.assessment_ref = reference
+        }
+        if (assessmentContext?.version === 1) {
+          // V1's result contract is intentionally smaller: only the opaque
+          // assessment reference and raw schema-domain value reach the model.
+          delete safe.score
+          delete safe.percentage
+          delete safe.maximum_score
+          delete safe.weight
+          delete safe.period_ref
+          delete safe.group_ref
+          delete safe.categorical_value
+          const assessmentId = source.assessmentRef ?? source.assessment_id
+          if (typeof assessmentId !== 'string' || !mapAssessmentRef) throw new TypeError('Assessment result has no valid reference')
+          const reference = mapAssessmentRef(assessmentId)
+          if (reference === undefined) throw new TypeError('Assessment result references an unknown assessment')
+          safe.assessment_ref = reference
+          if (!['raw_score', 'score', 'categorical_value'].some((key) => source[key] !== undefined && source[key] !== null)) {
+            // Frontend inventories can include a row for every assessment,
+            // with null score fields for work that has not been graded. Keep
+            // reference validation, then omit the row so it remains a query
+            // target. Non-null values still pass the strict domain resolver.
+            return null
+          }
+          const rawValue = assessmentContext.resolveValue
+            ? assessmentContext.resolveValue(source, assessmentId)
+            : source.categorical_value ?? source.score ?? source.raw_score
+          if (assessmentContext.resolveValue && typeof rawValue === 'number' && Number.isFinite(rawValue)) {
+            // The callback validates the value against the canonical assessment
+            // scoring mode and mapping, not client-supplied maxima.
+            safe.value = rawValue
+          } else if (typeof rawValue === 'number' && Number.isFinite(rawValue) && maximum !== undefined && rawValue >= 0 && rawValue <= maximum) {
+            safe.value = rawValue
+          } else if (typeof rawValue === 'string' && rawValue.length <= 100 && mapCategory) {
+            const mapped = mapCategory(rawValue)
+            if (mapped !== undefined) safe.value = mapped
+          } else if (typeof rawValue === 'number' && Number.isFinite(rawValue) && maximum === undefined) {
+            // The caller may already have validated a numeric mapping against
+            // the canonical grading schema, where the score is not a percentage.
+            safe.value = rawValue
+          } else {
+            throw new TypeError('Assessment result value is outside its grading domain')
+          }
+          const observedAtText = source.updated_at ?? source.observed_at
+          let observedDay: number | null = null
+          if (typeof observedAtText === 'string') {
+            const observedAt = Date.parse(observedAtText)
+            if (!Number.isFinite(observedAt)) throw new TypeError('Assessment result has an invalid observation time')
+            observedDay = (observedAt - assessmentContext.cutoffMs) / MILLISECONDS_PER_DAY
+            if (observedDay > 0) throw new TypeError('Assessment result observation is after the request cutoff')
+          }
+          if (assessmentContext.undatedAssessmentIds?.has(assessmentId)) observedDay = null
+          else if (observedAtText == null) observedDay = 0
+          safe.observed_day = observedDay
+          return safe
         }
         if (typeof source.periodId === 'string' && mapStructuralRef) {
           const reference = mapStructuralRef(source.periodId)
