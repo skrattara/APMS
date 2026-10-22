@@ -1840,8 +1840,19 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
       (auditSheets[0].sheet as any)['B3'] = { f: statusRanges.map((range) => `COUNTIF(${range},"PASS")`).join('+') || '0', v: formulaCells.length };
       (auditSheets[0].sheet as any)['B4'] = { f: statusRanges.map((range) => `COUNTIF(${range},"FAIL")`).join('+') || '0', v: 0 };
       (auditSheets[0].sheet as any)['B5'] = { f: 'IF(B4=0,"PASS","FAIL")', v: 'PASS' };
-      for (const entry of auditSheets) XLSX.utils.book_append_sheet(workbook, entry.sheet, entry.name);
       for (const page of gradebookSheets) XLSX.utils.book_append_sheet(workbook, page.sheet, page.name);
+      for (const entry of auditSheets) XLSX.utils.book_append_sheet(workbook, entry.sheet, entry.name);
+      const workbookMetadata = (workbook as any).Workbook ?? {};
+      const sheetMetadata = Array.isArray(workbookMetadata.Sheets) ? workbookMetadata.Sheets : [];
+      (workbook as any).Workbook = {
+        ...workbookMetadata,
+        Sheets: workbook.SheetNames.map((name, index) => ({
+          ...(sheetMetadata[index] ?? {}),
+          name,
+          Hidden: auditSheets.some((entry) => entry.name === name) ? 1 : 0,
+        })),
+        Views: [{ activeTab: 0, firstSheet: 0 }],
+      };
       const firstGradebookSheet = gradebookSheets[0]?.sheet;
       console.info('[Gradebook Excel export] Formula verification sample', {
         assessmentInputs: exportColumns.flatMap((column, index) => column.kind === 'assessment' ? [{
@@ -1858,10 +1869,6 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
           cachedValue: firstGradebookSheet?.[item.address]?.v,
         })),
       });
-      (workbook as any).Workbook = {
-        ...(workbook as any).Workbook,
-        Views: [{ activeTab: 0, firstSheet: 0, tabSelected: [true, ...Array(auditSheets.length + gradebookSheets.length - 1).fill(false)] }],
-      };
       const timestamp = new Date().toISOString().replace(/:/g, '-');
       const fileName = `apms-full-gradebook-${timestamp}.xlsx`;
       // SheetJS' shared-string writer calls `.match()` on each string cell
