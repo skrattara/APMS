@@ -1854,6 +1854,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
         Views: [{ activeTab: 0, firstSheet: 0 }],
       };
       const firstGradebookSheet = gradebookSheets[0]?.sheet;
+      for (const entry of auditSheets) XLSX.utils.book_set_sheet_visibility(workbook, entry.name, 1);
       console.info('[Gradebook Excel export] Formula verification sample', {
         assessmentInputs: exportColumns.flatMap((column, index) => column.kind === 'assessment' ? [{
           column: column.leafLabel,
