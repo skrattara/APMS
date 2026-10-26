@@ -5,10 +5,9 @@
 Set the Edge Function secrets after deploying the function. In the SQL Editor, store the scheduler connection values in Supabase Vault under these exact names:
 
 - `apms_project_url` — `https://<project-ref>.supabase.co`
-- `apms_publishable_key` — the project's publishable key
 - `apms_service_role_key` — the project's service-role key, stored only in Vault for the cron request
 
-The migration installs a 15-minute `pg_cron` dispatcher. It checks for due schedules and does nothing until all three Vault values are present. The System Admin can restore a stored scheduled backup with its **Restore** action. Scheduled backups are encrypted server-side when `BACKUP_ENCRYPTION_KEY` is set. Manual backups use the password supplied by the System Admin and are restored by selecting the JSON file and entering that password.
+The migration installs a 15-minute `pg_cron` dispatcher. It sends the service-role key only in the `apikey` header and does not send it as a bearer token. It checks for due schedules and does nothing until both Vault values are present. The System Admin can restore a stored scheduled backup with its **Restore** action. Scheduled backups are encrypted server-side when `BACKUP_ENCRYPTION_KEY` is set. Manual backups use the password supplied by the System Admin and are restored by selecting the JSON file and entering that password.
 
 The encrypted JSON format excludes Supabase Auth credentials and the `ai_provider_credentials` table. Authentication identities must already exist when their APMS profile data is restored. Restore updates rows that share primary keys with the backup and leaves rows created after that backup in place. It is an application-data restore, not a full PostgreSQL point-in-time restore.
 

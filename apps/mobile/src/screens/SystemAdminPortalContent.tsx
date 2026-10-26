@@ -1,6 +1,6 @@
 import { getErrorMessage } from '@/services/errors';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Modal, Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
+import { Modal, Platform, Pressable, ScrollView, StyleSheet, Switch, Text, useWindowDimensions, View } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 
 import { useAuth } from '@/auth/AuthProvider';
@@ -325,7 +325,9 @@ function Backups({ data, refresh, userId, toast }: Props) {
   const [restoreStoredId, setRestoreStoredId] = useState<string | null>(null);
   const [frequency, setFrequency] = useState<'daily' | 'weekly' | 'monthly'>(data.backupSchedule?.frequency ?? 'daily');
   const [retentionDays, setRetentionDays] = useState(String(data.backupSchedule?.retentionDays ?? 30));
+  const [runTimeUtc, setRunTimeUtc] = useState((data.backupSchedule?.runTimeUtc ?? '02:00').slice(0, 5));
   const [scheduleEnabled, setScheduleEnabled] = useState(data.backupSchedule?.enabled ?? false);
+  const [scheduleSettingsOpen, setScheduleSettingsOpen] = useState(false);
   const [savingSchedule, setSavingSchedule] = useState(false);
   const selectableBackups = data.backups.filter((backup) => !['deleted', 'running', 'queued'].includes(backup.status));
   const allBackupsSelected = selectableBackups.length > 0 && selectableBackups.every((backup) => selectedBackupIds.includes(backup.id));
@@ -346,6 +348,7 @@ function Backups({ data, refresh, userId, toast }: Props) {
   useEffect(() => {
     setFrequency(data.backupSchedule?.frequency ?? 'daily');
     setRetentionDays(String(data.backupSchedule?.retentionDays ?? 30));
+    setRunTimeUtc((data.backupSchedule?.runTimeUtc ?? '02:00').slice(0, 5));
     setScheduleEnabled(data.backupSchedule?.enabled ?? false);
   }, [data.backupSchedule]);
   const makeBackup = async (passwordProtected: boolean) => {
@@ -420,13 +423,38 @@ function Backups({ data, refresh, userId, toast }: Props) {
   const saveSchedule = async () => {
     const retention = Number(retentionDays);
     if (!Number.isInteger(retention) || retention < 1 || retention > 3650) return toast.show('Retention must be a whole number from 1 to 3,650 days.');
+    if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(runTimeUtc)) return toast.show('Enter a valid run time in 24-hour format (HH:MM).');
     setSavingSchedule(true);
     try {
-      await saveBackupSchedule(userId, { id: data.backupSchedule?.id, frequency, enabled: scheduleEnabled, retentionDays: retention });
+      await saveBackupSchedule(userId, { id: data.backupSchedule?.id, frequency, enabled: scheduleEnabled, retentionDays: retention, runTimeUtc });
       toast.show('Backup schedule saved. Scheduled execution requires the APMS backup scheduler to be enabled in Supabase.');
+      setScheduleSettingsOpen(false);
       refresh();
     } catch (cause) { toast.show(getErrorMessage(cause, 'Backup schedule could not be saved.')); }
     finally { setSavingSchedule(false); }
+  };
+  const closeScheduleSettings = () => {
+    if (savingSchedule) return;
+    setFrequency(data.backupSchedule?.frequency ?? 'daily');
+    setRetentionDays(String(data.backupSchedule?.retentionDays ?? 30));
+    setRunTimeUtc((data.backupSchedule?.runTimeUtc ?? '02:00').slice(0, 5));
+    setScheduleEnabled(data.backupSchedule?.enabled ?? false);
+    setScheduleSettingsOpen(false);
+  };
+  const updateRunTimeUtc = (value: string) => {
+    const digits = value.replace(/\D/g, '').slice(0, 4);
+    if (!digits) { setRunTimeUtc(''); return; }
+    const hourTens = Number(digits[0]);
+    if (hourTens > 2) return;
+    if (digits.length >= 2 && Number(digits.slice(0, 2)) > 23) return;
+    if (digits.length >= 3 && Number(digits[2]) > 5) return;
+    if (digits.length === 4 && Number(digits.slice(2, 4)) > 59) return;
+    setRunTimeUtc(digits.length > 2 ? `${digits.slice(0, 2)}:${digits.slice(2)}` : digits);
+  };
+  const finishRunTimeEntry = () => {
+    if (!/^(?:[01]\d|2[0-3]):[0-5]\d$/.test(runTimeUtc)) {
+      setRunTimeUtc((data.backupSchedule?.runTimeUtc ?? '02:00').slice(0, 5));
+    }
   };
   const openBackup = async (path: string) => {
     const popup = window.open('about:blank', '_blank');
@@ -449,30 +477,50 @@ function Backups({ data, refresh, userId, toast }: Props) {
         <Field label="Optional backup password" value={backupPassword} onChangeText={setBackupPassword} secureTextEntry autoCapitalize="none" placeholder="At least 12 characters for encryption" />
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
           <Button label="Create encrypted backup" loading={creating} disabled={creating || backupPassword.length < 12} onPress={() => void makeBackup(true)} />
-          <Button label="Create unencrypted backup" variant="secondary" loading={creating} disabled={creating} onPress={() => void makeBackup(false)} />
+          {/* <Button label="Create unencrypted backup" variant="secondary" loading={creating} disabled={creating} onPress={() => void makeBackup(false)} /> */}
         </View>
         <Text style={styles.sectionHelp}>Choose encrypted to protect the file with your password, or unencrypted to create it without one. Store unencrypted files only in a secure location.</Text>
         {latestBackupUrl ? <Button label={`Download ${latestBackupUrl.fileName}`} variant="secondary" onPress={() => window.open(latestBackupUrl.url, '_blank', 'noopener,noreferrer')} /> : null}
       </Card>
       <Card style={{ gap: 10 }}>
-        <Text style={styles.sectionTitle}>Automatic backups</Text>
-        <Text style={styles.sectionHelp}>Choose how often APMS creates a server-managed backup and how long to retain scheduled copies.</Text>
-        <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-end', gap: 12 }}>
-          <SelectField label="Frequency" value={frequency} options={[{ label: 'Daily', value: 'daily' }, { label: 'Weekly', value: 'weekly' }, { label: 'Monthly', value: 'monthly' }]} onChange={(value) => setFrequency(value as typeof frequency)} containerStyle={{ flex: 1, minWidth: 160 }} />
-          <Field label="Keep backups (days)" value={retentionDays} onChangeText={setRetentionDays} keyboardType="numeric" containerStyle={{ flex: 1, minWidth: 160 }} />
-          <Button label={scheduleEnabled ? 'Disable schedule' : 'Enable schedule'} variant="secondary" onPress={() => setScheduleEnabled((value) => !value)} />
-          <Button label="Save schedule" loading={savingSchedule} disabled={savingSchedule} onPress={() => void saveSchedule()} />
+        <View style={styles.sectionHeader}>
+          <View style={{ flex: 1, gap: 4 }}>
+            <Text style={styles.sectionTitle}>Automatic backups</Text>
+            <Text style={styles.sectionHelp}>Manage the frequency and retention of server-managed backups.</Text>
+          </View>
+          <Badge tone={data.backupSchedule?.enabled ? 'success' : 'neutral'}>{data.backupSchedule?.enabled ? 'Enabled' : 'Disabled'}</Badge>
         </View>
-        {data.backupSchedule ? <Text style={styles.sectionHelp}>{data.backupSchedule.enabled ? 'Enabled' : 'Disabled'} · Next scheduled run {date(data.backupSchedule.nextRunAt)} · Last run {date(data.backupSchedule.lastRunAt)}</Text> : null}
+        <Text style={styles.sectionHelp}>
+          {data.backupSchedule ? `${data.backupSchedule.frequency[0].toUpperCase()}${data.backupSchedule.frequency.slice(1)} · ${data.backupSchedule.runTimeUtc.slice(0, 5)} UTC · Keep ${data.backupSchedule.retentionDays} days · Next run ${date(data.backupSchedule.nextRunAt)}` : 'No automatic backup schedule has been saved.'}
+        </Text>
+        <View style={{ alignSelf: 'flex-start' }}><Button label="Manage schedule" variant="secondary" onPress={() => setScheduleSettingsOpen(true)} /></View>
       </Card>
       <View style={{ gap: 10, width: '100%' }}>
         <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
           <Text style={styles.sectionTitle}>Backup history</Text>
           {selectedBackupIds.length ? <Button compact label={`Delete selected (${selectedBackupIds.length})`} variant="danger" disabled={deletingBackups} onPress={() => setConfirmDeleteBackups(true)} /> : null}
         </View>
-        {data.backups.length ? <DataTable columns={['Select', 'Backup started', 'Backup completed', 'File', 'Size', 'Checksum (SHA-256)', 'Status', 'Details', 'Actions']} columnHeaderContent={[<Pressable key="select-all-backups" accessibilityRole="checkbox" accessibilityState={{ checked: allBackupsSelected }} accessibilityLabel={allBackupsSelected ? 'Deselect all backups' : 'Select all backups'} onPress={toggleAllBackups} style={styles.userCheckbox}><Text style={styles.userCheckboxMark}>{allBackupsSelected ? '✓' : ''}</Text></Pressable>]} rows={data.backups.map((row) => [<Pressable key={`select-${row.id}`} accessibilityRole="checkbox" accessibilityState={{ checked: selectedBackupIds.includes(row.id) }} accessibilityLabel={`${selectedBackupIds.includes(row.id) ? 'Deselect' : 'Select'} backup ${row.fileName ?? row.id}`} disabled={['deleted', 'running', 'queued'].includes(row.status)} onPress={() => toggleBackup(row.id)} style={[styles.userCheckbox, ['deleted', 'running', 'queued'].includes(row.status) && { opacity: 0.4 }]}><Text style={styles.userCheckboxMark}>{selectedBackupIds.includes(row.id) ? '✓' : ''}</Text></Pressable>, date(row.createdAt), date(row.completedAt), row.fileName ?? 'Backup', row.sizeBytes == null ? '—' : `${(row.sizeBytes / 1024 / 1024).toFixed(1)} MB`, row.checksum ?? '—', `${row.status[0].toUpperCase()}${row.status.slice(1)}`, row.safeError ?? '—', row.storagePath && row.status !== 'deleted' ? <View key={row.id} style={{ flexDirection: 'row', gap: 6 }}><Button compact label="Download" variant="secondary" onPress={() => void openBackup(row.storagePath!)} />{row.scheduleId ? <Button compact label="Restore" variant="secondary" onPress={() => setRestoreStoredId(row.id)} /> : null}</View> : '—'])} columnWidths={[42, 150, 150, 190, 80, 300, 96, 220, 220]} columnFlex={[0, 0, 0, 1.2, 0, 2, 0, 1, 0]} widthMode="container" formatCell={(cell, _row, columnIndex) => columnIndex === 6 && typeof cell === 'string' ? <Badge tone={cell === 'Completed' ? 'success' : cell === 'Failed' ? 'danger' : cell === 'Deleted' ? 'neutral' : 'warning'}>{cell}</Badge> : undefined} /> : <PageState kind="empty" title="No backups yet" message="Create a JSON backup to see it here." />}
+        {data.backups.length ? <DataTable columns={['Select', 'Backup started', 'Backup completed', 'Type', 'File', 'Size', 'Checksum (SHA-256)', 'Status', 'Details', 'Actions']} columnHeaderContent={[<Pressable key="select-all-backups" accessibilityRole="checkbox" accessibilityState={{ checked: allBackupsSelected }} accessibilityLabel={allBackupsSelected ? 'Deselect all backups' : 'Select all backups'} onPress={toggleAllBackups} style={styles.userCheckbox}><Text style={styles.userCheckboxMark}>{allBackupsSelected ? '✓' : ''}</Text></Pressable>]} rows={data.backups.map((row) => [<Pressable key={`select-${row.id}`} accessibilityRole="checkbox" accessibilityState={{ checked: selectedBackupIds.includes(row.id) }} accessibilityLabel={`${selectedBackupIds.includes(row.id) ? 'Deselect' : 'Select'} backup ${row.fileName ?? row.id}`} disabled={['deleted', 'running', 'queued'].includes(row.status)} onPress={() => toggleBackup(row.id)} style={[styles.userCheckbox, ['deleted', 'running', 'queued'].includes(row.status) && { opacity: 0.4 }]}><Text style={styles.userCheckboxMark}>{selectedBackupIds.includes(row.id) ? '✓' : ''}</Text></Pressable>, date(row.createdAt), date(row.completedAt), row.scheduleId ? 'Scheduled' : 'Manual', row.fileName ?? 'Backup', row.sizeBytes == null ? '—' : `${(row.sizeBytes / 1024 / 1024).toFixed(2)} MB`, row.checksum ?? '—', `${row.status[0].toUpperCase()}${row.status.slice(1)}`, row.safeError ?? '—', row.storagePath && row.status !== 'deleted' ? <View key={row.id} style={{ flexDirection: 'row', gap: 6 }}><Button compact label="Download" variant="secondary" onPress={() => void openBackup(row.storagePath!)} />{row.scheduleId ? <Button compact label="Restore" variant="secondary" onPress={() => setRestoreStoredId(row.id)} /> : null}</View> : '—'])} columnWidths={[42, 150, 150, 100, 190, 80, 300, 96, 220, 220]} columnFlex={[0, 0, 0, 0, 1.2, 0, 2, 0, 1, 0]} widthMode="container" formatCell={(cell, _row, columnIndex) => columnIndex === 7 && typeof cell === 'string' ? <Badge tone={cell === 'Completed' ? 'success' : cell === 'Failed' ? 'danger' : cell === 'Deleted' ? 'neutral' : 'warning'}>{cell}</Badge> : undefined} /> : <PageState kind="empty" title="No backups yet" message="Create a JSON backup to see it here." />}
       </View>
     </> : null}
+    <Dialog visible={scheduleSettingsOpen} title="Automatic backup schedule" onClose={closeScheduleSettings}>
+      <Text style={styles.dialogIntro}>Choose how often APMS creates a backup and how long scheduled copies are kept. The schedule is applied when you save.</Text>
+      <View style={styles.settingRow}>
+        <View style={styles.settingCopy}>
+          <Text style={styles.settingLabel}>Enable automatic backups</Text>
+          <Text style={styles.help}>When on, APMS creates backups on the saved schedule.</Text>
+        </View>
+        <Switch accessibilityLabel="Enable automatic backups" value={scheduleEnabled} onValueChange={setScheduleEnabled} trackColor={{ false: '#D0D5DD', true: colors.brand }} thumbColor="#FFFFFF" />
+      </View>
+      <SelectField label="Frequency" value={frequency} options={[{ label: 'Daily', value: 'daily' }, { label: 'Weekly', value: 'weekly' }, { label: 'Monthly', value: 'monthly' }]} onChange={(value) => setFrequency(value as typeof frequency)} />
+      <Field label="Run time (UTC, 24-hour HH:MM)" value={runTimeUtc} onChangeText={updateRunTimeUtc} onBlur={finishRunTimeEntry} maxLength={5} keyboardType="numbers-and-punctuation" placeholder="HH:MM (e.g. 14:30)" />
+      <Field label="Keep backups (days)" value={retentionDays} onChangeText={setRetentionDays} keyboardType="numeric" />
+      <Text style={styles.sectionHelp}>Scheduled time uses UTC. Execution also requires the APMS backup scheduler to be enabled in Supabase.</Text>
+      <View style={styles.dialogActions}>
+        <Button label="Cancel" variant="secondary" disabled={savingSchedule} onPress={closeScheduleSettings} />
+        <Button label="Save schedule" loading={savingSchedule} disabled={savingSchedule} onPress={() => void saveSchedule()} />
+      </View>
+    </Dialog>
     {activeTab === 'Restore' ? <>
       <Card style={{ gap: 10 }}>
         <Text style={styles.sectionTitle}>Restore from JSON</Text>

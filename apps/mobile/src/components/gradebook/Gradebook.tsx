@@ -46,6 +46,7 @@ import {
   valueMappingForType,
 } from './shared';
 import { componentLabel } from './model';
+import { GoogleClassroomSyncPanel } from './GoogleClassroomSyncPanel';
 export function Gradebook(props: GradebookProps) {
   type ScoreEdit = { key: string; before?: string; after?: string };
   type ScoreEditBatch = { view: 'assessment' | 'full'; changes: ScoreEdit[] };
@@ -218,6 +219,7 @@ export function Gradebook(props: GradebookProps) {
   }, [user?.id]);
 
   const selected = props.workspace.assessments.find((item) => item.id === assessmentId);
+  const selectedClass = props.classes.find((item) => item.id === props.selectedClassId);
   const selectedCategoryMapping = selected ? valueMappingForType(activeGradingSystem, selected.gradingTypeId ?? selected.component) : undefined;
   const effectiveScore = (enrollmentId: string) => values[enrollmentId] ?? String(storedAssessmentValue(props.workspace, enrollmentId, assessmentId) ?? '');
   const fullDirtyEntries = Object.entries(fullValues).flatMap(([key, value]) => {
@@ -488,6 +490,7 @@ export function Gradebook(props: GradebookProps) {
         subtitle={`Grades use ${activeGradingSystem.name}. Scores are provisional monitoring indicators; official records are kept in SWU SIS.`}
         action={
           <View style={styles.actions}>
+            {selectedClass ? <GoogleClassroomSyncPanel classId={props.selectedClassId} classLabel={`${selectedClass.code} · ${selectedClass.section}`} assessments={props.workspace.assessments} onToast={(message) => props.toast.show(message)} onRefresh={props.refresh} /> : null}
             <Button label="Edit assessment" variant="secondary" disabled={!selected} onPress={openEdit} />
             <Button label="Create assessment" onPress={openCreate} />
           </View>

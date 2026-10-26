@@ -35,6 +35,19 @@ function remapBackupUserIds(value: unknown, idMap: Map<string, string>): unknown
   }
   return value
 }
+function nextBackupRun(frequency: 'daily' | 'weekly' | 'monthly', runTimeUtc: string | null | undefined, after: Date) {
+  const [hours, minutes] = (runTimeUtc ?? '02:00').split(':').map(Number)
+  const next = new Date(after)
+  const advance = () => {
+    if (frequency === 'daily') next.setUTCDate(next.getUTCDate() + 1)
+    else if (frequency === 'weekly') next.setUTCDate(next.getUTCDate() + 7)
+    else next.setUTCMonth(next.getUTCMonth() + 1)
+    next.setUTCHours(hours || 0, minutes || 0, 0, 0)
+  }
+  advance()
+  while (next <= after) advance()
+  return next.toISOString()
+}
 async function recreateBackupAuthUsers(admin: any, snapshot: { tables: Record<string, unknown> }, currentUserId: string) {
   const profiles = snapshot.tables.profiles
   if (!Array.isArray(profiles)) return [] as string[]
@@ -212,10 +225,12 @@ Deno.serve(async (request) => {
   let input: { action?: string; password?: string; storagePath?: string; fileName?: string; backupId?: string }
   try { input = await request.json() } catch { return json({ error: 'Invalid JSON request' }, 400) }
   const authorization = request.headers.get('Authorization')
+  const apiKey = request.headers.get('apikey') ?? ''
   const serviceKey = Deno.env.get('SUPABASE_SERVICE_ROLE_KEY') ?? ''
   const schedulerToken = Deno.env.get('BACKUP_SCHEDULER_TOKEN')
   const scheduledCall = input.action === 'scheduled' && (
     (!!schedulerToken && request.headers.get('x-apms-backup-token') === schedulerToken)
+    || apiKey === serviceKey
     || authorization === `Bearer ${serviceKey}`
   )
   if (!scheduledCall && !authorization?.startsWith('Bearer ')) return json({ error: 'Authentication required' }, 401)
@@ -241,13 +256,10 @@ Deno.serve(async (request) => {
     if (scheduleError) return json({ error: scheduleError.message }, 500)
     const results: unknown[] = []
     for (const schedule of due ?? []) {
-      const next = new Date()
-      if (schedule.frequency === 'daily') next.setUTCDate(next.getUTCDate() + 1)
-      else if (schedule.frequency === 'weekly') next.setUTCDate(next.getUTCDate() + 7)
-      else next.setUTCMonth(next.getUTCMonth() + 1)
+      const nextRunAt = nextBackupRun(schedule.frequency, schedule.run_time_utc, new Date())
       try {
         const backup = await generateBackup(admin, schedule.created_by, password, schedule.id)
-        await admin.from('backup_schedules').update({ last_run_at: new Date().toISOString(), last_backup_id: backup.id, next_run_at: next.toISOString(), updated_at: new Date().toISOString() }).eq('id', schedule.id)
+        await admin.from('backup_schedules').update({ last_run_at: new Date().toISOString(), last_backup_id: backup.id, next_run_at: nextRunAt, updated_at: new Date().toISOString() }).eq('id', schedule.id)
         const cutoff = new Date(Date.now() - Number(schedule.retention_days) * 86_400_000).toISOString()
         const { data: expired } = await admin.from('backups').select('id,storage_path').eq('schedule_id', schedule.id).eq('status', 'completed').lt('created_at', cutoff)
         for (const item of expired ?? []) {
@@ -256,7 +268,7 @@ Deno.serve(async (request) => {
         }
         results.push({ id: backup.id, status: 'completed' })
       } catch (cause) {
-        await admin.from('backup_schedules').update({ last_run_at: new Date().toISOString(), next_run_at: next.toISOString(), updated_at: new Date().toISOString() }).eq('id', schedule.id)
+        await admin.from('backup_schedules').update({ last_run_at: new Date().toISOString(), next_run_at: nextRunAt, updated_at: new Date().toISOString() }).eq('id', schedule.id)
         results.push({ scheduleId: schedule.id, status: 'failed', error: cause instanceof Error ? cause.message : 'Backup failed' })
       }
     }

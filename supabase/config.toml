@@ -48,5 +48,8 @@ verify_jwt = false
 [functions.apms-backups]
 verify_jwt = false
 
+[functions.google-classroom]
+verify_jwt = false
+
 [functions.auth-mfa-policy]
 verify_jwt = true

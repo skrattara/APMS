@@ -15,7 +15,7 @@ export type AdminWorkspace = {
   logs: { id: string; createdAt: string; action: string; entityType: string; entityId: string | null; actorId: string | null }[];
   backups: { id: string; scope: string; status: string; createdAt: string; completedAt: string | null; fileName: string | null; sizeBytes: number | null; checksum: string | null; safeError: string | null; storagePath: string | null; scheduleId: string | null }[];
   backupRestores: { id: string; status: string; createdAt: string; completedAt: string | null; backupCreatedAt: string | null; checksum: string | null; safeError: string | null }[];
-  backupSchedule: { id: string; frequency: 'daily' | 'weekly' | 'monthly'; enabled: boolean; retentionDays: number; nextRunAt: string; lastRunAt: string | null } | null;
+  backupSchedule: { id: string; frequency: 'daily' | 'weekly' | 'monthly'; enabled: boolean; retentionDays: number; runTimeUtc: string; nextRunAt: string; lastRunAt: string | null } | null;
   settings: { key: string; value: unknown; updatedAt: string }[];
 };
 
@@ -147,7 +147,7 @@ export async function loadAdminWorkspace(): Promise<AdminWorkspace> {
     supabase.from('audit_logs').select('id,created_at,action,entity_type,entity_id,actor_id').order('created_at', { ascending: false }).limit(100),
     supabase.from('backups').select('id,scope,status,created_at,completed_at,file_name,size_bytes,checksum,safe_error,storage_path,schedule_id').order('created_at', { ascending: false }).limit(25),
     supabase.from('backup_restores').select('id,status,created_at,completed_at,backup_created_at,checksum,safe_error').order('created_at', { ascending: false }).limit(25),
-    supabase.from('backup_schedules').select('id,frequency,enabled,retention_days,next_run_at,last_run_at').order('updated_at', { ascending: false }).limit(1),
+    supabase.from('backup_schedules').select('id,frequency,enabled,retention_days,run_time_utc,next_run_at,last_run_at').order('updated_at', { ascending: false }).limit(1),
     supabase.from('system_settings').select('key,value,updated_at').order('key'),
   ]);
   const error = roles.error ?? departments.error ?? programs.error ?? terms.error ?? logs.error ?? backups.error ?? restores.error ?? schedules.error ?? settings.error;
@@ -161,7 +161,7 @@ export async function loadAdminWorkspace(): Promise<AdminWorkspace> {
     logs: (logs.data ?? []).map((row) => ({ id: row.id, createdAt: row.created_at, action: row.action, entityType: row.entity_type, entityId: row.entity_id, actorId: row.actor_id })),
     backups: (backups.data ?? []).map((row) => ({ id: row.id, scope: row.scope, status: row.status, createdAt: row.created_at, completedAt: row.completed_at, fileName: row.file_name, sizeBytes: row.size_bytes == null ? null : Number(row.size_bytes), checksum: row.checksum, safeError: row.safe_error, storagePath: row.storage_path, scheduleId: row.schedule_id })),
     backupRestores: (restores.data ?? []).map((row) => ({ id: row.id, status: row.status, createdAt: row.created_at, completedAt: row.completed_at, backupCreatedAt: row.backup_created_at, checksum: row.checksum, safeError: row.safe_error })),
-    backupSchedule: schedules.data?.[0] ? { id: schedules.data[0].id, frequency: schedules.data[0].frequency, enabled: schedules.data[0].enabled, retentionDays: schedules.data[0].retention_days, nextRunAt: schedules.data[0].next_run_at, lastRunAt: schedules.data[0].last_run_at } : null,
+    backupSchedule: schedules.data?.[0] ? { id: schedules.data[0].id, frequency: schedules.data[0].frequency, enabled: schedules.data[0].enabled, retentionDays: schedules.data[0].retention_days, runTimeUtc: schedules.data[0].run_time_utc, nextRunAt: schedules.data[0].next_run_at, lastRunAt: schedules.data[0].last_run_at } : null,
     settings: (settings.data ?? []).map((row) => ({ key: row.key, value: row.value, updatedAt: row.updated_at })),
   };
 }
@@ -291,13 +291,23 @@ export async function restoreStoredScheduledBackup(backupId: string) {
   return data as { id: string; restored_rows: number; recreated_auth_accounts?: number };
 }
 
-export async function saveBackupSchedule(userId: string, input: { id?: string; frequency: 'daily' | 'weekly' | 'monthly'; enabled: boolean; retentionDays: number }) {
+export async function saveBackupSchedule(userId: string, input: { id?: string; frequency: 'daily' | 'weekly' | 'monthly'; enabled: boolean; retentionDays: number; runTimeUtc: string }) {
   if (!supabase) throw new Error('APMS is not connected to Supabase.');
-  const intervalDays = input.frequency === 'daily' ? 1 : input.frequency === 'weekly' ? 7 : 30;
+  const now = new Date();
+  const nextRun = new Date(now);
+  if (input.frequency === 'weekly') nextRun.setUTCDate(nextRun.getUTCDate() + 7);
+  else if (input.frequency === 'monthly') nextRun.setUTCMonth(nextRun.getUTCMonth() + 1);
+  const [hours, minutes] = input.runTimeUtc.split(':').map(Number);
+  nextRun.setUTCHours(hours, minutes, 0, 0);
+  if (nextRun <= now) {
+    if (input.frequency === 'daily') nextRun.setUTCDate(nextRun.getUTCDate() + 1);
+    else if (input.frequency === 'weekly') nextRun.setUTCDate(nextRun.getUTCDate() + 7);
+    else nextRun.setUTCMonth(nextRun.getUTCMonth() + 1);
+  }
   const row = {
     ...(input.id ? { id: input.id } : {}),
-    frequency: input.frequency, enabled: input.enabled, retention_days: input.retentionDays,
-    next_run_at: new Date(Date.now() + intervalDays * 86_400_000).toISOString(), created_by: userId, updated_at: new Date().toISOString(),
+    frequency: input.frequency, enabled: input.enabled, retention_days: input.retentionDays, run_time_utc: input.runTimeUtc,
+    next_run_at: nextRun.toISOString(), created_by: userId, updated_at: new Date().toISOString(),
   };
   const { error } = input.id
     ? await supabase.from('backup_schedules').update(row).eq('id', input.id)
