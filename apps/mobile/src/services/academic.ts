@@ -1,6 +1,7 @@
 import { loadClassWorkspace, summarizeEnrollmentStanding, type ClassWorkspace, type FacultyClass } from './faculty';
 import { supabase } from './supabase';
 import { DEFAULT_EVALUATION_SYSTEM, removeStandaloneMasteryFactor, validateEvaluationSystem, type EvaluationDefinition } from '@apms/domain';
+import { institutionalSectionName, resolveInstitutionalSectionName, type AcademicSectionPattern } from '@/utils/academicSections';
 
 export type AcademicClass = FacultyClass & { workspace: ClassWorkspace; assignedFaculty: DepartmentFacultyMember[] };
 export type SavedEvaluationSystem = { id: string; name: string; description?: string; definition: EvaluationDefinition; version: number; updatedAt: string; updatedBy: string | null };
@@ -118,12 +119,26 @@ export async function loadAcademicWorkspace(userId: string): Promise<AcademicWor
     .order('created_at', { ascending: false });
   if (classError) throw classError;
 
+  const programIds = (programResult.data ?? []).map((program) => program.id);
+  const [{ data: sectionRows, error: sectionError }, { data: institutionSetting, error: institutionError }] = await Promise.all([
+    programIds.length ? client().from('program_sections').select('program_id,year_level,section_number').in('program_id', programIds) : Promise.resolve({ data: [], error: null }),
+    client().from('system_settings').select('value').eq('key', 'academic.institution_code').maybeSingle(),
+  ]);
+  if (sectionError) throw sectionError;
+  if (institutionError) throw institutionError;
+  const institutionCode = typeof institutionSetting?.value === 'string' && institutionSetting.value.trim() ? institutionSetting.value.trim().toUpperCase() : 'SWU';
+  const programCodeById = new Map((programResult.data ?? []).map((program) => [program.id, program.code]));
+  const sectionPatterns: AcademicSectionPattern[] = (sectionRows ?? []).flatMap((row: any) => {
+    const programCode = programCodeById.get(row.program_id);
+    return programCode ? [{ programCode, yearLevel: Number(row.year_level), sectionNumber: Number(row.section_number) }] : [];
+  });
+
   const classSummaries: FacultyClass[] = (classRows ?? []).map((row: any) => ({
     id: row.id,
     subjectId: row.subject_id,
     code: row.subjects?.code ?? '—',
     title: row.subjects?.title ?? 'Untitled subject',
-    section: row.section,
+    section: resolveInstitutionalSectionName(row.section, sectionPatterns, institutionCode),
     term: `${row.academic_terms?.academic_year ?? ''} ${row.academic_terms?.semester ?? ''}`.trim(),
     studentCount: Number(row.enrollments?.[0]?.count ?? 0),
     lectureUnits: Number(row.subjects?.lecture_units ?? 3),
@@ -312,18 +327,34 @@ export async function loadDepartmentSubjects(): Promise<AcademicSubject[]> {
   }));
 }
 
-export async function loadClassCreationReferences(): Promise<{
+export async function loadClassCreationReferences(departmentId?: string): Promise<{
   subjects: { id: string; label: string; lectureUnits: number; laboratoryUnits: number }[];
   terms: { id: string; label: string }[];
   faculty: DepartmentFacultyMember[];
+  institutionCode: string;
+  sections: { value: string; label: string; programCode: string; yearLevel: number; sectionNumber: number }[];
 }> {
-  const [subjectsResult, termsResult, facultyResult] = await Promise.all([
+  const [subjectsResult, termsResult, facultyResult, programsResult, sectionsResult, institutionResult] = await Promise.all([
     client().from('subjects').select('id,code,title,lecture_units,laboratory_units').eq('status', 'active').order('code'),
     client().from('academic_terms').select('id,academic_year,semester').in('status', ['active', 'planned']).order('starts_on', { ascending: false }),
     client().from('faculty_profiles').select('profile_id,employee_id,profiles!faculty_profiles_profile_id_fkey(first_name,last_name)').eq('status', 'active').order('employee_id'),
+    (() => {
+      const query = client().from('programs').select('id,code').eq('status', 'active').order('code');
+      return departmentId ? query.eq('department_id', departmentId) : query;
+    })(),
+    client().from('program_sections').select('program_id,year_level,section_number').order('year_level').order('section_number'),
+    client().from('system_settings').select('value').eq('key', 'academic.institution_code').maybeSingle(),
   ]);
-  const error = subjectsResult.error ?? termsResult.error ?? facultyResult.error;
+  const error = subjectsResult.error ?? termsResult.error ?? facultyResult.error ?? programsResult.error ?? sectionsResult.error ?? institutionResult.error;
   if (error) throw error;
+  const institutionCode = typeof institutionResult.data?.value === 'string' && institutionResult.data.value.trim() ? institutionResult.data.value.trim().toUpperCase() : 'SWU';
+  const programCodes = new Map((programsResult.data ?? []).map((row: any) => [row.id, row.code]));
+  const sections = (sectionsResult.data ?? []).flatMap((row: any) => {
+    const programCode = programCodes.get(row.program_id);
+    if (!programCode) return [];
+    const value = institutionalSectionName({ programCode, yearLevel: Number(row.year_level), sectionNumber: Number(row.section_number) }, institutionCode);
+    return [{ value, label: value, programCode, yearLevel: Number(row.year_level), sectionNumber: Number(row.section_number) }];
+  });
   return {
     subjects: (subjectsResult.data ?? []).map((row: any) => ({ id: row.id, label: `${row.code} · ${row.title}`, lectureUnits: Number(row.lecture_units ?? 3), laboratoryUnits: Number(row.laboratory_units ?? 0) })),
     terms: (termsResult.data ?? []).map((row: any) => ({ id: row.id, label: `${row.academic_year} · ${row.semester}` })),
@@ -332,6 +363,8 @@ export async function loadClassCreationReferences(): Promise<{
       name: `${row.profiles?.first_name ?? ''} ${row.profiles?.last_name ?? ''}`.trim() || row.employee_id,
       employeeId: row.employee_id,
     })),
+    institutionCode,
+    sections: [...new Map<string, typeof sections[number]>(sections.map((section) => [section.value, section] as const)).values()],
   };
 }
 

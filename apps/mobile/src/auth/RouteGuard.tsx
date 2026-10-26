@@ -12,6 +12,7 @@ export function RouteGuard({ role, children }: PropsWithChildren<{ role: Role }>
   const { user, loading } = useAuth();
   if (loading) return <View style={styles.loading}><ActivityIndicator color={colors.brand} size="large" /></View>;
   if (!user) return <Redirect href="/" />;
+  if (!user.onboardingComplete) return <Redirect href="/onboarding" />;
   if (user.role !== role) return <RouteStatusScreen kind="forbidden" onReturn={() => router.replace(`/portal/${user.role}/overview`)} />;
   return children;
 }

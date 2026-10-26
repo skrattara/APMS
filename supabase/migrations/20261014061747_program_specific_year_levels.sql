@@ -3,6 +3,24 @@ alter table public.year_levels
   add column if not exists program_id uuid references public.programs(id) on delete cascade;
 alter table public.year_levels drop constraint if exists year_levels_pkey;
 
+-- The legacy primary key is removed before program-scoped rows are created.
+-- Deduplicate any rows left by an earlier partial run, then enforce the new
+-- key immediately so the student backfill safely conflicts with levels 1-4.
+with ranked_year_levels as (
+  select ctid, row_number() over (
+    partition by program_id, level
+    order by ctid
+  ) as duplicate_number
+  from public.year_levels
+)
+delete from public.year_levels year_level
+using ranked_year_levels ranked
+where year_level.ctid = ranked.ctid
+  and ranked.duplicate_number > 1;
+
+create unique index if not exists year_levels_program_level_uidx
+  on public.year_levels(program_id, level);
+
 insert into public.year_levels(program_id, level, label, sort_order)
 select program.id, level.level, coalesce(existing.label, 'Year ' || level.level::text), level.level
 from public.programs program
@@ -21,7 +39,8 @@ on conflict do nothing;
 delete from public.year_levels where program_id is null;
 
 alter table public.year_levels alter column program_id set not null;
-alter table public.year_levels add constraint year_levels_pkey primary key (program_id, level);
+alter table public.year_levels
+  add constraint year_levels_pkey primary key using index year_levels_program_level_uidx;
 
 drop policy if exists year_levels_manage_academic_admin on public.year_levels;
 drop policy if exists year_levels_read_authenticated on public.year_levels;

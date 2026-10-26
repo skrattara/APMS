@@ -14,6 +14,7 @@ import { supabase } from '@/services/supabase';
 import { Badge, Button, Card, ConfirmDialog, DataTable, DateField, Field, MetricCard, PageState, RangeSlider, RefreshIndicator, SearchFilter, SelectField, TablePageSizeSelect, Tabs, useTablePaginationPreference, useToast } from '@/components/ui';
 import { formatStudentId, normalizeStudentId } from '@/utils/studentId';
 import { isValidStudentId } from '@/utils/studentId';
+import { resolveInstitutionalSectionName } from '@/utils/academicSections';
 import { useStudentIdValidation, useYearLevels } from '@/hooks/useAcademicOptions';
 import { useAnalyticsFilters } from '@/components/charts/AnalyticsFilters';
 import { ReportComposer, type ReportRecord, type ReportScopeOption } from '@/components/reports/ReportComposer';
@@ -38,8 +39,8 @@ const LazyGradebook = lazy(() => import('@/components/gradebook/Gradebook').then
 const LazyVisualizationPanel = lazy(() => import('@/components/charts/VisualizationPanel').then((module) => ({ default: module.VisualizationPanel })));
 
 const emptyWorkspace: ClassWorkspace = { students: [], assessments: [], scores: {}, categoricalScores: {}, criteria: null, attendanceSessions: [], attendance: {}, evaluations: {}, feedback: {} };
-type StudentFormState = { institutionalId: string; email: string; firstName: string; lastName: string; yearLevel: string; section: string };
-const emptyStudentForm: StudentFormState = { institutionalId: '', email: '', firstName: '', lastName: '', yearLevel: '1', section: '' };
+type StudentFormState = { institutionalId: string; email: string; firstName: string; middleName: string; lastName: string; suffix: string; yearLevel: string };
+const emptyStudentForm: StudentFormState = { institutionalId: '', email: '', firstName: '', middleName: '', lastName: '', suffix: '', yearLevel: '1' };
 export type AssessmentFormState = { title: string; component: SwunextAssessmentComponent; gradingTypeId: string; gradingGroupId: string; gradingPeriodId: string; instanceWeight: string; maximumScore: string; moduleNumber: string; date: string; gradingPeriod: string; source: 'manual' | 'csv' };
 export const emptyAssessmentForm: AssessmentFormState = { title: '', component: 'wrap_up_quiz', gradingTypeId: 'wuq', gradingGroupId: '', gradingPeriodId: 'p1', instanceWeight: '', maximumScore: '100', moduleNumber: '', date: new Date().toISOString().slice(0, 10), gradingPeriod: 'P1', source: 'manual' };
 
@@ -223,7 +224,7 @@ function buildAssessmentTrend(workspace: ClassWorkspace, visibleIds: Set<string 
 function useFacultyWorkspace(screen: string) {
   const { user } = useAuth();
   const [classes, setClasses] = useState<FacultyClass[]>([]);
-  const [references, setReferences] = useState<FacultyReferenceData>({ subjects: [], terms: [], programs: [] });
+  const [references, setReferences] = useState<FacultyReferenceData>({ subjects: [], terms: [], programs: [], institutionCode: 'SWU', sections: [] });
   const [selectedClassId, setSelectedClassId] = useState('');
   const [workspace, setWorkspace] = useState<ClassWorkspace>(emptyWorkspace);
   const [loading, setLoading] = useState(true);
@@ -244,8 +245,8 @@ function useFacultyWorkspace(screen: string) {
     if (hasLoadedWorkspace.current) setRefreshing(true);
     else setLoading(true);
     Promise.all([
-      loadFacultyClasses(screen === 'classes', user?.id),
-      screen === 'gradebook' || screen === 'records' || screen === 'overview' ? Promise.resolve({ subjects: [], terms: [], programs: [] } as FacultyReferenceData) : loadFacultyReferenceData(user?.id),
+      screen === 'deadlines' ? Promise.resolve([] as FacultyClass[]) : loadFacultyClasses(screen === 'classes', user?.id),
+      screen === 'gradebook' || screen === 'records' || screen === 'overview' || screen === 'deadlines' ? Promise.resolve({ subjects: [], terms: [], programs: [], institutionCode: 'SWU', sections: [] } as FacultyReferenceData) : loadFacultyReferenceData(user?.id),
     ])
       .then(([nextClasses, nextReferences]) => {
         if (!active) return;
@@ -253,7 +254,7 @@ function useFacultyWorkspace(screen: string) {
         setSelectedClassId((current) => nextClasses.some((item) => item.id === current) ? current : nextClasses[0]?.id ?? '');
         setClassesReady(true);
         setError(null);
-        if (!hasLoadedWorkspace.current) setLoading(screen !== 'classes' && screen !== 'overview' && nextClasses.length > 0);
+        if (!hasLoadedWorkspace.current) setLoading(screen !== 'classes' && screen !== 'overview' && screen !== 'deadlines' && nextClasses.length > 0);
       })
       .catch((cause) => {
         if (active) {
@@ -268,7 +269,7 @@ function useFacultyWorkspace(screen: string) {
   useEffect(() => {
     if (!classesReady) return;
     let active = true;
-    if (screen === 'classes') {
+    if (screen === 'classes' || screen === 'deadlines') {
       setWorkspace(emptyWorkspace);
       setWorkspaceClassId(null);
       setWorkspaceLoading(false);
@@ -302,7 +303,7 @@ function useFacultyWorkspace(screen: string) {
   }, [classesReady, selectedClassId, version, user?.id, screen]);
   useEffect(() => {
     const client = supabase;
-    if (!user || !client) return;
+    if (!user || !client || screen === 'deadlines') return;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const scheduleRefresh = () => {
       if (timer) clearTimeout(timer);
@@ -315,7 +316,7 @@ function useFacultyWorkspace(screen: string) {
     channel.subscribe();
     const poll = setInterval(refresh, 60_000);
     return () => { clearInterval(poll); if (timer) clearTimeout(timer); void client.removeChannel(channel); };
-  }, [refresh, user]);
+  }, [refresh, user, screen]);
   return { classes, references, selectedClassId, setSelectedClassId, workspace, loading, workspaceLoading, workspaceClassId, refreshing, error, classesReady, refresh, userId: user?.id ?? '' };
 }
 
@@ -442,6 +443,7 @@ export function FacultyLivePortalContent({ screen }: { screen: string }) {
         onNameGradebookVersion={nameGradebookScoreVersion}
       /></Suspense> : null}
       {screen === 'attendance' ? <Attendance {...props} /> : null}
+      {screen === 'deadlines' ? <FacultyGradeDeadlineRequests userId={state.userId} toast={toast} /> : null}
       {screen === 'criteria' ? <Criteria {...props} /> : null}
       {screen === 'risk' || screen === 'evaluation' ? <Risk {...props} /> : null}
       {screen === 'analytics' ? <Analytics {...props} /> : null}
@@ -459,7 +461,172 @@ type StateProps = ReturnType<typeof useFacultyWorkspace> & {
 };
 
 export function Heading({ title, subtitle, action }: { title: string; subtitle: string; action?: ReactNode }) {
-  return <View style={styles.heading}><View style={styles.flex}><Text accessibilityRole="header" style={styles.title}>{title}</Text><Text style={styles.subtitle}>{subtitle}</Text></View>{action}</View>;
+  return <View style={styles.heading}><View style={styles.headingCopy}><Text accessibilityRole="header" style={styles.title}>{title}</Text><Text style={styles.subtitle}>{subtitle}</Text></View>{action}</View>;
+}
+
+const facultyDeadlinePeriods = [
+  { key: 'overall', label: 'Overall encoding' },
+  { key: 'p1', label: 'Period 1' },
+  { key: 'p2', label: 'Period 2' },
+  { key: 'p3', label: 'Period 3' },
+];
+
+function FacultyGradeDeadlineRequests({ userId, toast }: { userId: string; toast: ReturnType<typeof useToast> }) {
+  const [requestFormOpen, setRequestFormOpen] = useState(false);
+  const [selectedPeriods, setSelectedPeriods] = useState<string[]>([]);
+  const [assignedClasses, setAssignedClasses] = useState<FacultyClass[]>([]);
+  const [selectedClassIds, setSelectedClassIds] = useState<string[] | null>(null);
+  const [classesLoading, setClassesLoading] = useState(true);
+  const [rationale, setRationale] = useState('');
+  const [deadlines, setDeadlines] = useState<Record<string, string>>({});
+  const [requests, setRequests] = useState<any[]>([]);
+  const [busy, setBusy] = useState(false);
+  const load = useCallback(async () => {
+    if (!supabase || !userId) return;
+    const [deadlineResult, requestResult] = await Promise.all([
+      supabase.from('grade_encoding_deadlines').select('period_key,deadline_at').eq('scope_type', 'system'),
+      supabase.from('grade_encoding_deadline_requests').select('id,class_record_ids,requested_periods,requested_deadlines,rationale,academic_admin_reason,status,review_note,created_at,reviewed_at').eq('requested_by', userId).eq('scope_type', 'faculty').order('created_at', { ascending: false }),
+    ]);
+    if (deadlineResult.error) throw deadlineResult.error;
+    if (requestResult.error) throw requestResult.error;
+    setDeadlines(Object.fromEntries((deadlineResult.data ?? []).map((row) => [row.period_key, String(row.deadline_at)])));
+    setRequests(requestResult.data ?? []);
+  }, [userId]);
+  useEffect(() => {
+    let active = true;
+    setClassesLoading(true);
+    void Promise.all([load(), loadFacultyClasses(false, userId)])
+      .then(([, classes]) => { if (active) setAssignedClasses(classes); })
+      .catch((cause) => { if (active) toast.show(getErrorMessage(cause, 'Grade deadline requests could not be loaded.')); })
+      .finally(() => { if (active) setClassesLoading(false); });
+    return () => { active = false; };
+  }, [load, toast, userId]);
+  const togglePeriod = (key: string) => setSelectedPeriods((current) => current.includes(key) ? current.filter((period) => period !== key) : [...current, key]);
+  const allClassIds = assignedClasses.map((item) => item.id);
+  const currentlySelectedClassIds = selectedClassIds ?? allClassIds;
+  const allClassesSelected = allClassIds.length > 0 && currentlySelectedClassIds.length === allClassIds.length;
+  const toggleClass = (classId: string) => setSelectedClassIds((current) => {
+    const selected = current ?? allClassIds;
+    const next = selected.includes(classId) ? selected.filter((id) => id !== classId) : [...selected, classId];
+    return next.length === allClassIds.length ? null : next;
+  });
+  const toggleAllClasses = () => setSelectedClassIds(null);
+  const submit = async () => {
+    if (!supabase) return toast.show('APMS is not connected to Supabase.');
+    if (classesLoading) return toast.show('Your assigned classes are still loading.');
+    if (!currentlySelectedClassIds.length) return toast.show('Select at least one assigned class.');
+    if (!selectedPeriods.length) return toast.show('Select at least one deadline period.');
+    if (rationale.trim().length < 10) return toast.show('Explain why the deadline change is needed (at least 10 characters).');
+    setBusy(true);
+    try {
+      const { error } = await supabase.rpc('submit_faculty_grade_deadline_request', {
+        p_requested_periods: selectedPeriods,
+        p_rationale: rationale.trim(),
+        p_class_record_ids: allClassesSelected ? null : currentlySelectedClassIds,
+      });
+      if (error) throw error;
+      toast.show('Your request was sent to your department Academic Admin.');
+      setSelectedPeriods([]);
+      setRationale('');
+      setRequestFormOpen(false);
+      await load();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Your deadline request could not be submitted.')); }
+    finally { setBusy(false); }
+  };
+  const showDate = (value: unknown) => {
+    if (typeof value !== 'string' || !value) return 'Not set';
+    const date = value.slice(0, 10);
+    return /^\d{4}-\d{2}-\d{2}$/.test(date) ? new Date(`${date}T12:00:00`).toLocaleDateString() : 'Not set';
+  };
+  const statusLabel = (status: string) => ({
+    pending_academic_admin: 'Waiting for Academic Admin',
+    pending_system_admin: 'Waiting for System Admin',
+    approved: 'Approved',
+    rejected: 'Rejected',
+  }[status] ?? status);
+  const statusTone = (status: string) => status === 'approved' ? 'success' : status === 'rejected' ? 'danger' : 'warning';
+  return <>
+    <Heading title="Grade encoding deadlines" subtitle="Request a change for the overall deadline, selected periods, or both in classes assigned to you. Your Academic Admin will set the dates and review your reason." />
+    <Card style={{ gap: 12 }}>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}>
+        <Text style={[styles.cardTitle, { marginBottom: 0 }]}>Current system-wide deadlines</Text>
+        <Button compact label={requestFormOpen ? 'Close request form' : 'Request deadline change'} variant={requestFormOpen ? 'secondary' : 'primary'} onPress={() => setRequestFormOpen((open) => !open)} />
+      </View>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+        {facultyDeadlinePeriods.map(({ key, label }) => <View key={key} style={{ flexGrow: 1, flexBasis: 150, backgroundColor: colors.canvas, borderRadius: 8, padding: 10 }}>
+          <Text style={styles.help}>{label}</Text><Text style={{ color: colors.text, fontSize: 13, fontWeight: '700', marginTop: 3 }}>{showDate(deadlines[key])}</Text>
+        </View>)}
+      </View>
+    </Card>
+    {requestFormOpen ? <Card style={{ gap: 12 }}>
+      <Text style={[styles.cardTitle, { marginBottom: 0 }]}>Request a deadline change</Text>
+      <Text style={styles.help}>Select the deadline periods you want reviewed. You cannot propose dates; your department Academic Admin will set them before sending the request to the System Admin.</Text>
+      <View style={{ gap: 8 }}>
+        <Text style={{ color: colors.text, fontSize: 12, fontWeight: '600' }}>Classes to include</Text>
+        {classesLoading ? <Text style={styles.help}>Loading your assigned classes…</Text> : assignedClasses.length ? <View style={{ gap: 6 }}>
+          <Pressable accessibilityRole="checkbox" accessibilityLabel="All assigned classes" accessibilityState={{ checked: allClassesSelected }} onPress={toggleAllClasses} style={{ minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 10, borderRadius: 8, backgroundColor: colors.canvas }}>
+            <AppIcon name={allClassesSelected ? 'checkboxChecked' : 'checkbox'} size={17} color={allClassesSelected ? colors.brand : colors.textMuted} /><Text style={{ color: colors.text, fontSize: 12, fontWeight: '600' }}>All assigned classes</Text><Text style={[styles.help, { marginLeft: 'auto' }]}>{assignedClasses.length}</Text>
+          </Pressable>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+            {assignedClasses.map((item) => {
+              const checked = currentlySelectedClassIds.includes(item.id);
+              return <Pressable key={item.id} accessibilityRole="checkbox" accessibilityLabel={`${item.code}, ${item.section}`} accessibilityState={{ checked }} onPress={() => toggleClass(item.id)} style={{ flexGrow: 1, flexBasis: 210, minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 9, paddingHorizontal: 10, borderWidth: 1, borderColor: checked ? colors.brand : colors.border, borderRadius: 8, backgroundColor: checked ? '#F5E9E6' : colors.surface }}>
+                <AppIcon name={checked ? 'checkboxChecked' : 'checkbox'} size={17} color={checked ? colors.brand : colors.textMuted} /><View style={{ flex: 1 }}><Text numberOfLines={1} style={{ color: colors.text, fontSize: 12, fontWeight: '600' }}>{item.code} · {item.section}</Text><Text numberOfLines={1} style={styles.help}>{item.title}{item.term ? ` · ${item.term}` : ''}</Text></View>
+              </Pressable>;
+            })}
+          </View>
+        </View> : <Text style={styles.help}>No active classes are currently assigned to you.</Text>}
+        {!classesLoading && assignedClasses.length ? <Text style={styles.help}>{currentlySelectedClassIds.length} of {assignedClasses.length} classes selected. All assigned classes are selected by default.</Text> : null}
+      </View>
+      <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+        {facultyDeadlinePeriods.map(({ key, label }) => {
+          const checked = selectedPeriods.includes(key);
+          return <Pressable key={key} accessibilityRole="checkbox" accessibilityState={{ checked }} onPress={() => togglePeriod(key)} style={{ minHeight: 38, flexDirection: 'row', alignItems: 'center', gap: 8, paddingHorizontal: 12, borderWidth: 1, borderColor: checked ? colors.brand : colors.border, borderRadius: 8, backgroundColor: checked ? '#F5E9E6' : colors.surface }}>
+            <AppIcon name={checked ? 'checkboxChecked' : 'checkbox'} size={16} color={checked ? colors.brand : colors.textMuted} /><Text style={{ color: colors.text, fontSize: 12 }}>{label}</Text>
+          </Pressable>;
+        })}
+      </View>
+      <Field label="Reason for request" value={rationale} onChangeText={setRationale} multiline numberOfLines={4} maxLength={1000} placeholder="Explain why you need more time to encode grades." style={{ paddingTop: 14, textAlignVertical: 'top' }} />
+      <View style={styles.actions}><Button label="Send to Academic Admin" loading={busy} disabled={busy || classesLoading || !assignedClasses.length || !currentlySelectedClassIds.length || !selectedPeriods.length || rationale.trim().length < 10} onPress={() => void submit()} /></View>
+    </Card> : null}
+    <Card style={{ gap: 10 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'baseline', justifyContent: 'space-between', gap: 8 }}>
+        <Text style={[styles.cardTitle, { marginBottom: 0 }]}>Your requests</Text>
+        {requests.length ? <Text style={styles.help}>{requests.length} total</Text> : null}
+      </View>
+      {requests.length ? requests.map((request) => {
+        const periods = (request.requested_periods ?? []).map((period: string) => facultyDeadlinePeriods.find((item) => item.key === period)?.label ?? period);
+        const classes = (request.class_record_ids ?? []).map((id: string) => assignedClasses.find((item) => item.id === id)).filter(Boolean).map((item: any) => `${item.code} · ${item.section}`);
+        const proposedDates = facultyDeadlinePeriods.filter(({ key }) => request.requested_deadlines?.[key]);
+        return <View key={request.id} style={{ gap: 10, borderTopWidth: 1, borderColor: colors.border, paddingTop: 12 }}>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-start', justifyContent: 'space-between', gap: 8 }}>
+            <View style={{ flex: 1, minWidth: 220, gap: 3 }}>
+              <Text style={{ color: colors.text, fontWeight: '700', fontSize: 13 }}>{periods.join(' · ')} · {classes.length || request.class_record_ids?.length || 0} classes</Text>
+              <Text style={styles.help}>Submitted {new Date(request.created_at).toLocaleString()}</Text>
+            </View>
+            <Badge tone={statusTone(request.status)}>{statusLabel(request.status)}</Badge>
+          </View>
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+            <View style={{ flex: 1, flexBasis: 220, gap: 4, backgroundColor: colors.canvas, borderRadius: 8, padding: 10 }}>
+              <Text style={{ color: colors.textMuted, fontSize: 11, fontWeight: '600' }}>Classes</Text>
+              <Text style={{ color: colors.text, fontSize: 12 }}>{classes.join(', ') || `${request.class_record_ids?.length ?? 0} selected`}</Text>
+            </View>
+            <View style={{ flex: 1, flexBasis: 220, gap: 4, backgroundColor: colors.canvas, borderRadius: 8, padding: 10 }}>
+              <Text style={{ color: colors.textMuted, fontSize: 11, fontWeight: '600' }}>Your reason</Text>
+              <Text style={{ color: colors.text, fontSize: 12 }}>{request.rationale}</Text>
+            </View>
+          </View>
+          {proposedDates.length ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}>
+            {proposedDates.map(({ key, label }) => <View key={key} style={{ flexGrow: 1, flexBasis: 120, backgroundColor: colors.canvas, borderRadius: 8, padding: 9 }}><Text style={styles.help}>{label}</Text><Text style={{ color: colors.text, fontSize: 12, fontWeight: '700', marginTop: 2 }}>{showDate(request.requested_deadlines[key])}</Text></View>)}
+          </View> : null}
+          {request.academic_admin_reason || request.review_note ? <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+            {request.academic_admin_reason ? <View style={{ flex: 1, flexBasis: 220, gap: 4, borderLeftWidth: 2, borderLeftColor: colors.brand, paddingHorizontal: 10, paddingVertical: 4 }}><Text style={{ color: colors.text, fontSize: 11, fontWeight: '600' }}>Academic Admin’s reason</Text><Text style={styles.help}>{request.academic_admin_reason}</Text></View> : null}
+            {request.review_note ? <View style={{ flex: 1, flexBasis: 220, gap: 4, borderLeftWidth: 2, borderLeftColor: colors.danger, paddingHorizontal: 10, paddingVertical: 4 }}><Text style={{ color: colors.text, fontSize: 11, fontWeight: '600' }}>Rejection reason</Text><Text style={styles.help}>{request.review_note}</Text></View> : null}
+          </View> : null}
+        </View>;
+      }) : <PageState kind="empty" title="No requests yet" message="Your deadline change requests and their review status will appear here." />}
+    </Card>
+  </>;
 }
 
 export function ClassSelect({ classes, selectedClassId, setSelectedClassId }: Pick<StateProps, 'classes' | 'selectedClassId' | 'setSelectedClassId'>) {
@@ -849,6 +1016,7 @@ function Classes(props: StateProps) {
   const [reqLectureUnits, setReqLectureUnits] = useState(3);
   const [reqLaboratoryUnits, setReqLaboratoryUnits] = useState(0);
   const [reqRationale, setReqRationale] = useState('');
+  const displaySection = (value: string) => resolveInstitutionalSectionName(value, props.references.sections, props.references.institutionCode);
 
   const loadRequests = useCallback(async () => {
     setLoadingReqs(true);
@@ -963,7 +1131,7 @@ function Classes(props: StateProps) {
           <Text style={styles.cardTitle}>My Class Requests</Text>
           <DataTable columns={['Subject', 'Section', 'Term', 'Lecture / lab units', 'Status', 'Submitted', 'Review note']} columnWidths={[220, 110, 110, 130, 90, 90, 180]} columnFlex={[0, 0, 0, 0, 0, 0, 1]} widthMode="container" rows={classRequests.map((request) => [
             request.subject,
-            request.section,
+            displaySection(request.section),
             request.term,
             `${request.lectureUnits} / ${request.laboratoryUnits}`,
             <Badge key={`class-request-${request.id}`} tone={request.status === 'approved' ? 'success' : request.status === 'rejected' ? 'danger' : 'warning'}>{request.status.charAt(0).toUpperCase() + request.status.slice(1)}</Badge>,
@@ -1026,7 +1194,7 @@ function Classes(props: StateProps) {
               }))}
               onChange={setTerm}
             />
-            <Field label="Section" value={section} onChangeText={setSection} placeholder="e.g. BSIT-3B" />
+            <SelectField label="Section" value={section} options={props.references.sections.map((item) => ({ label: item.value, value: item.value }))} onChange={setSection} placeholder={props.references.sections.length ? 'Select a section' : 'No sections configured'} />
             <Field label="Rationale (10–2000 characters)" value={classRationale} onChangeText={setClassRationale} multiline numberOfLines={3} maxLength={2000} placeholder="Explain what the class is for..." />
             <Text style={styles.help}>An Academic Admin will create the class and assign at least one faculty member before it appears in your class list.</Text>
             <Button label="Submit Class Request" loading={saving} disabled={!subject || !term || !section.trim() || classRationale.trim().length < 10} onPress={() => void submit()} />
@@ -1072,6 +1240,7 @@ function Students(props: StateProps) {
   const [programId, setProgramId] = useState(props.references.programs[0]?.id ?? '');
   const yearLevels = useYearLevels(programId);
   const [form, setForm] = useState<StudentFormState>(emptyStudentForm);
+  const selectedClass = props.classes.find((item) => item.id === props.selectedClassId);
   const studentIdError = validateStudentId && form.institutionalId.trim() && !isValidStudentId(form.institutionalId) ? 'Use a 12-digit number or 05-XXXX-XXXXXX.' : undefined;
   const [editingStudent, setEditingStudent] = useState<RosterStudent | null>(null);
   const [selectedEnrollmentIds, setSelectedEnrollmentIds] = useState<string[]>([]);
@@ -1080,11 +1249,12 @@ function Students(props: StateProps) {
   const [page, setPage] = useState(1);
   const [selectedPageSize, setSelectedPageSize] = useState(10);
   const [rosterFile, setRosterFile] = useState<{ name: string; kind: 'csv' | 'excel'; text?: string; data?: ArrayBuffer } | null>(null);
+  const importSectionOptions = useMemo(() => props.references.sections.filter((item) => item.programId === programId).map(({ programCode, yearLevel, sectionNumber }) => ({ programCode, yearLevel, sectionNumber, institutionCode: props.references.institutionCode })), [props.references.institutionCode, props.references.sections, programId]);
   const preview = useMemo(() => {
     if (!rosterFile) return [];
-    try { return rosterFile.kind === 'excel' ? previewRosterExcel(rosterFile.data!) : previewRosterCsv(rosterFile.text ?? ''); }
+    try { return rosterFile.kind === 'excel' ? previewRosterExcel(rosterFile.data!, importSectionOptions) : previewRosterCsv(rosterFile.text ?? '', importSectionOptions); }
     catch (cause) { return [{ rowNumber: 0, raw: {}, errors: [getErrorMessage(cause, 'Unable to read this file.')], duplicate: false, value: undefined }]; }
-  }, [rosterFile]);
+  }, [rosterFile, importSectionOptions]);
 
   const filtered = useMemo(() => {
     const normalizedQuery = query.toLowerCase();
@@ -1117,16 +1287,16 @@ function Students(props: StateProps) {
     setOpen(true);
   };
   const openEdit = (student: RosterStudent) => {
-    const [firstName, ...rest] = student.name.split(' ');
     setEditingStudent(student);
     setProgramId(student.programId);
     setForm({
       institutionalId: student.institutionalId,
       email: student.email,
-      firstName: firstName ?? '',
-      lastName: rest.join(' '),
+      firstName: student.firstName,
+      middleName: student.middleName,
+      lastName: student.lastName,
+      suffix: student.suffix,
       yearLevel: String(student.yearLevel),
-      section: student.section,
     });
     setEditOpen(true);
   };
@@ -1136,7 +1306,7 @@ function Students(props: StateProps) {
     if (validateStudentId && !isValidStudentId(form.institutionalId)) return;
     setSaving(true);
     try {
-      await addStudentToClass({ classId: props.selectedClassId, programId, ...form, yearLevel: Number(form.yearLevel) });
+      await addStudentToClass({ classId: props.selectedClassId, programId, ...form, yearLevel: Number(form.yearLevel), section: selectedClass?.section ?? '' });
       setOpen(false);
       resetForm();
       props.toast.show('Student added to the selected class roster.');
@@ -1153,7 +1323,7 @@ function Students(props: StateProps) {
     if (validateStudentId && !isValidStudentId(form.institutionalId)) return;
     setSaving(true);
     try {
-      await updateStudentDetails(editingStudent.studentId, { programId, ...form, yearLevel: Number(form.yearLevel) });
+      await updateStudentDetails(editingStudent.studentId, { programId, ...form, yearLevel: Number(form.yearLevel), section: selectedClass?.section ?? editingStudent.section });
       setEditOpen(false);
       resetForm();
       props.toast.show('Student details updated.');
@@ -1189,14 +1359,14 @@ function Students(props: StateProps) {
   };
 
   const downloadRosterTemplate = async () => {
-    const templateContent = 'institutional_id,first_name,last_name,email,year_level,section\n2024-0001,Juan,Dela Cruz,juan.delacruz@phinmaed.com,3,BSIT-3A\n2024-0002,Maria,Santos,maria.santos@phinmaed.com,3,BSIT-3A';
+    const templateContent = 'institutional_id,first_name,middle_name,last_name,suffix,email,year_level,section\n2024-0001,Juan,,Dela Cruz,,juan.delacruz@phinmaed.com,3,BSIT-3A\n2024-0002,Maria,,Santos,,maria.santos@phinmaed.com,3,BSIT-3A';
     if (Platform.OS === 'web') {
       const XLSX = await import('xlsx-js-style');
       const workbook = XLSX.utils.book_new();
       const worksheet = XLSX.utils.aoa_to_sheet([
-        ['institutional_id', 'first_name', 'last_name', 'email', 'year_level', 'section'],
-        [52324123456, 'Juan', 'Dela Cruz', 'juan.delacruz@phinmaed.com', 3, 'BSIT-3A'],
-        [52324123457, 'Maria', 'Santos', 'maria.santos@phinmaed.com', 3, 'BSIT-3A'],
+        ['institutional_id', 'first_name', 'middle_name', 'last_name', 'suffix', 'email', 'year_level', 'section'],
+        [52324123456, 'Juan', '', 'Dela Cruz', '', 'juan.delacruz@phinmaed.com', 3, 'BSIT-3A'],
+        [52324123457, 'Maria', '', 'Santos', '', 'maria.santos@phinmaed.com', 3, 'BSIT-3A'],
       ]);
       const institutionalIdFormat = '00-0000-000000';
       worksheet.A2.z = institutionalIdFormat;
@@ -1204,7 +1374,7 @@ function Students(props: StateProps) {
       for (let row = 4; row <= 1001; row += 1) {
         worksheet[`A${row}`] = { t: 's', v: '', z: institutionalIdFormat };
       }
-      worksheet['!ref'] = 'A1:F1001';
+      worksheet['!ref'] = 'A1:H1001';
       XLSX.utils.book_append_sheet(workbook, worksheet, 'Roster');
       const output = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
       const url = URL.createObjectURL(new Blob([output], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
@@ -1237,8 +1407,8 @@ function Students(props: StateProps) {
     setSaving(true);
     try {
       const result = rosterFile.kind === 'excel'
-        ? await importRosterExcel(props.selectedClassId, programId, rosterFile.name, rosterFile.data!)
-        : await importRosterCsv(props.selectedClassId, programId, rosterFile.name, rosterFile.text!);
+        ? await importRosterExcel(props.selectedClassId, programId, rosterFile.name, rosterFile.data!, importSectionOptions)
+        : await importRosterCsv(props.selectedClassId, programId, rosterFile.name, rosterFile.text!, importSectionOptions);
       props.toast.show(`Roster import complete: ${result.success} imported, ${result.failures} rejected.`);
       setCsvOpen(false);
       setRosterFile(null);
@@ -1250,7 +1420,6 @@ function Students(props: StateProps) {
     }
   };
 
-  const selectedClass = props.classes.find((item) => item.id === props.selectedClassId);
   const aiRosterPrompt = `You are helping me format a class roster for import into APMS.
 
 I have attached my current class roster and the APMS Excel roster template. Reformat the current roster to match the template exactly and return a completed .xlsx workbook.
@@ -1261,9 +1430,9 @@ Target APMS class context:
 - Term: ${selectedClass?.term ?? '[use the selected APMS term]'}
 
 Requirements:
-- Use the template's column names and order: institutional_id, first_name, last_name, email, year_level, section.
-- Map equivalent headers such as Student Number or Student ID to institutional_id, Given Name to first_name, Surname to last_name, Email Address to email, Year or Grade Level to year_level, and Class to section.
-- Split full names into first_name and last_name when necessary.
+- Use the template's column names and order: institutional_id, first_name, middle_name, last_name, suffix, email, year_level, section.
+- Map equivalent headers such as Student Number or Student ID to institutional_id, Given Name to first_name, Middle Name to middle_name, Surname to last_name, name suffix to suffix, Email Address to email, Year or Grade Level to year_level, and Class to section.
+- Split full names into first_name, middle_name, last_name, and suffix when present.
 - Normalize email addresses to lowercase and remove unnecessary spaces.
 - Use each student's actual section and year level from the current roster. Do not copy the template's example section or year level. If the roster does not contain a student's year level or section, leave it blank and put that row in Needs Review.
 - Preserve every student and do not silently discard any row.
@@ -1316,19 +1485,20 @@ Requirements:
       {filtered.length ? (
           <>
           <DataTable
-            columns={['Select', 'Student ID', 'Name', 'Email', 'Program', 'Year', 'Status', 'Edit']}
+            columns={['Select', 'Student ID', 'Last Name', 'First name', 'Middle name', 'Email', 'Year', 'Status', 'Edit']}
             rows={pageStudents.map((student) => [
               <Pressable key={`select-${student.enrollmentId}`} accessibilityRole="checkbox" accessibilityState={{ checked: selectedEnrollmentIds.includes(student.enrollmentId) }} accessibilityLabel={`Select ${student.name}`} onPress={() => toggleStudentSelection(student.enrollmentId)} style={[styles.rosterCheckbox, selectedEnrollmentIds.includes(student.enrollmentId) && styles.rosterCheckboxSelected]}><Text style={styles.rosterCheckboxMark}>{selectedEnrollmentIds.includes(student.enrollmentId) ? '✓' : ''}</Text></Pressable>,
               student.institutionalId,
-              student.name,
+              [student.lastName, student.suffix].filter(Boolean).join(' ') || '—',
+              student.firstName,
+              student.middleName || '—',
               student.email,
-              student.program,
               String(student.yearLevel),
               'Active',
               <Button key={`edit-${student.enrollmentId}`} label="Edit" variant="secondary" onPress={() => openEdit(student)} />,
             ])}
-            columnWidths={[46, 145, 190, 250, 112, 80, 96, 104]}
-            columnFlex={[0, 0, 1.2, 1.8, 0, 0, 0, 0]}
+            columnWidths={[46, 145, 185, 190, 125, 240, 80, 96, 104]}
+            columnFlex={[0, 0, 1, 1.4, 0.8, 1.5, 0, 0, 0]}
             columnHeaderContent={[
               <Pressable accessibilityRole="checkbox" accessibilityLabel="Select all students on this page" accessibilityState={{ checked: pageSelectionState === 'all' }} accessibilityHint={pageSelectionState === 'some' ? 'Some students on this page are selected.' : undefined} onPress={selectVisibleStudents} style={[styles.rosterCheckbox, pageSelectionState === 'all' && styles.rosterCheckboxSelected]}>
                 <Text style={styles.rosterCheckboxMark}>{pageSelectionState === 'all' ? '✓' : pageSelectionState === 'some' ? '−' : ''}</Text>
@@ -1345,30 +1515,40 @@ Requirements:
       <Dialog visible={open} title="Add student to class" onClose={() => { setOpen(false); resetForm(); }}>
         <SelectField label="Program" value={programId} options={props.references.programs.map((item) => ({ label: `${item.code} · ${item.name}`, value: item.id }))} onChange={setProgramId} />
         <View style={styles.formGrid}>
-          <Field label="Student ID" value={form.institutionalId} error={studentIdError} onChangeText={(value) => setForm({ ...form, institutionalId: value })} />
-          <Field label="Email" value={form.email} onChangeText={(value) => setForm({ ...form, email: value })} />
-          <Field label="First name" value={form.firstName} onChangeText={(value) => setForm({ ...form, firstName: value })} />
-          <Field label="Last name" value={form.lastName} onChangeText={(value) => setForm({ ...form, lastName: value })} />
+          <View style={{ width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
+            <Field label="First name" value={form.firstName} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={(value) => setForm({ ...form, firstName: value })} />
+            <Field label="Middle name (optional)" value={form.middleName} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={(value) => setForm({ ...form, middleName: value })} />
+            <Field label="Last name" value={form.lastName} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={(value) => setForm({ ...form, lastName: value })} />
+            <Field label="Suffix (optional)" value={form.suffix} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={(value) => setForm({ ...form, suffix: value })} />
+          </View>
+          <View style={{ width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
+            <Field label="Student ID" value={form.institutionalId} error={studentIdError} containerStyle={{ flex: 1, flexBasis: 220, minWidth: 180 }} onChangeText={(value) => setForm({ ...form, institutionalId: value })} />
+            <Field label="Email" value={form.email} containerStyle={{ flex: 1, flexBasis: 220, minWidth: 180 }} onChangeText={(value) => setForm({ ...form, email: value })} />
+          </View>
           <SelectField label="Year level" value={form.yearLevel} options={yearLevels.map((item) => ({ label: item.label, value: String(item.level) }))} onChange={(value) => setForm({ ...form, yearLevel: value })} />
-          <Field label="Section" value={form.section} onChangeText={(value) => setForm({ ...form, section: value })} />
         </View>
         <Button label="Add to roster" loading={saving} disabled={Boolean(studentIdError)} onPress={() => void add()} />
       </Dialog>
       <Dialog visible={editOpen} title="Edit student details" onClose={() => { setEditOpen(false); resetForm(); }}>
         <SelectField label="Program" value={programId} options={props.references.programs.map((item) => ({ label: `${item.code} · ${item.name}`, value: item.id }))} onChange={setProgramId} />
         <View style={styles.formGrid}>
-          <Field label="Student ID" value={form.institutionalId} error={studentIdError} onChangeText={(value) => setForm({ ...form, institutionalId: value })} />
-          <Field label="Email" value={form.email} onChangeText={(value) => setForm({ ...form, email: value })} />
-          <Field label="First name" value={form.firstName} onChangeText={(value) => setForm({ ...form, firstName: value })} />
-          <Field label="Last name" value={form.lastName} onChangeText={(value) => setForm({ ...form, lastName: value })} />
+          <View style={{ width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
+            <Field label="First name" value={form.firstName} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={(value) => setForm({ ...form, firstName: value })} />
+            <Field label="Middle name (optional)" value={form.middleName} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={(value) => setForm({ ...form, middleName: value })} />
+            <Field label="Last name" value={form.lastName} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={(value) => setForm({ ...form, lastName: value })} />
+            <Field label="Suffix (optional)" value={form.suffix} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={(value) => setForm({ ...form, suffix: value })} />
+          </View>
+          <View style={{ width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
+            <Field label="Student ID" value={form.institutionalId} error={studentIdError} containerStyle={{ flex: 1, flexBasis: 220, minWidth: 180 }} onChangeText={(value) => setForm({ ...form, institutionalId: value })} />
+            <Field label="Email" value={form.email} containerStyle={{ flex: 1, flexBasis: 220, minWidth: 180 }} onChangeText={(value) => setForm({ ...form, email: value })} />
+          </View>
           <SelectField label="Year level" value={form.yearLevel} options={yearLevels.map((item) => ({ label: item.label, value: String(item.level) }))} onChange={(value) => setForm({ ...form, yearLevel: value })} />
-          <Field label="Section" value={form.section} onChangeText={(value) => setForm({ ...form, section: value })} />
         </View>
         <Button label="Save student details" loading={saving} disabled={Boolean(studentIdError)} onPress={() => void saveEdit()} />
       </Dialog>
       <Dialog visible={csvOpen} title="Import roster" onClose={() => setCsvOpen(false)} footer={<View style={styles.dialogFooter}><Button label="Confirm import" loading={saving} disabled={!preview.some((row) => !row.errors.length)} onPress={() => void importRoster()} /></View>}>
         <SelectField label="Program for imported rows" value={programId} options={props.references.programs.map((item) => ({ label: `${item.code} · ${item.name}`, value: item.id }))} onChange={setProgramId} />
-        <Text style={styles.help}>Smart formatting recognizes common headers such as Student Number, Name, Email, Year, and Section. An official student number is still required; APMS will not invent one.</Text>
+        <Text style={styles.help}>Smart formatting recognizes common headers such as Student Number, Name, Email, Year, and Section. Section names are checked against the selected program and recognized short or institution-wide names are converted to the program format. An official student number is still required; APMS will not invent one.</Text>
         <View style={styles.actions}>
           <Button label="Choose Excel or CSV" variant="secondary" onPress={() => void chooseRosterFile()} />
           <Button label="Download Excel template" variant="ghost" onPress={() => void downloadRosterTemplate()} />
@@ -1385,7 +1565,7 @@ Requirements:
               rows={preview.map((row) => [
                 String(row.rowNumber),
                 formatStudentId(row.raw.institutional_id ?? '—'),
-                `${row.raw.first_name ?? ''} ${row.raw.last_name ?? ''}`.trim(),
+                [row.raw.first_name, row.raw.middle_name, row.raw.last_name, row.raw.suffix].filter(Boolean).join(' '),
                 row.errors.join('; ') || 'Valid',
               ])}
             />
@@ -2552,7 +2732,7 @@ function Analytics(props: StateProps) {
       <View style={styles.analyticsCharts}><LazyVisualizationPanel title="Student score histogram" description="Filtered continuous SWUNEXT scores grouped into score bands." data={scores} type="histogram" suffix="%" /><LazyVisualizationPanel title="Risk distribution" description={`Applied criteria: ${evaluationDefinition.name}`} data={riskDistribution} type="pie" /><LazyVisualizationPanel title="Passing rule status" description="Binary pass and not yet passing classification." data={passFail} type="pie" /></View>
       <LazyVisualizationPanel title="Assessment trend" description="Mean assessment score over time for students matching these filters." data={assessmentTrend} type="line" suffix="%" />
     </Suspense>
-    <Card><Text style={styles.help}>P1 and P2 are running cumulative views only. Final grade uses P3 effortful learning at 55% and FE mastery at 45%. Exports contain APMS monitoring data only and are not SIS submission files.</Text></Card>
+    {/* <Card><Text style={styles.help}>P1 and P2 are running cumulative views only. Final grade uses P3 effortful learning at 55% and FE mastery at 45%. Exports contain APMS monitoring data only and are not SIS submission files.</Text></Card> */}
     <ReportComposer title="Faculty Class Monitoring Report" scopeLabel={allClasses ? 'All classes assigned to me' : selectedClass ? `${selectedClass.code} · ${selectedClass.section}` : 'Assigned class'} description="Provisional student standing and advisory risk for your assigned class scope." rows={reportRows} scopeOptions={reportScopeOptions} />
   </>;
 }

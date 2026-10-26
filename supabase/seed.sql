@@ -63,7 +63,9 @@ on conflict do nothing;
 
 insert into public.system_settings (key, value) values
   ('security.session_minutes', '60'),
-  ('security.mfa_required_roles', '["system_admin"]'),
+  ('security.mfa_required', 'false'),
+  ('security.mfa_required_roles', '[]'),
+  ('security.mfa_required_departments', '[]'),
   ('backup.retention_days', '30'),
   ('ai.enabled', 'true')
 on conflict (key) do nothing;

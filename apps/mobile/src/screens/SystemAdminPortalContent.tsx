@@ -1,16 +1,18 @@
 import { getErrorMessage } from '@/services/errors';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Modal, Pressable, StyleSheet, Text, View } from 'react-native';
+import { Modal, Platform, Pressable, ScrollView, StyleSheet, Text, useWindowDimensions, View } from 'react-native';
 import * as DocumentPicker from 'expo-document-picker';
 
 import { useAuth } from '@/auth/AuthProvider';
+import * as Linking from 'expo-linking';
 import { supabase } from '@/services/supabase';
+import { AppIcon } from '@/components/Icon';
 import { Badge, Button, Card, ConfirmDialog, DataTable, DateField, Field, MetricCard, PageState, RefreshIndicator, SelectField, Tabs, useToast } from '@/components/ui';
 import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
 import { ReportComposer } from '@/components/reports/ReportComposer';
 import { AIServiceSettings } from '@/components/AIServiceSettings';
 import { Settings as AccountSettings } from '@/screens/AppPortalScreen';
-import { createJsonBackup, createManagedUser, deleteProgram, loadAdminWorkspace, restoreJsonBackup, restoreStoredScheduledBackup, saveAcademicTerm, saveBackupSchedule, saveDepartment, saveProgram, saveSystemSetting, updateManagedUser, uploadJsonBackup, type AcademicTermRecord, type AdminWorkspace, type DepartmentRecord, type ManagedUser, type ProgramRecord } from '@/services/admin';
+import { createJsonBackup, createManagedUser, deleteManagedUsers, deleteProgram, deleteSystemSetting, loadAdminWorkspace, loadProgramRequests, resendManagedUserInvitation, restoreJsonBackup, restoreStoredScheduledBackup, reviewProgramRequest, saveAcademicTerm, saveBackupSchedule, saveDepartment, saveProgram, saveSystemSetting, sendManagedUserPasswordReset, updateManagedUser, uploadJsonBackup, type AcademicTermRecord, type AdminWorkspace, type DepartmentRecord, type ManagedUser, type ProgramRecord, type ProgramRequestRecord } from '@/services/admin';
 import { IT_GLOBAL_GRADING_SYSTEM, type GradingDefinition } from '@apms/domain';
 import { colors } from '@/theme/tokens';
 
@@ -49,7 +51,7 @@ export function SystemAdminPortalContent({ screen, settingsCategory }: { screen:
     <RefreshIndicator visible={state.refreshing} />
     {screen === 'overview' ? <Overview {...props} /> : null}
     {screen === 'admins' ? <Users {...props} /> : null}
-    {screen === 'setup' ? <AcademicSetup {...props} /> : null}
+    {screen === 'setup' ? <AcademicSetup {...props} initialSection={settingsCategory} /> : null}
     {screen === 'roles' ? <Roles {...props} /> : null}
     {screen === 'backup' ? <Backups {...props} /> : null}
     {screen === 'logs' ? <Logs {...props} /> : null}
@@ -60,9 +62,29 @@ export function SystemAdminPortalContent({ screen, settingsCategory }: { screen:
 }
 
 type Props = { data: AdminWorkspace; refresh: () => void; userId: string; toast: ReturnType<typeof useToast> };
-function Heading({ title, subtitle, action }: { title: string; subtitle: string; action?: ReactNode }) { return <View style={styles.heading}><View style={styles.flex}><Text accessibilityRole="header" style={styles.title}>{title}</Text><Text style={styles.subtitle}>{subtitle}</Text></View>{action}</View>; }
+function Heading({ title, subtitle, action }: { title: string; subtitle: string; action?: ReactNode }) { return <View style={styles.heading}><View style={styles.headingCopy}><Text accessibilityRole="header" style={styles.title}>{title}</Text><Text style={styles.subtitle}>{subtitle}</Text></View>{action}</View>; }
 function displayRole(role: ManagedUser['role']) { return role === 'system_admin' ? 'System Admin' : role === 'academic_admin' ? 'Academic Admin' : role === 'faculty' ? 'Faculty' : 'Unassigned'; }
 function date(value: string | null) { return value ? new Date(value).toLocaleString() : 'Never'; }
+function relativeDate(value: string | null) {
+  if (!value) return 'Never';
+  const timestamp = new Date(value).getTime();
+  if (!Number.isFinite(timestamp)) return 'Unknown';
+  const seconds = (timestamp - Date.now()) / 1000;
+  if (Math.abs(seconds) < 45) return 'Just now';
+  const units: [Intl.RelativeTimeFormatUnit, number][] = [['year', 60 * 60 * 24 * 365], ['month', 60 * 60 * 24 * 30], ['day', 60 * 60 * 24], ['hour', 60 * 60], ['minute', 60]];
+  const [unit, size] = units.find(([, unitSeconds]) => Math.abs(seconds) >= unitSeconds) ?? ['second', 1];
+  return new Intl.RelativeTimeFormat(undefined, { numeric: 'always' }).format(Math.round(seconds / size), unit);
+}
+function LastLogin({ value }: { value: string | null }) {
+  const [showFullDate, setShowFullDate] = useState(false);
+  const fullDate = value ? new Date(value).toLocaleString(undefined, { month: 'long', day: 'numeric', year: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'Never logged in';
+  return <View style={{ alignItems: 'flex-start', gap: 2 }}>
+    <Pressable accessibilityRole="button" accessibilityLabel={`Last login: ${relativeDate(value)}`} accessibilityHint="Show the full date and time" onPress={() => setShowFullDate((current) => !current)} {...(Platform.OS === 'web' ? ({ title: fullDate } as never) : {})}>
+      <Text style={styles.help}>{relativeDate(value)}</Text>
+    </Pressable>
+    {showFullDate ? <Text style={styles.help}>{fullDate}</Text> : null}
+  </View>;
+}
 function compactReference(value: string) { return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value.slice(0, 8) : value; }
 function auditActorLabel(actorId: string | null, data: AdminWorkspace) {
   if (!actorId) return 'System';
@@ -101,23 +123,90 @@ function Overview({ data }: Props) {
   return <><Heading title="System Administration Dashboard" subtitle="Live operational status for APMS accounts, access control, audit activity, and protected backups." /><View style={styles.metrics}><MetricCard label="User accounts" value={String(data.users.length)} /><MetricCard label="Active accounts" value={String(active)} tone="success" /><MetricCard label="Recent audit entries" value={String(data.logs.length)} tone="info" /><MetricCard label="Backups pending" value={String(queued)} tone={queued ? 'warning' : 'success'} /></View><View style={styles.userChartFilters}><SelectField label="User role" value={roleFilter} options={[{ label: 'All roles', value: 'all' }, ...roleOptions]} onChange={setRoleFilter} containerStyle={styles.filter} /><SelectField label="Account status" value={statusFilter} options={[{ label: 'All statuses', value: 'all' }, ...['active', 'inactive', 'suspended'].map((value) => ({ label: `${value[0].toUpperCase()}${value.slice(1)}`, value }))]} onChange={setStatusFilter} containerStyle={styles.filter} /></View><Text style={styles.chartCount}>Showing {visibleUsers.length.toLocaleString()} of {data.users.length.toLocaleString()} accounts</Text><View style={styles.analyticsCharts}><VisualizationPanel title="Accounts by role" description="Role distribution for filtered accounts." data={roleSeries} type="pie" /><VisualizationPanel title="Account status" description="Active, inactive, and suspended accounts." data={statusSeries} type="pie" /><VisualizationPanel title="Audit activity" description="Audit entries per day from the latest 100 authorized records." data={auditTrend} type="line" /></View><Card><Text style={styles.cardTitle}>Recent audit activity</Text>{data.logs.length ? <DataTable columns={['Time', 'Action', 'Entity', 'Actor', 'Status']} rows={data.logs.slice(0, 10).map((row) => [date(row.createdAt), row.action, row.entityType, row.actorId ?? 'System', 'Recorded'])} /> : <PageState kind="empty" title="No audit activity" message="Permission-checked administration events will appear here." />}</Card></>;
 }
 
-function Users({ data, refresh, toast }: Props) {
+function Users({ data, refresh, toast, userId }: Props) {
   const [createOpen, setCreateOpen] = useState(false); const [selected, setSelected] = useState<ManagedUser | null>(null); const [saving, setSaving] = useState(false);
-  const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [firstName, setFirstName] = useState(''); const [lastName, setLastName] = useState(''); const [role, setRole] = useState<CoreRole>('faculty'); const [departmentId, setDepartmentId] = useState(data.departments[0]?.id ?? ''); const [employeeId, setEmployeeId] = useState('');
-  const [editRole, setEditRole] = useState<CoreRole>('faculty'); const [editDepartment, setEditDepartment] = useState(data.departments[0]?.id ?? ''); const [editEmployeeId, setEditEmployeeId] = useState(''); const [editPassword, setEditPassword] = useState('');
-  const openManage = (user: ManagedUser) => { setSelected(user); setEditRole(user.role ?? 'faculty'); setEditDepartment(user.scopeId ?? data.departments[0]?.id ?? ''); setEditEmployeeId(''); setEditPassword(''); };
-  const create = async () => { setSaving(true); try { await createManagedUser({ email, password, firstName, lastName, role, departmentId: role === 'system_admin' ? undefined : departmentId, employeeId: role === 'faculty' ? employeeId : undefined }); setCreateOpen(false); setEmail(''); setPassword(''); setFirstName(''); setLastName(''); setEmployeeId(''); toast.show('Account created and APMS role assigned.'); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Could not create the account. Check the details and try again.')); } finally { setSaving(false); } };
-  const update = async (status?: ManagedUser['status']) => { if (!selected) return; setSaving(true); try { await updateManagedUser({ userId: selected.id, status, role: editRole, departmentId: editRole === 'system_admin' ? undefined : editDepartment, employeeId: editRole === 'faculty' ? editEmployeeId || undefined : undefined, password: editPassword || undefined }); setSelected(null); toast.show('Account role, scope, and status were updated.'); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Account update failed.')); } finally { setSaving(false); } };
+  const [selectedUserIds, setSelectedUserIds] = useState<string[]>([]); const [bulkMenuOpen, setBulkMenuOpen] = useState(false); const [deleteSelectedOpen, setDeleteSelectedOpen] = useState(false); const [forceDeleteWithoutTakeover, setForceDeleteWithoutTakeover] = useState(false); const [forceDeleteLinkedRecords, setForceDeleteLinkedRecords] = useState(false); const [bulkBusy, setBulkBusy] = useState(false); const [takeoverEmails, setTakeoverEmails] = useState<Record<string, string>>({});
+  const bulkMenuTriggerRef = useRef<View>(null); const { width: screenWidth, height: screenHeight } = useWindowDimensions(); const [bulkMenuPosition, setBulkMenuPosition] = useState({ left: 8, top: 8 });
+  const [email, setEmail] = useState(''); const [firstName, setFirstName] = useState(''); const [lastName, setLastName] = useState(''); const [role, setRole] = useState<CoreRole>('faculty'); const [departmentId, setDepartmentId] = useState(data.departments[0]?.id ?? ''); const [employeeId, setEmployeeId] = useState('');
+  const [editRole, setEditRole] = useState<CoreRole>('faculty'); const [editDepartment, setEditDepartment] = useState(data.departments[0]?.id ?? ''); const [editEmployeeId, setEditEmployeeId] = useState('');
+  const openManage = (user: ManagedUser) => { setSelected(user); setEditRole(user.role ?? 'faculty'); setEditDepartment(user.scopeId ?? data.departments[0]?.id ?? ''); setEditEmployeeId(''); };
+  const create = async () => { setSaving(true); try { const redirectTo = Platform.OS === 'web' && typeof globalThis.location !== 'undefined' ? `${globalThis.location.origin}/onboarding?flow=invite` : `${Linking.createURL('/onboarding')}?flow=invite`; await createManagedUser({ email, redirectTo, firstName, lastName, role, departmentId: role === 'system_admin' ? undefined : departmentId, employeeId: role === 'faculty' ? employeeId : undefined }); setCreateOpen(false); setEmail(''); setFirstName(''); setLastName(''); setEmployeeId(''); toast.show('Invitation sent. The new user can set their password and secure the account from the email link.'); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Could not send the account invitation. Check the details and try again.')); } finally { setSaving(false); } };
+  const resendInvitation = async () => { if (!selected) return; setSaving(true); try { const redirectTo = Platform.OS === 'web' && typeof globalThis.location !== 'undefined' ? `${globalThis.location.origin}/onboarding?flow=invite` : `${Linking.createURL('/onboarding')}?flow=invite`; await resendManagedUserInvitation({ userId: selected.id, redirectTo }); toast.show(`A new onboarding invitation was sent to ${selected.email}.`); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'The onboarding invitation could not be resent.')); } finally { setSaving(false); } };
+  const sendPasswordReset = async () => { if (!selected) return; setSaving(true); try { const redirectTo = Platform.OS === 'web' && typeof globalThis.location !== 'undefined' ? `${globalThis.location.origin}/reset-password` : Linking.createURL('/reset-password'); await sendManagedUserPasswordReset({ userId: selected.id, redirectTo }); toast.show(`A password reset link was sent to ${selected.email}.`); } catch (cause) { toast.show(getErrorMessage(cause, 'The password reset link could not be sent.')); } finally { setSaving(false); } };
+  const update = async (status?: 'active' | 'inactive' | 'suspended') => { if (!selected) return; setSaving(true); try { await updateManagedUser({ userId: selected.id, status, role: editRole, departmentId: editRole === 'system_admin' ? undefined : editDepartment, employeeId: editRole === 'faculty' ? editEmployeeId || undefined : undefined }); setSelected(null); toast.show('Account role, scope, and status were updated.'); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Account update failed.')); } finally { setSaving(false); } };
+  const visibleIds = data.users.map((user) => user.id);
+  const allSelected = visibleIds.length > 0 && visibleIds.every((id) => selectedUserIds.includes(id));
+  const activeSelectedCount = data.users.filter((user) => selectedUserIds.includes(user.id) && user.status === 'active').length;
+  const academicAdminGroups = new Map<string, ManagedUser[]>();
+  for (const admin of data.users) {
+    if (admin.role !== 'academic_admin' || admin.scopeType !== 'department' || !admin.scopeId || admin.status !== 'active') continue;
+    academicAdminGroups.set(admin.scopeId, [...(academicAdminGroups.get(admin.scopeId) ?? []), admin]);
+  }
+  const takeoverDepartments = [...academicAdminGroups.entries()].flatMap(([departmentId, admins]) => admins.every((admin) => selectedUserIds.includes(admin.id)) ? [{ departmentId, department: data.departments.find((item) => item.id === departmentId), admins }] : []);
+  const savedTakeoverEmail = (admins: ManagedUser[]) => { const emails = [...new Set(admins.map((admin) => admin.takeoverEmail?.trim().toLowerCase()).filter((value): value is string => Boolean(value)))]; return emails.length === 1 ? emails[0] : ''; };
+  const takeoverEmailValues = takeoverDepartments.map(({ departmentId, admins }) => (takeoverEmails[departmentId] ?? savedTakeoverEmail(admins)).trim().toLowerCase());
+  const existingAccountEmails = new Set(data.users.map((user) => user.email.toLowerCase()));
+  const takeoverEmailsValid = forceDeleteWithoutTakeover || (takeoverEmailValues.every((email) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) && !existingAccountEmails.has(email)) && new Set(takeoverEmailValues).size === takeoverEmailValues.length);
+  const showBulkMenu = () => bulkMenuTriggerRef.current?.measureInWindow((x, y, width, height) => {
+    setBulkMenuPosition({ left: Math.max(8, Math.min(screenWidth - 252, x + width - 244)), top: Math.max(8, Math.min(screenHeight - 116, y + height + 4)) });
+    setBulkMenuOpen(true);
+  });
+  const toggleUser = (userId: string) => setSelectedUserIds((current) => current.includes(userId) ? current.filter((id) => id !== userId) : [...current, userId]);
+  const toggleAllUsers = () => setSelectedUserIds(allSelected ? [] : visibleIds);
+  const deactivateSelected = async () => {
+    const targets = data.users.filter((user) => selectedUserIds.includes(user.id) && user.status === 'active');
+    if (!targets.length) return;
+    setBulkBusy(true);
+    const outcomes = await Promise.allSettled(targets.map((user) => updateManagedUser({ userId: user.id, status: 'inactive' })));
+    const succeeded = outcomes.filter((outcome) => outcome.status === 'fulfilled').length;
+    const failed = outcomes.length - succeeded;
+    setBulkBusy(false); setBulkMenuOpen(false); setSelectedUserIds([]); refresh();
+    toast.show(failed ? `${succeeded} account${succeeded === 1 ? '' : 's'} deactivated; ${failed} could not be deactivated.` : `${succeeded} account${succeeded === 1 ? '' : 's'} deactivated.`);
+  };
+  const deleteSelected = async () => {
+    setBulkBusy(true);
+    try {
+      const redirectTo = Platform.OS === 'web' && typeof globalThis.location !== 'undefined' ? `${globalThis.location.origin}/onboarding?flow=invite` : `${Linking.createURL('/onboarding')}?flow=invite`;
+      const result = await deleteManagedUsers(selectedUserIds, Object.fromEntries(takeoverDepartments.map(({ departmentId, admins }) => [departmentId, (takeoverEmails[departmentId] ?? savedTakeoverEmail(admins)).trim()])), redirectTo, forceDeleteWithoutTakeover, forceDeleteLinkedRecords);
+      setSelectedUserIds([]); setDeleteSelectedOpen(false); setBulkMenuOpen(false); refresh();
+      const deleted = result.deletedUserIds.length;
+      const failed = result.failed.length;
+      const handoffs = result.createdTakeovers.length;
+      const forcedDepartments = result.forcedDepartments.length;
+      const linkedRecordAccounts = result.linkedRecordsDeletedUserIds.length;
+      toast.show(failed ? `${deleted} account${deleted === 1 ? '' : 's'} deleted; ${handoffs} department takeover account${handoffs === 1 ? '' : 's'} invited; ${forcedDepartments ? `${forcedDepartments} department${forcedDepartments === 1 ? '' : 's'} left without a replacement Academic Admin; ` : ''}${linkedRecordAccounts ? `linked records removed for ${linkedRecordAccounts} account${linkedRecordAccounts === 1 ? '' : 's'}; ` : ''}${failed} could not be deleted.` : `${deleted} account${deleted === 1 ? '' : 's'} deleted${handoffs ? ` and ${handoffs} department takeover account${handoffs === 1 ? '' : 's'} invited` : ''}${forcedDepartments ? `; ${forcedDepartments} department${forcedDepartments === 1 ? '' : 's'} left without a replacement Academic Admin` : ''}${linkedRecordAccounts ? `; linked records removed for ${linkedRecordAccounts} account${linkedRecordAccounts === 1 ? '' : 's'}` : ''}.`);
+      if (result.deletedUserIds.includes(userId)) await supabase?.auth.signOut();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Selected accounts could not be deleted.')); }
+    finally { setBulkBusy(false); }
+  };
   const activeDepartments = data.departments.filter((department) => department.status === 'active');
-  return <><Heading title="User Management" subtitle="Create and manage the three core APMS roles. Passwords are set through the protected server endpoint and are never displayed." action={<Button label="Create user" onPress={() => setCreateOpen(true)} />} /><Card>{data.users.length ? <DataTable compact columns={['Name', 'Email', 'Role', 'Scope', 'Last login', 'Status', 'Manage']} rows={data.users.map((user) => [`${user.firstName} ${user.lastName}`, user.email, displayRole(user.role), user.scopeType === 'global' ? 'Global' : data.departments.find((department) => department.id === user.scopeId)?.code ?? 'Unassigned', date(user.lastLoginAt), `${user.status[0].toUpperCase()}${user.status.slice(1)}`, <Button compact key={user.id} label="Manage" variant="secondary" onPress={() => openManage(user)} />])} /> : <PageState kind="empty" title="No APMS users" message="Create a System Admin, Academic Admin, or Faculty account." />}</Card>
-    <Dialog visible={createOpen} title="Create APMS account" onClose={() => setCreateOpen(false)}><View style={styles.formGrid}><Field label="First name" value={firstName} onChangeText={setFirstName} /><Field label="Last name" value={lastName} onChangeText={setLastName} /><Field label="Institutional email" value={email} keyboardType="email-address" onChangeText={setEmail} /><Field label="Temporary password (12+ characters)" value={password} secureTextEntry onChangeText={setPassword} /></View><SelectField label="Core role" value={role} options={roleOptions} onChange={(value) => setRole(value as CoreRole)} />{role !== 'system_admin' ? <SelectField label="Department scope" value={departmentId} options={activeDepartments.map((department) => ({ label: `${department.code} · ${department.name}`, value: department.id }))} onChange={setDepartmentId} /> : null}{role === 'faculty' ? <Field label="Employee ID" value={employeeId} onChangeText={setEmployeeId} /> : null}<Button label="Create account" loading={saving} disabled={!email.trim() || password.length < 12 || !firstName.trim() || !lastName.trim() || (role !== 'system_admin' && !departmentId) || (role === 'faculty' && !employeeId.trim())} onPress={() => void create()} /></Dialog>
-    <Dialog visible={Boolean(selected)} title="Manage account" onClose={() => setSelected(null)}>{selected ? <><Text style={styles.cardTitle}>{selected.firstName} {selected.lastName}</Text><Text style={styles.help}>{selected.email}</Text><SelectField label="Core role" value={editRole} options={roleOptions} onChange={(value) => setEditRole(value as CoreRole)} />{editRole !== 'system_admin' ? <SelectField label="Department scope" value={editDepartment} options={activeDepartments.map((department) => ({ label: `${department.code} · ${department.name}`, value: department.id }))} onChange={setEditDepartment} /> : null}{editRole === 'faculty' && selected.role !== 'faculty' ? <Field label="Employee ID required for new Faculty role" value={editEmployeeId} onChangeText={setEditEmployeeId} /> : null}<Field label="New temporary password (optional)" value={editPassword} secureTextEntry onChangeText={setEditPassword} /><View style={styles.actions}><Button label="Save changes" loading={saving} disabled={editRole === 'faculty' && selected.role !== 'faculty' && !editEmployeeId.trim()} onPress={() => void update()} /><Button label={selected.status === 'active' ? 'Deactivate' : 'Activate'} variant="secondary" loading={saving} onPress={() => void update(selected.status === 'active' ? 'inactive' : 'active')} /></View></> : null}</Dialog>
+  return <><Heading title="User Management" subtitle="Create and manage APMS accounts. New users receive an email invitation to complete secure account setup." action={<View style={styles.userHeadingActions}><View ref={bulkMenuTriggerRef} collapsable={false}><Button label={`Bulk actions${selectedUserIds.length ? ` (${selectedUserIds.length})` : ''}`} variant="secondary" disabled={selectedUserIds.length === 0 || bulkBusy} onPress={() => bulkMenuOpen ? setBulkMenuOpen(false) : showBulkMenu()} /></View><Button label="Invite user" onPress={() => setCreateOpen(true)} /></View>} />{data.users.length ? <DataTable compact columns={['Select', 'Name', 'Email', 'Role', 'Scope', 'Last login', 'Status', 'Manage']} columnHeaderContent={[<Pressable key="select-all" accessibilityRole="checkbox" accessibilityState={{ checked: allSelected }} accessibilityLabel={allSelected ? 'Deselect all users' : 'Select all users'} onPress={toggleAllUsers} style={styles.userCheckbox}><Text style={styles.userCheckboxMark}>{allSelected ? '✓' : ''}</Text></Pressable>]} columnWidths={[42, 150, 250, 130, 86, 170, 90, 100]} columnFlex={[0, 1, 2, 1, 0, 0, 0, 0]} widthMode="container" formatCell={(cell, _row, columnIndex) => columnIndex === 5 && typeof cell === 'string' ? <LastLogin value={cell || null} /> : undefined} rows={data.users.map((user) => [<Pressable key={`select-${user.id}`} accessibilityRole="checkbox" accessibilityState={{ checked: selectedUserIds.includes(user.id) }} accessibilityLabel={`${selectedUserIds.includes(user.id) ? 'Deselect' : 'Select'} ${user.firstName} ${user.lastName}`} onPress={() => toggleUser(user.id)} style={styles.userCheckbox}><Text style={styles.userCheckboxMark}>{selectedUserIds.includes(user.id) ? '✓' : ''}</Text></Pressable>, `${user.firstName} ${user.lastName}`, user.email, displayRole(user.role), user.scopeType === 'global' ? 'Global' : data.departments.find((department) => department.id === user.scopeId)?.code ?? 'Unassigned', user.lastLoginAt ?? '', `${user.status[0].toUpperCase()}${user.status.slice(1)}`, <Button compact key={user.id} label="Manage" variant="secondary" onPress={() => openManage(user)} />])} /> : <PageState kind="empty" title="No APMS users" message="Create a System Admin, Academic Admin, or Faculty account." />}
+    <Modal visible={bulkMenuOpen} transparent animationType="fade" onRequestClose={() => setBulkMenuOpen(false)}>
+      <View style={{ flex: 1 }}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Close bulk actions" onPress={() => setBulkMenuOpen(false)} style={StyleSheet.absoluteFill} />
+        <View style={[{ position: 'absolute', minWidth: 225, gap: 4, padding: 7, backgroundColor: colors.surface, borderColor: colors.border, borderWidth: 1, borderRadius: 10, elevation: 12, shadowColor: '#000', shadowOpacity: 0.14, shadowRadius: 9, shadowOffset: { width: 0, height: 4 } }, bulkMenuPosition]}>
+          <Pressable accessibilityRole="button" disabled={bulkBusy || activeSelectedCount === 0} onPress={() => void deactivateSelected()} style={({ pressed }) => [{ minHeight: 42, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 10, borderRadius: 7, backgroundColor: pressed ? colors.canvas : 'transparent', opacity: activeSelectedCount === 0 ? 0.45 : 1 }]}><AppIcon name="archive" size={16} color={colors.textMuted} /><Text style={{ color: colors.text, fontSize: 13, fontWeight: '600' }}>Deactivate selected users</Text></Pressable>
+          <Pressable accessibilityRole="button" disabled={bulkBusy} onPress={() => { setBulkMenuOpen(false); setForceDeleteWithoutTakeover(false); setForceDeleteLinkedRecords(false); setDeleteSelectedOpen(true); }} style={({ pressed }) => [{ minHeight: 42, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 10, borderRadius: 7, backgroundColor: pressed ? colors.canvas : 'transparent' }]}><AppIcon name="delete" size={16} color={colors.danger} /><Text style={{ color: colors.danger, fontSize: 13, fontWeight: '600' }}>Delete selected users</Text></Pressable>
+        </View>
+      </View>
+    </Modal>
+    <Dialog visible={createOpen} title="Invite APMS account" onClose={() => setCreateOpen(false)}><Text style={styles.dialogIntro}>The System Admin sets the user's name, email, role, department, and employee ID. APMS emails them a secure onboarding link to verify their email, choose a password, and configure two-step verification.</Text><View style={styles.formGrid}><Field label="First name" value={firstName} onChangeText={setFirstName} /><Field label="Last name" value={lastName} onChangeText={setLastName} /><Field label="Institutional email" value={email} keyboardType="email-address" onChangeText={setEmail} /></View><SelectField label="Core role" value={role} options={roleOptions} onChange={(value) => setRole(value as CoreRole)} />{role !== 'system_admin' ? <SelectField label="Department scope" value={departmentId} options={activeDepartments.map((department) => ({ label: `${department.code} · ${department.name}`, value: department.id }))} onChange={setDepartmentId} /> : null}{role === 'faculty' ? <Field label="Employee ID" value={employeeId} onChangeText={setEmployeeId} /> : null}<Button label="Send onboarding invitation" loading={saving} disabled={!email.trim() || !firstName.trim() || !lastName.trim() || (role !== 'system_admin' && !departmentId) || (role === 'faculty' && !employeeId.trim())} onPress={() => void create()} /></Dialog>
+    <Dialog visible={Boolean(selected)} title="Manage account" onClose={() => setSelected(null)}>{selected ? <><Text style={styles.cardTitle}>{selected.firstName} {selected.lastName}</Text><Text style={styles.help}>{selected.email}{selected.status === 'invited' ? ' · Invitation pending' : ''}</Text>{selected.status === 'invited' && !selected.onboardingComplete ? <Button label="Resend onboarding invitation" variant="secondary" loading={saving} disabled={saving} onPress={() => void resendInvitation()} /> : null}{selected.status === 'active' && selected.onboardingComplete ? <View style={{ gap: 5 }}><Button label="Send password reset link" variant="secondary" loading={saving} disabled={saving} onPress={() => void sendPasswordReset()} /><Text style={styles.help}>The user can choose a new password from the email link without entering their current password.</Text></View> : null}<SelectField label="Core role" value={editRole} options={roleOptions} onChange={(value) => setEditRole(value as CoreRole)} />{editRole !== 'system_admin' ? <SelectField label="Department scope" value={editDepartment} options={activeDepartments.map((department) => ({ label: `${department.code} · ${department.name}`, value: department.id }))} onChange={setEditDepartment} /> : null}{editRole === 'faculty' && selected.role !== 'faculty' ? <Field label="Employee ID required for new Faculty role" value={editEmployeeId} onChangeText={setEditEmployeeId} /> : null}<View style={styles.actions}><Button label="Save changes" loading={saving} disabled={editRole === 'faculty' && selected.role !== 'faculty' && !editEmployeeId.trim()} onPress={() => void update()} /><Button label={selected.status === 'active' ? 'Deactivate' : selected.status === 'invited' ? 'Deactivate invitation' : 'Activate'} variant="secondary" loading={saving} onPress={() => void update(selected.status === 'inactive' || selected.status === 'suspended' ? 'active' : 'inactive')} /></View></> : null}</Dialog>
+    <Dialog visible={deleteSelectedOpen} title={`Delete ${selectedUserIds.length} selected user${selectedUserIds.length === 1 ? '' : 's'}?`} onClose={() => { if (!bulkBusy) { setDeleteSelectedOpen(false); setForceDeleteWithoutTakeover(false); setForceDeleteLinkedRecords(false); } }}>
+      <Text style={styles.dialogIntro}>This permanently removes the selected accounts. Accounts still linked to records may be blocked and should be deactivated instead.</Text>
+      {takeoverDepartments.length ? <View style={{ gap: 10 }}><Text style={styles.dialogIntro}>The selected admins are the only active Academic Admins for these departments. Use the saved takeover email or enter another address to invite a replacement before deleting.</Text>{takeoverDepartments.map(({ departmentId, department, admins }) => forceDeleteWithoutTakeover ? <Text key={departmentId} style={styles.forceDeleteWarning}>{department?.code ?? 'This department'} will have no active Academic Admin, and no replacement invitation will be sent.</Text> : <Field key={departmentId} label={`Takeover email · ${department?.code ?? 'Department'}`} value={takeoverEmails[departmentId] ?? savedTakeoverEmail(admins)} onChangeText={(value) => setTakeoverEmails((current) => ({ ...current, [departmentId]: value }))} keyboardType="email-address" autoCapitalize="none" placeholder="name@example.com" />)}<Pressable accessibilityRole="checkbox" accessibilityState={{ checked: forceDeleteWithoutTakeover }} onPress={() => setForceDeleteWithoutTakeover((current) => !current)} style={styles.forceDeleteOption}><AppIcon name={forceDeleteWithoutTakeover ? 'checkboxChecked' : 'checkbox'} size={18} color={forceDeleteWithoutTakeover ? colors.danger : colors.textMuted} /><View style={{ flex: 1 }}><Text style={styles.forceDeleteLabel}>Force delete without a takeover email</Text><Text style={styles.help}>Skip creating a replacement Academic Admin account.</Text></View></Pressable></View> : null}
+      <Pressable accessibilityRole="checkbox" accessibilityState={{ checked: forceDeleteLinkedRecords }} onPress={() => setForceDeleteLinkedRecords((current) => !current)} style={styles.forceDeleteOption}><AppIcon name={forceDeleteLinkedRecords ? 'checkboxChecked' : 'checkbox'} size={18} color={forceDeleteLinkedRecords ? colors.danger : colors.textMuted} /><View style={{ flex: 1 }}><Text style={styles.forceDeleteLabel}>Force delete even if linked to records</Text><Text style={styles.help}>Permanently delete records that prevent the selected accounts from being removed.</Text></View></Pressable>
+      {forceDeleteLinkedRecords ? <Text style={styles.linkedRecordsWarning}>Linked records may contain class, grade, request, or other account-related data. This data cannot be recovered.</Text> : null}
+      <View style={styles.dialogActions}><Button label="Cancel" variant="secondary" disabled={bulkBusy} onPress={() => { setDeleteSelectedOpen(false); setForceDeleteWithoutTakeover(false); setForceDeleteLinkedRecords(false); }} /><Button label={forceDeleteWithoutTakeover || forceDeleteLinkedRecords ? 'Force delete selected users' : 'Delete selected users'} variant="danger" loading={bulkBusy} disabled={bulkBusy || !takeoverEmailsValid} onPress={() => void deleteSelected()} /></View>
+    </Dialog>
   </>;
 }
 
 type SetupDialog = 'department' | 'program' | 'term' | null;
-function AcademicSetup({ data, refresh, toast }: Props) {
-  const [section, setSection] = useState('Departments');
+function AcademicSetup({ data, refresh, userId, toast, initialSection }: Props & { initialSection?: string }) {
+  const [section, setSection] = useState(['Departments', 'Programs', 'Program requests', 'Academic terms', 'Institution code'].includes(initialSection ?? '') ? initialSection! : 'Departments');
+  const [institutionCode, setInstitutionCode] = useState(String(data.settings.find((item) => item.key === 'academic.institution_code')?.value ?? 'SWU').toUpperCase());
+  const [savingInstitutionCode, setSavingInstitutionCode] = useState(false);
   const [dialog, setDialog] = useState<SetupDialog>(null);
   const [saving, setSaving] = useState(false);
   const [deletingProgram, setDeletingProgram] = useState<ProgramRecord | null>(null);
@@ -126,20 +215,51 @@ function AcademicSetup({ data, refresh, toast }: Props) {
   const [term, setTerm] = useState<AcademicTermRecord | null>(null);
   const [code, setCode] = useState(''); const [name, setName] = useState(''); const [departmentId, setDepartmentId] = useState(''); const [status, setStatus] = useState<'active' | 'inactive'>('active');
   const [academicYear, setAcademicYear] = useState(''); const [semester, setSemester] = useState(''); const [startsOn, setStartsOn] = useState(''); const [endsOn, setEndsOn] = useState(''); const [termStatus, setTermStatus] = useState<AcademicTermRecord['status']>('planned');
+  const [programRequests, setProgramRequests] = useState<ProgramRequestRecord[]>([]);
+  const [selectedProgramRequest, setSelectedProgramRequest] = useState<ProgramRequestRecord | null>(null);
+  const [programRequestRejectionReason, setProgramRequestRejectionReason] = useState('');
+  const [reviewingProgramRequest, setReviewingProgramRequest] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void loadProgramRequests().then((loaded) => { if (active) setProgramRequests(loaded); })
+      .catch((cause) => { if (active) toast.show(getErrorMessage(cause, 'Program requests could not be loaded.')); });
+    return () => { active = false; };
+  }, [data.programs, toast]);
+  useEffect(() => { setInstitutionCode(String(data.settings.find((item) => item.key === 'academic.institution_code')?.value ?? 'SWU').toUpperCase()); }, [data.settings]);
+  const saveInstitutionCodeValue = async () => {
+    const normalized = institutionCode.trim().toUpperCase();
+    if (!/^[A-Z0-9]{2,12}$/.test(normalized)) return toast.show('Use 2–12 letters or numbers for the institution code.');
+    setSavingInstitutionCode(true);
+    try { await saveSystemSetting(userId, 'academic.institution_code', normalized); setInstitutionCode(normalized); toast.show('Institution code saved.'); refresh(); }
+    catch (cause) { toast.show(getErrorMessage(cause, 'Institution code could not be saved.')); }
+    finally { setSavingInstitutionCode(false); }
+  };
   const close = () => { setDialog(null); setDepartment(null); setProgram(null); setTerm(null); };
   const openDepartment = (value?: DepartmentRecord) => { setDepartment(value ?? null); setCode(value?.code ?? ''); setName(value?.name ?? ''); setStatus(value?.status ?? 'active'); setDialog('department'); };
   const openProgram = (value?: ProgramRecord) => { setProgram(value ?? null); setCode(value?.code ?? ''); setName(value?.name ?? ''); setDepartmentId(value?.departmentId ?? data.departments.find((item) => item.status === 'active')?.id ?? ''); setStatus(value?.status ?? 'active'); setDialog('program'); };
   const openTerm = (value?: AcademicTermRecord) => { setTerm(value ?? null); setAcademicYear(value?.academicYear ?? ''); setSemester(value?.semester ?? ''); setStartsOn(value?.startsOn ?? ''); setEndsOn(value?.endsOn ?? ''); setTermStatus(value?.status ?? 'planned'); setDialog('term'); };
   const save = async () => { setSaving(true); try { if (dialog === 'department') await saveDepartment({ id: department?.id, code, name, status }); if (dialog === 'program') await saveProgram({ id: program?.id, departmentId, code, name, status }); if (dialog === 'term') await saveAcademicTerm({ id: term?.id, academicYear, semester, startsOn, endsOn, status: termStatus }); toast.show('Academic setup saved.'); close(); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Academic setup could not be saved.')); } finally { setSaving(false); } };
   const removeProgram = async () => { if (!deletingProgram) return; setSaving(true); try { await deleteProgram(deletingProgram.id); toast.show('Program deleted.'); setDeletingProgram(null); close(); refresh(); } catch (cause) { toast.show(getErrorMessage(cause, 'Program could not be deleted.')); } finally { setSaving(false); } };
+  const reviewProgram = async (request: ProgramRequestRecord, decision: 'approved' | 'rejected') => {
+    if (decision === 'rejected' && programRequestRejectionReason.trim().length < 3) return toast.show('Enter a rejection reason (at least 3 characters).');
+    setReviewingProgramRequest(true);
+    try {
+      await reviewProgramRequest({ requestId: request.id, decision, rejectionReason: decision === 'rejected' ? programRequestRejectionReason : undefined });
+      toast.show(decision === 'approved' ? `${request.code} was approved and added to Academic Setup.` : `${request.code} request was rejected.`);
+      setSelectedProgramRequest(null); setProgramRequestRejectionReason('');
+      setProgramRequests(await loadProgramRequests());
+      refresh();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Program request could not be reviewed.')); }
+    finally { setReviewingProgramRequest(false); }
+  };
   const activeDepartments = data.departments.filter((item) => item.status === 'active');
   const sectionAction = section === 'Departments'
     ? <Button label="Add department" onPress={() => openDepartment()} />
     : section === 'Programs'
       ? <Button label="Add program" disabled={!activeDepartments.length} onPress={() => openProgram()} />
-      : <Button label="Add term" onPress={() => openTerm()} />;
-  return <><Heading title="Academic Setup" subtitle="Create the departments, programs, and academic terms used for account scope and academic records." action={sectionAction} />
-    <Tabs values={['Departments', 'Programs', 'Academic terms']} selected={section} onSelect={setSection} />
+      : section === 'Academic terms' ? <Button label="Add term" onPress={() => openTerm()} /> : undefined;
+  return <><Heading title="Academic Setup" subtitle="Manage departments, programs, academic terms, and institution identity." action={sectionAction} />
+    <Tabs values={['Departments', 'Programs', 'Program requests', 'Academic terms', 'Institution code']} selected={section} onSelect={setSection} />
     <View style={{ gap: 16 }}>
       {section === 'Departments' ? <>
         <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Departments</Text><Text style={styles.sectionHelp}>Departments define the scope available to Academic Admin and Faculty accounts.</Text></View>
@@ -149,14 +269,36 @@ function AcademicSetup({ data, refresh, toast }: Props) {
         <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Programs</Text><Text style={styles.sectionHelp}>Programs are grouped under a department and can be activated or archived.</Text></View>
         {data.programs.length ? <DataTable columns={['Code', 'Program', 'Department', 'Status', 'Actions']} rows={data.programs.map((item) => [item.code, item.name, data.departments.find((department) => department.id === item.departmentId)?.name ?? 'Unassigned', item.status[0].toUpperCase() + item.status.slice(1), <View key={item.id} style={{ flexDirection: 'row', gap: 6 }}><Button compact label="Edit" variant="secondary" onPress={() => openProgram(item)} /><Button compact label="Delete" variant="danger" onPress={() => setDeletingProgram(item)} /></View>])} columnWidths={[92, 320, 220, 92, 172]} widthMode="content" /> : <PageState kind="empty" title="No programs yet" message="Programs are optional, but useful for organizing department reports." action={<Button label="Create program" disabled={!activeDepartments.length} onPress={() => openProgram()} />} />}
       </> : null}
+      {section === 'Program requests' ? <>
+        <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Program requests</Text><Text style={styles.sectionHelp}>Review program additions requested by Academic Admins. Approving creates an active program. Rejections require a reason.</Text></View>
+        {programRequests.length ? programRequests.map((request) => {
+          const department = data.departments.find((item) => item.id === request.departmentId);
+          const requester = data.users.find((item) => item.id === request.requestedBy);
+          const statusTone = request.status === 'approved' ? 'success' : request.status === 'rejected' ? 'danger' : 'warning';
+          return <Card key={request.id} style={{ gap: 10 }}>
+            <View style={styles.sectionHeader}><View style={styles.flex}><Text style={styles.settingLabel}>{request.code} · {request.name}</Text><Text style={styles.sectionHelp}>{department?.code ?? 'Department'} · {department?.name ?? 'Unknown department'} · Requested by {requester ? `${requester.firstName} ${requester.lastName}`.trim() : 'Academic Admin'} on {date(request.createdAt)}</Text></View><Badge tone={statusTone}>{request.status[0].toUpperCase() + request.status.slice(1)}</Badge></View>
+            {request.rationale || request.rejectionReason ? <View style={styles.programRequestNotes}>
+              {request.rationale ? <View style={styles.programRequestReason}><Text style={styles.deadlineReasonLabel}>Request reason</Text><Text style={styles.help}>{request.rationale}</Text></View> : null}
+              {request.rejectionReason ? <View style={styles.programRequestReason}><Text style={styles.deadlineReasonLabel}>Rejection reason</Text><Text style={styles.help}>{request.rejectionReason}</Text></View> : null}
+            </View> : null}
+            {request.status === 'pending' ? <View style={styles.actions}><Button compact label="Approve and add program" disabled={reviewingProgramRequest} onPress={() => void reviewProgram(request, 'approved')} /><Button compact label="Reject…" variant="secondary" disabled={reviewingProgramRequest} onPress={() => { setSelectedProgramRequest(request); setProgramRequestRejectionReason(''); }} /></View> : request.programId ? <Text style={styles.help}>Created as an active program.</Text> : null}
+          </Card>;
+        }) : <PageState kind="empty" title="No program requests" message="Program addition requests from Academic Admins will appear here." />}
+      </> : null}
       {section === 'Academic terms' ? <>
         <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Academic terms</Text><Text style={styles.sectionHelp}>Terms must exist before Faculty can create monitoring classes.</Text></View>
         {data.terms.length ? <DataTable columns={['Academic year', 'Semester', 'Starts', 'Ends', 'Status', 'Actions']} rows={data.terms.map((item) => [item.academicYear, item.semester, item.startsOn, item.endsOn, item.status[0].toUpperCase() + item.status.slice(1), <Button compact key={item.id} label="Edit" variant="secondary" onPress={() => openTerm(item)} />])} columnWidths={[120, 120, 112, 112, 92, 96]} widthMode="content" /> : <PageState kind="empty" title="No academic terms yet" message="Create the current academic term before setting up classes." action={<Button label="Create term" onPress={() => openTerm()} />} />}
       </> : null}
+      {section === 'Institution code' ? <Card style={{ gap: 12, maxWidth: 680 }}>
+        <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Institution code</Text><Text style={styles.sectionHelp}>Used in institution-wide section names, for example {institutionCode || 'SWU'}-BSIT3-C2. Department codes are not used as institution prefixes.</Text></View>
+        <Field label="Institution code" value={institutionCode} onChangeText={(value) => setInstitutionCode(value.replace(/[^a-z0-9]/gi, '').slice(0, 12).toUpperCase())} placeholder="SWU" maxLength={12} autoCapitalize="characters" />
+        <Button label="Save institution code" loading={savingInstitutionCode} disabled={savingInstitutionCode || institutionCode.trim().length < 2} onPress={() => void saveInstitutionCodeValue()} />
+      </Card> : null}
     </View>
     <Dialog visible={dialog === 'department'} title={department ? 'Edit department' : 'Create department'} onClose={close}><Field label="Department code" value={code} onChangeText={setCode} placeholder="e.g. CIT" /><Field label="Department name" value={name} onChangeText={setName} placeholder="e.g. College of Information Technology" /><SelectField label="Status" value={status} options={[{ label: 'Active', value: 'active' }, { label: 'Inactive', value: 'inactive' }]} onChange={(value) => setStatus(value as 'active' | 'inactive')} /><Button label="Save department" loading={saving} disabled={!code.trim() || !name.trim()} onPress={() => void save()} /></Dialog>
     <Dialog visible={dialog === 'program'} title={program ? 'Edit program' : 'Create program'} onClose={close}><SelectField label="Department" value={departmentId} options={activeDepartments.map((item) => ({ label: `${item.code} · ${item.name}`, value: item.id }))} onChange={setDepartmentId} /><View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}><Field containerStyle={{ flex: 1, minWidth: 120, maxWidth: 180 }} label="Program code" value={code} onChangeText={setCode} placeholder="e.g. BSIT" /><Field containerStyle={{ flex: 3, minWidth: 220 }} label="Program name" value={name} onChangeText={setName} placeholder="e.g. Bachelor of Science in Information Technology" /></View><SelectField label="Status" value={status} options={[{ label: 'Active', value: 'active' }, { label: 'Inactive', value: 'inactive' }]} onChange={(value) => setStatus(value as 'active' | 'inactive')} /><View style={styles.dialogActions}>{program ? <Button label="Delete permanently" variant="danger" disabled={saving} onPress={() => setDeletingProgram(program)} /> : null}<Button label="Save program" loading={saving} disabled={!departmentId || !code.trim() || !name.trim()} onPress={() => void save()} /></View></Dialog>
     <Dialog visible={dialog === 'term'} title={term ? 'Edit academic term' : 'Create academic term'} onClose={close}><Text style={styles.dialogIntro}>Set the teaching period used when Faculty creates monitoring classes. Select dates from the calendar.</Text><Field label="Academic year" value={academicYear} onChangeText={setAcademicYear} placeholder="e.g. 2026-2027" autoCapitalize="none" /><Field label="Semester" value={semester} onChangeText={setSemester} placeholder="e.g. First Semester" /><View style={styles.dateGrid}><DateField containerStyle={styles.dateField} label="Start date" value={startsOn} onChange={setStartsOn} /><DateField containerStyle={styles.dateField} label="End date" value={endsOn} onChange={setEndsOn} /></View><Text style={styles.fieldHint}>Choose the first and last day of the academic term. The dates are saved as YYYY-MM-DD.</Text><SelectField label="Status" value={termStatus} options={['planned', 'active', 'closed', 'archived'].map((value) => ({ label: value[0].toUpperCase() + value.slice(1), value }))} onChange={(value) => setTermStatus(value as AcademicTermRecord['status'])} /><View style={styles.dialogActions}><Button label="Cancel" variant="secondary" onPress={close} /><Button label="Save academic term" loading={saving} disabled={!academicYear.trim() || !semester.trim() || !startsOn || !endsOn} onPress={() => void save()} /></View></Dialog>
+    <Dialog visible={selectedProgramRequest !== null} title="Reject program request" onClose={() => { if (!reviewingProgramRequest) { setSelectedProgramRequest(null); setProgramRequestRejectionReason(''); } }}><Text style={styles.dialogIntro}>A rejection reason is required and will be sent to the Academic Admin who requested {selectedProgramRequest?.code}.</Text><Field label="Rejection reason (required)" value={programRequestRejectionReason} onChangeText={setProgramRequestRejectionReason} multiline numberOfLines={4} maxLength={1000} placeholder="Explain why this program request is being rejected." /><View style={styles.dialogActions}><Button label="Cancel" variant="secondary" disabled={reviewingProgramRequest} onPress={() => setSelectedProgramRequest(null)} /><Button label="Reject request" variant="danger" loading={reviewingProgramRequest} disabled={programRequestRejectionReason.trim().length < 3} onPress={() => selectedProgramRequest && void reviewProgram(selectedProgramRequest, 'rejected')} /></View></Dialog>
     <ConfirmDialog visible={Boolean(deletingProgram)} title="Delete program permanently?" message={deletingProgram ? `Delete ${deletingProgram.code} · ${deletingProgram.name}? This cannot be undone. If students are linked, deletion will be blocked and you should mark the program Inactive instead.` : ''} confirmLabel="Delete program" cancelLabel="Keep program" danger pending={saving} onClose={() => { if (!saving) setDeletingProgram(null); }} onConfirm={() => void removeProgram()} />
   </>;
 }
@@ -305,9 +447,9 @@ function SystemReports({ data }: Props) {
   return <><Heading title="System Reports" subtitle="Formatted operational reports for account, audit, and backup administration. Academic records are outside the System Admin reporting scope." /><ReportComposer title="System Operations Report" scopeLabel="System administration" description="Operational account status, role assignment, audit activity, and backup status. Report data is drawn from the System Admin workspace." rows={rows} /></>;
 }
 function SystemSettings({ data, refresh, userId, toast, initialCategory }: Props & { initialCategory?: string }) {
-  const [category, setCategory] = useState(initialCategory === 'Grade deadlines' ? initialCategory : 'Core services');
-  const settingsCategories = ['Core services', 'Forecasting service', 'AI provider usage', 'Feedback email', 'Backup policy', 'Grading defaults', 'Grade deadlines'];
-  useEffect(() => { if (initialCategory === 'Grade deadlines') setCategory(initialCategory); }, [initialCategory]);
+  const [category, setCategory] = useState(initialCategory && ['Core services', 'Forecasting service', 'AI provider usage', 'Feedback email', 'Backup policy', 'Grading defaults', 'Grade deadlines', 'Security & sign-in'].includes(initialCategory) ? initialCategory : 'Core services');
+  const settingsCategories = ['Core services', 'Forecasting service', 'AI provider usage', 'Feedback email', 'Backup policy', 'Grading defaults', 'Grade deadlines', 'Security & sign-in'];
+  useEffect(() => { if (initialCategory && ['Core services', 'Forecasting service', 'AI provider usage', 'Feedback email', 'Backup policy', 'Grading defaults', 'Grade deadlines', 'Security & sign-in'].includes(initialCategory)) setCategory(initialCategory); }, [initialCategory]);
   const [values, setValues] = useState<Record<string, string>>(() => Object.fromEntries(data.settings.map((row) => [row.key, typeof row.value === 'string' ? row.value : JSON.stringify(row.value)])));
   const storedFeedbackFromEmail = data.settings.find((row) => row.key === 'FEEDBACK_FROM_EMAIL')?.value;
   const [feedbackFromEmail, setFeedbackFromEmail] = useState(typeof storedFeedbackFromEmail === 'string' ? storedFeedbackFromEmail : '');
@@ -355,7 +497,7 @@ function SystemSettings({ data, refresh, userId, toast, initialCategory }: Props
     setSaving(true);
     try {
       for (const row of data.settings) {
-        if (row.key === 'grading.swunext_global_modules' || row.key === 'grading.default_system_id' || row.key === 'grading.default_system_definition' || row.key === 'FEEDBACK_FROM_EMAIL' || row.key === 'FEEDBACK_FROM_NAME' || quotaFields.some((field) => field.key === row.key)) continue;
+        if (row.key === 'grading.swunext_global_modules' || row.key === 'grading.default_system_id' || row.key === 'grading.default_system_definition' || row.key === 'FEEDBACK_FROM_EMAIL' || row.key === 'FEEDBACK_FROM_NAME' || row.key.startsWith('security.mfa_required') || quotaFields.some((field) => field.key === row.key)) continue;
         let value: unknown = values[row.key] ?? '';
         try { value = JSON.parse(value as string); } catch { /* plain strings remain valid JSONB values */ }
         await saveSystemSetting(userId, row.key, value);
@@ -363,7 +505,13 @@ function SystemSettings({ data, refresh, userId, toast, initialCategory }: Props
       await saveSystemSetting(userId, 'FEEDBACK_FROM_EMAIL', feedbackFromEmail.trim());
       await saveSystemSetting(userId, 'FEEDBACK_FROM_NAME', feedbackFromName.trim());
       await saveSystemSetting(userId, 'student_id.validation_enabled', studentIdValidation);
-      for (const [key, value] of Object.entries(quotaValues)) await saveSystemSetting(userId, key, value);
+      await saveSystemSetting(userId, 'security.mfa_required', boolValue('security.mfa_required'));
+      await saveSystemSetting(userId, 'security.mfa_required_roles', readStringArray(values['security.mfa_required_roles']));
+      await saveSystemSetting(userId, 'security.mfa_required_departments', readStringArray(values['security.mfa_required_departments']));
+      for (const [key, value] of Object.entries(quotaValues)) {
+        if (value === null) await deleteSystemSetting(key);
+        else await saveSystemSetting(userId, key, value);
+      }
       const selectedDefault = gradingSystems.find((system) => system.id === defaultSystemId) ?? IT_GLOBAL_GRADING_SYSTEM;
       await saveSystemSetting(userId, 'grading.default_system_id', selectedDefault.id);
       await saveSystemSetting(userId, 'grading.default_system_definition', selectedDefault);
@@ -437,6 +585,49 @@ function SystemSettings({ data, refresh, userId, toast, initialCategory }: Props
       </Card>
       </> : null}
       {category === 'Grade deadlines' ? <SystemGradeDeadlines data={data} userId={userId} toast={toast} /> : null}
+      {category === 'Security & sign-in' ? <>
+        <Card style={styles.settingsCard}>
+          <Text style={styles.sectionTitle}>Academic Admin Faculty invitations</Text>
+          <Text style={styles.sectionHelp}>Control whether Academic Admins can invite Faculty into their own department. This setting is enabled by default. Turning it off also disables resending pending Faculty invitations.</Text>
+          <Pressable accessibilityRole="switch" accessibilityState={{ checked: boolValue('academic_admins.can_invite_faculty') }} onPress={() => update('academic_admins.can_invite_faculty', String(!boolValue('academic_admins.can_invite_faculty')))} style={styles.settingRow}>
+            <View style={styles.settingCopy}><Text style={styles.settingLabel}>Allow Academic Admins to invite Faculty</Text><Text style={styles.help}>Enabled by default. Invitations are limited to the inviter’s department.</Text></View>
+            <View style={[styles.switch, boolValue('academic_admins.can_invite_faculty') && styles.switchOn]}><View style={[styles.switchThumb, boolValue('academic_admins.can_invite_faculty') && styles.switchThumbOn]} /></View>
+          </Pressable>
+        </Card>
+        <Card style={styles.settingsCard}>
+          <Text style={styles.sectionTitle}>Academic Admin account invitations</Text>
+          <Text style={styles.sectionHelp}>When enabled, Academic Admins can invite additional Academic Admins into their own department. They can always invite Faculty. Academic Admins cannot delete accounts or send password reset links.</Text>
+          <Pressable accessibilityRole="switch" accessibilityState={{ checked: boolValue('academic_admins.can_invite_academic_admins') }} onPress={() => update('academic_admins.can_invite_academic_admins', String(!boolValue('academic_admins.can_invite_academic_admins')))} style={styles.settingRow}>
+            <View style={styles.settingCopy}><Text style={styles.settingLabel}>Allow Academic Admins to invite Academic Admins</Text><Text style={styles.help}>Off by default. Invitations are limited to the inviter’s department.</Text></View>
+            <View style={[styles.switch, boolValue('academic_admins.can_invite_academic_admins') && styles.switchOn]}><View style={[styles.switchThumb, boolValue('academic_admins.can_invite_academic_admins') && styles.switchThumbOn]} /></View>
+          </Pressable>
+        </Card>
+        <Card style={styles.settingsCard}>
+          <Text style={styles.sectionTitle}>Two-step verification policy</Text>
+          <Text style={styles.sectionHelp}>Require an authenticator app code at sign-in and during onboarding. Global enforcement applies to every account; role and department selections apply when the global setting is off.</Text>
+          <Pressable accessibilityRole="switch" accessibilityState={{ checked: boolValue('security.mfa_required') }} onPress={() => update('security.mfa_required', String(!boolValue('security.mfa_required')))} style={styles.settingRow}>
+            <View style={styles.settingCopy}><Text style={styles.settingLabel}>Require MFA for everyone</Text><Text style={styles.help}>Off by default. Turn this on to require an authenticator code for all users.</Text></View>
+            <View style={[styles.switch, boolValue('security.mfa_required') && styles.switchOn]}><View style={[styles.switchThumb, boolValue('security.mfa_required') && styles.switchThumbOn]} /></View>
+          </Pressable>
+          <Text style={styles.settingLabel}>Require MFA by role</Text>
+          <View style={styles.policySelectionGrid}>{[
+            ['system_admin', 'System Admin'], ['academic_admin', 'Academic Admin'], ['faculty', 'Faculty'],
+          ].map(([key, label]) => {
+            const selected = readStringArray(values['security.mfa_required_roles']).includes(key);
+            return <Pressable key={key} accessibilityRole="checkbox" accessibilityState={{ checked: selected }} onPress={() => update('security.mfa_required_roles', JSON.stringify(toggleStringArray(values['security.mfa_required_roles'], key)))} style={styles.policySelectionItem}>
+              <View style={[styles.userCheckbox, selected && styles.userCheckboxSelected]}><Text style={styles.userCheckboxMark}>{selected ? '✓' : ''}</Text></View><Text style={styles.help}>{label}</Text>
+            </Pressable>;
+          })}</View>
+          <Text style={styles.settingLabel}>Require MFA by department</Text>
+          {data.departments.length ? <View style={styles.policySelectionGrid}>{data.departments.map((department) => {
+            const selected = readStringArray(values['security.mfa_required_departments']).includes(department.id);
+            return <Pressable key={department.id} accessibilityRole="checkbox" accessibilityState={{ checked: selected }} onPress={() => update('security.mfa_required_departments', JSON.stringify(toggleStringArray(values['security.mfa_required_departments'], department.id)))} style={styles.policySelectionItem}>
+              <View style={[styles.userCheckbox, selected && styles.userCheckboxSelected]}><Text style={styles.userCheckboxMark}>{selected ? '✓' : ''}</Text></View><Text style={styles.help}>{department.code} · {department.name}</Text>
+            </Pressable>;
+          })}</View> : <Text style={styles.help}>No departments are available.</Text>}
+          <Text style={styles.help}>A user is required to use MFA if the global setting is on, their role is selected, or their department is selected. The rule is checked again when onboarding is completed.</Text>
+        </Card>
+      </> : null}
       <Text style={styles.updatedNote}>Settings last loaded from Supabase. {data.settings.length} configuration entries.</Text>
     </View>
   </>;
@@ -456,7 +647,7 @@ function SystemGradeDeadlines({ data, userId, toast }: Pick<Props, 'data' | 'use
     if (!supabase) return;
     const [deadlineResult, requestResult] = await Promise.all([
       supabase.from('grade_encoding_deadlines').select('scope_type,department_id,program_id,year_level,class_record_id,period_key,deadline_at'),
-      supabase.from('grade_encoding_deadline_requests').select('id,department_id,requested_by,scope_type,program_id,year_level,class_record_id,requested_deadlines,rationale,status,review_note,created_at,reviewed_at').order('created_at', { ascending: true }),
+      supabase.from('grade_encoding_deadline_requests').select('id,department_id,requested_by,scope_type,program_id,year_level,class_record_id,class_record_ids,requested_periods,requested_deadlines,rationale,academic_admin_reason,status,review_note,created_at,reviewed_at').order('created_at', { ascending: true }),
     ]);
     const error = deadlineResult.error ?? requestResult.error;
     if (error) throw error;
@@ -466,13 +657,17 @@ function SystemGradeDeadlines({ data, userId, toast }: Pick<Props, 'data' | 'use
     setDeadlines(next);
     setConfiguredDeadlines(configured);
     const requestRows = [...(requestResult.data ?? [])].sort((a, b) => {
-      const pendingOrder = Number(b.status === 'pending') - Number(a.status === 'pending');
+      const isPending = (status: string) => status === 'pending' || status === 'pending_system_admin';
+      const pendingOrder = Number(isPending(b.status)) - Number(isPending(a.status));
       if (pendingOrder) return pendingOrder;
-      if (a.status === 'pending') return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      if (isPending(a.status)) return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
       return new Date(b.reviewed_at ?? b.created_at).getTime() - new Date(a.reviewed_at ?? a.created_at).getTime();
     });
     setRequests(requestRows);
-    const classIds = [...new Set(requestRows.flatMap((request) => request.class_record_id ? [request.class_record_id] : []))];
+    const classIds = [...new Set(requestRows.flatMap((request) => [
+      ...(request.class_record_id ? [request.class_record_id] : []),
+      ...(request.class_record_ids ?? []),
+    ]))];
     if (!classIds.length) { setClassRecords([]); return; }
     const classResult = await supabase.from('system_admin_class_labels').select('id,section,subject_code,subject_title').in('id', classIds);
     if (classResult.error) throw classResult.error;
@@ -509,6 +704,14 @@ function SystemGradeDeadlines({ data, userId, toast }: Pick<Props, 'data' | 'use
     return date ? new Date(`${date}T12:00:00`).toLocaleDateString() : new Date(value).toLocaleDateString();
   };
   const currentDeadlineFor = (request: any, periodKey: string) => {
+    if (request.scope_type === 'faculty') {
+      const systemDeadline = configuredDeadlines.find((row) => row.scope_type === 'system' && row.period_key === periodKey)?.deadline_at;
+      const values = [...new Set((request.class_record_ids ?? []).map((classId: string) =>
+        configuredDeadlines.find((row) => row.scope_type === 'class' && row.class_record_id === classId && row.period_key === periodKey)?.deadline_at ?? systemDeadline,
+      ).filter(Boolean))];
+      if (values.length > 1) return 'Varies by class';
+      if (values.length === 1) return values[0];
+    }
     const scope = request.scope_type === 'class'
       ? configuredDeadlines.find((row) => row.scope_type === 'class' && row.class_record_id === request.class_record_id && row.period_key === periodKey)
       : request.scope_type === 'program'
@@ -517,6 +720,7 @@ function SystemGradeDeadlines({ data, userId, toast }: Pick<Props, 'data' | 'use
     const system = configuredDeadlines.find((row) => row.scope_type === 'system' && row.period_key === periodKey);
     return scope?.deadline_at ?? system?.deadline_at;
   };
+  const displayCurrentDeadline = (value: unknown) => value === 'Varies by class' ? value : displayDeadline(value);
   return <>
     <Card style={styles.settingsCard}>
       <Text style={styles.sectionTitle}>System-wide encoding deadlines</Text>
@@ -525,8 +729,8 @@ function SystemGradeDeadlines({ data, userId, toast }: Pick<Props, 'data' | 'use
       <View style={[styles.actions, styles.deadlineSaveActions]}><Button label="Save system-wide deadlines" loading={busy} disabled={busy} onPress={() => void save()} /></View>
     </Card>
     <Card style={styles.settingsCard}>
-      <Text style={styles.sectionTitle}>Academic Admin requests</Text>
-      <Text style={styles.sectionHelp}>Review requests to change deadlines for a specific class, program, or year level within a department.</Text>
+      <Text style={styles.sectionTitle}>Deadline change requests</Text>
+      <Text style={styles.sectionHelp}>Review Academic Admin requests and Faculty requests forwarded by their department Academic Admin.</Text>
       {requests.length ? <View style={{ gap: 8 }}>{requests.map((request) => {
         const department = data.departments.find((item) => item.id === request.department_id);
         const program = data.programs.find((item) => item.id === request.program_id);
@@ -534,16 +738,19 @@ function SystemGradeDeadlines({ data, userId, toast }: Pick<Props, 'data' | 'use
         const requesterName = requester ? `${requester.firstName} ${requester.lastName}`.trim() : '';
         const classRecord = classRecords.find((item) => item.id === request.class_record_id);
         const classLabel = classRecord ? `${classRecord.subject_code} · ${classRecord.subject_title} · ${classRecord.section}` : 'Class';
+        const requestedClassLabels = (request.class_record_ids ?? []).map((id: string) => classRecords.find((item) => item.id === id)).filter(Boolean).map((item: any) => `${item.subject_code} · ${item.section}`);
         const statusTone = request.status === 'approved' ? 'success' : request.status === 'rejected' ? 'danger' : 'warning';
         return <View key={request.id} style={[styles.settingRow, styles.deadlineRequestRow]}>
           <View style={styles.deadlineRequestContent}>
-            <View style={styles.deadlineRequestHeader}><Text style={styles.settingLabel}>{request.scope_type === 'program' ? `${program?.code ?? 'Program'} · ${program?.name ?? ''} · ${department?.code ?? 'Department'}` : request.scope_type === 'class' ? `${classLabel} · ${department?.code ?? 'Department'}` : `Year ${request.year_level} · ${department?.code ?? 'Department'}`}</Text><Badge tone={statusTone}>{request.status}</Badge></View>
-            <Text style={styles.help}>Requested by {requesterName || requester?.email || 'Academic Admin'} · {new Date(request.created_at).toLocaleString()}</Text>
-            <View style={styles.deadlineChanges}>{gradeDeadlinePeriods.map(({ key, label }) => request.requested_deadlines?.[key] !== undefined ? <View key={key} style={{ backgroundColor: colors.canvas, borderRadius: 8, padding: 8 }}><Text style={styles.deadlineReasonLabel}>{label}</Text><Text style={styles.help}>{displayDeadline(currentDeadlineFor(request, key))} → {displayDeadline(request.requested_deadlines[key])}</Text></View> : null)}</View>
-            <View style={styles.deadlineNotesGrid}><View style={[styles.deadlineReason, !request.review_note && styles.deadlineNoteFullWidth]}><Text style={styles.deadlineReasonLabel}>Reason for request</Text><Text style={styles.help}>{request.rationale}</Text></View>
+            <View style={styles.deadlineRequestHeader}><Text style={styles.settingLabel}>{request.scope_type === 'faculty' ? `${request.class_record_ids?.length ?? 0} selected classes · ${department?.code ?? 'Department'}` : request.scope_type === 'program' ? `${program?.code ?? 'Program'} · ${program?.name ?? ''} · ${department?.code ?? 'Department'}` : request.scope_type === 'class' ? `${classLabel} · ${department?.code ?? 'Department'}` : `Year ${request.year_level} · ${department?.code ?? 'Department'}`}</Text><Badge tone={statusTone}>{request.status === 'pending_system_admin' ? 'Forwarded to System Admin' : request.status.charAt(0).toUpperCase() + request.status.slice(1)}</Badge></View>
+            <Text style={styles.help}>Requested by {requesterName || requester?.email || (request.scope_type === 'faculty' ? 'Faculty member' : 'Academic Admin')} · {new Date(request.created_at).toLocaleString()}</Text>
+            {request.scope_type === 'faculty' ? <Text style={styles.help}>Classes: {requestedClassLabels.join(', ') || `${request.class_record_ids?.length ?? 0} selected`}</Text> : null}
+            <View style={styles.deadlineChanges}>{gradeDeadlinePeriods.map(({ key, label }) => request.requested_deadlines?.[key] !== undefined ? <View key={key} style={{ backgroundColor: colors.canvas, borderRadius: 8, padding: 8 }}><Text style={styles.deadlineReasonLabel}>{label}</Text><Text style={styles.help}>{displayCurrentDeadline(currentDeadlineFor(request, key))} → {displayDeadline(request.requested_deadlines[key])}</Text></View> : null)}</View>
+            <View style={styles.deadlineNotesGrid}><View style={[styles.deadlineReason, !request.academic_admin_reason && !request.review_note && styles.deadlineNoteFullWidth]}><Text style={styles.deadlineReasonLabel}>{request.scope_type === 'faculty' ? 'Faculty reason' : 'Reason for request'}</Text><Text style={styles.help}>{request.rationale}</Text></View>
+            {request.academic_admin_reason ? <View style={styles.deadlineReason}><Text style={styles.deadlineReasonLabel}>Academic Admin reason</Text><Text style={styles.help}>{request.academic_admin_reason}</Text></View> : null}
             {request.review_note ? <View style={styles.deadlineReason}><Text style={styles.deadlineReasonLabel}>{request.status === 'rejected' ? 'Reason for rejection' : 'Review note'}</Text><Text style={styles.help}>{request.review_note}</Text></View> : null}</View>
           </View>
-          {request.status === 'pending' ? <View style={styles.actions}><Button compact label="Approve" disabled={busy} onPress={() => void review(request.id, 'approved')} /><Button compact label="Decline" variant="secondary" disabled={busy} onPress={() => { setRejectingRequest(request); setRejectionReason(''); }} /></View> : null}
+          {(request.status === 'pending' || request.status === 'pending_system_admin') ? <View style={styles.actions}><Button compact label="Approve" disabled={busy} onPress={() => void review(request.id, 'approved')} /><Button compact label="Decline" variant="secondary" disabled={busy} onPress={() => { setRejectingRequest(request); setRejectionReason(''); }} /></View> : null}
         </View>;
       })}</View> : <Text style={styles.help}>No deadline requests have been submitted.</Text>}
     </Card>
@@ -554,7 +761,9 @@ function SystemGradeDeadlines({ data, userId, toast }: Pick<Props, 'data' | 'use
     </Dialog>
   </>;
 }
+function readStringArray(value: string | undefined): string[] { try { const parsed = JSON.parse(value ?? '[]'); return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === 'string') : []; } catch { return []; } }
+function toggleStringArray(value: string | undefined, item: string): string[] { const current = readStringArray(value); return current.includes(item) ? current.filter((entry) => entry !== item) : [...current, item]; }
+const styles = StyleSheet.create({ screen: { gap: 16 }, heading: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12 }, headingCopy: { flex: 1, minWidth: 240 }, flex: { flex: 1 }, title: { color: colors.text, fontSize: 22, lineHeight: 30, fontWeight: '700' }, subtitle: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginTop: 3 }, metrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, cardTitle: { color: colors.text, fontSize: 15, fontWeight: '700', marginBottom: 8 }, help: { color: colors.textMuted, fontSize: 12, lineHeight: 18 }, formGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, dateGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, dateField: { flex: 1, flexBasis: 180, minWidth: 180 }, userChartFilters: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, filter: { flexGrow: 1, flexBasis: 180, minWidth: 160 }, chartCount: { color: colors.textMuted, fontSize: 11, marginTop: -10 }, analyticsCharts: { flexDirection: 'row', flexWrap: 'wrap', gap: 14 }, fieldHint: { color: colors.textMuted, fontSize: 11, marginTop: -6 }, dialogIntro: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginBottom: 2 }, actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, userHeadingActions: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 8 }, userCheckbox: { width: 20, height: 20, alignItems: 'center', justifyContent: 'center', borderWidth: 1, borderColor: colors.border, borderRadius: 4, backgroundColor: '#FFFFFF' }, userCheckboxSelected: { borderColor: colors.brand, backgroundColor: colors.surfaceMuted }, userCheckboxMark: { color: colors.brand, fontSize: 14, lineHeight: 17, fontWeight: '800' }, policySelectionGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginBottom: 6 }, policySelectionItem: { flexDirection: 'row', alignItems: 'center', gap: 8, minWidth: 180, maxWidth: '100%', padding: 9, borderWidth: 1, borderColor: colors.border, borderRadius: 8, backgroundColor: colors.surface }, deadlineSaveActions: { marginTop: 5 }, forceDeleteOption: { flexDirection: 'row', alignItems: 'flex-start', gap: 9, padding: 10, borderWidth: 1, borderColor: colors.border, borderRadius: 8, backgroundColor: colors.surfaceMuted }, forceDeleteLabel: { color: colors.danger, fontSize: 12, fontWeight: '700' }, forceDeleteWarning: { color: colors.danger, fontSize: 12, lineHeight: 18, padding: 9, borderRadius: 7, backgroundColor: '#FEF2F2' }, linkedRecordsWarning: { color: colors.danger, fontSize: 12, lineHeight: 18, padding: 9, borderRadius: 7, backgroundColor: '#FEF2F2' }, dialogActions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8, marginTop: 4 }, overlay: { flex: 1, backgroundColor: '#00000066', alignItems: 'center', justifyContent: 'center', padding: 24 }, dialog: { width: '100%', maxWidth: 760, maxHeight: '90%', padding: 22, flexShrink: 1 }, dialogTitle: { color: colors.text, fontSize: 19, fontWeight: '700' }, dialogBody: { flexShrink: 1, marginTop: 16 }, dialogBodyContent: { gap: 14 }, close: { color: colors.textMuted, fontSize: 28 }, setting: { maxWidth: 920, gap: 12 }, settingsLayout: { gap: 10, maxWidth: 980 }, settingsCategoryNav: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, borderBottomWidth: 1, borderColor: colors.border }, settingsCategoryTab: { paddingHorizontal: 11, paddingVertical: 9, borderBottomWidth: 2, borderBottomColor: 'transparent' }, settingsCategoryTabActive: { borderBottomColor: colors.brand }, settingsCategoryText: { color: colors.textMuted, fontSize: 12, fontWeight: '600' }, settingsCategoryTextActive: { color: colors.brand }, settingsIntro: { gap: 7, padding: 14 }, settingsCard: { gap: 7, padding: 14 }, summaryRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, borderTopWidth: 1, borderColor: colors.border, paddingTop: 8, marginTop: 2 }, summaryLabel: { color: colors.textMuted, fontSize: 12 }, summaryValue: { color: colors.text, fontSize: 12, fontWeight: '600' }, sectionTitle: { color: colors.text, fontSize: 16, fontWeight: '700' }, sectionHelp: { color: colors.textMuted, fontSize: 12, lineHeight: 18, marginTop: 2 }, settingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 14, paddingVertical: 8, borderTopWidth: 1, borderColor: colors.border, marginTop: 2 }, deadlineRequestRow: { alignItems: 'flex-start', paddingVertical: 12 }, deadlineRequestContent: { flex: 1, gap: 5 }, deadlineRequestHeader: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 }, deadlineChanges: { gap: 2, marginTop: 3 }, deadlineNotesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 5 }, deadlineReason: { flex: 1, flexBasis: 240, minWidth: 220, gap: 4, padding: 10, marginTop: 5, backgroundColor: colors.canvas, borderRadius: 8 }, programRequestNotes: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, programRequestReason: { flex: 1, flexBasis: 260, minWidth: 220, gap: 4, padding: 10, backgroundColor: colors.canvas, borderRadius: 8 }, deadlineNoteFullWidth: { flexBasis: '100%' }, deadlineReasonLabel: { color: colors.text, fontSize: 12, fontWeight: '700' }, settingCopy: { flex: 1 }, settingLabel: { color: colors.text, fontSize: 14, fontWeight: '700' }, switch: { width: 42, height: 24, borderRadius: 14, padding: 2, justifyContent: 'center', backgroundColor: '#D0D5DD' }, switchOn: { backgroundColor: colors.brand }, switchThumb: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#FFF' }, switchThumbOn: { alignSelf: 'flex-end' }, inlineField: { flexDirection: 'row', alignItems: 'flex-end', gap: 10 }, retentionField: { width: 180 }, unit: { color: colors.textMuted, fontSize: 13, paddingBottom: 12 }, sectionHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }, badge: { color: colors.success, backgroundColor: '#DCFCE7', fontSize: 10, fontWeight: '800', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999 }, policyGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 6 }, policyItem: { minWidth: 130, flex: 1, backgroundColor: colors.canvas, borderRadius: 10, padding: 12 }, policyValue: { color: colors.brand, fontSize: 18, fontWeight: '800' }, policyLabel: { color: colors.textMuted, fontSize: 11, marginTop: 3 }, jsonField: { minHeight: 108, textAlignVertical: 'top' }, updatedNote: { color: colors.textMuted, fontSize: 11, textAlign: 'center', paddingBottom: 10 } });
 function PolicyItem({ label, value }: { label: string; value: string }) { return <View style={styles.policyItem}><Text style={styles.policyValue}>{value}</Text><Text style={styles.policyLabel}>{label}</Text></View>; }
 function Info({ onMessage }: { onMessage: (message: string) => void }) { return <><Heading title="Account settings" subtitle="Manage your profile, password, MFA, and notification preferences." /><AccountSettings role="system_admin" screen="settings" onMessage={onMessage} /></>; }
-function Dialog({ visible, title, onClose, children }: { visible: boolean; title: string; onClose: () => void; children: ReactNode }) { return <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}><View style={styles.overlay}><Card style={styles.dialog}><View style={styles.heading}><Text accessibilityRole="header" style={styles.dialogTitle}>{title}</Text><Pressable accessibilityLabel="Close dialog" onPress={onClose}><Text style={styles.close}>×</Text></Pressable></View><View style={styles.dialogBody}>{children}</View></Card></View></Modal>; }
-const styles = StyleSheet.create({ screen: { gap: 16 }, heading: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12 }, flex: { flex: 1 }, title: { color: colors.text, fontSize: 22, lineHeight: 30, fontWeight: '700' }, subtitle: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginTop: 3 }, metrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, cardTitle: { color: colors.text, fontSize: 15, fontWeight: '700', marginBottom: 8 }, help: { color: colors.textMuted, fontSize: 12, lineHeight: 18 }, formGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, dateGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, dateField: { flex: 1, flexBasis: 180, minWidth: 180 }, userChartFilters: { flexDirection: 'row', flexWrap: 'wrap', gap: 10 }, filter: { flexGrow: 1, flexBasis: 180, minWidth: 160 }, chartCount: { color: colors.textMuted, fontSize: 11, marginTop: -10 }, analyticsCharts: { flexDirection: 'row', flexWrap: 'wrap', gap: 14 }, fieldHint: { color: colors.textMuted, fontSize: 11, marginTop: -6 }, dialogIntro: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginBottom: 2 }, actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, deadlineSaveActions: { marginTop: 5 }, dialogActions: { flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8, marginTop: 4 }, overlay: { flex: 1, backgroundColor: '#00000066', alignItems: 'center', justifyContent: 'center', padding: 24 }, dialog: { width: '100%', maxWidth: 760, maxHeight: '90%', padding: 22 }, dialogTitle: { color: colors.text, fontSize: 19, fontWeight: '700' }, dialogBody: { gap: 14, marginTop: 16 }, close: { color: colors.textMuted, fontSize: 28 }, setting: { maxWidth: 920, gap: 12 }, settingsLayout: { gap: 10, maxWidth: 980 }, settingsCategoryNav: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, borderBottomWidth: 1, borderColor: colors.border }, settingsCategoryTab: { paddingHorizontal: 11, paddingVertical: 9, borderBottomWidth: 2, borderBottomColor: 'transparent' }, settingsCategoryTabActive: { borderBottomColor: colors.brand }, settingsCategoryText: { color: colors.textMuted, fontSize: 12, fontWeight: '600' }, settingsCategoryTextActive: { color: colors.brand }, settingsIntro: { gap: 7, padding: 14 }, settingsCard: { gap: 7, padding: 14 }, summaryRow: { flexDirection: 'row', justifyContent: 'space-between', gap: 12, borderTopWidth: 1, borderColor: colors.border, paddingTop: 8, marginTop: 2 }, summaryLabel: { color: colors.textMuted, fontSize: 12 }, summaryValue: { color: colors.text, fontSize: 12, fontWeight: '600' }, sectionTitle: { color: colors.text, fontSize: 16, fontWeight: '700' }, sectionHelp: { color: colors.textMuted, fontSize: 12, lineHeight: 18, marginTop: 2 }, settingRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 14, paddingVertical: 8, borderTopWidth: 1, borderColor: colors.border, marginTop: 2 }, deadlineRequestRow: { alignItems: 'flex-start', paddingVertical: 12 }, deadlineRequestContent: { flex: 1, gap: 5 }, deadlineRequestHeader: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 }, deadlineChanges: { gap: 2, marginTop: 3 }, deadlineNotesGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 5 }, deadlineReason: { flex: 1, flexBasis: 240, minWidth: 220, gap: 4, padding: 10, marginTop: 5, backgroundColor: colors.canvas, borderRadius: 8 }, deadlineNoteFullWidth: { flexBasis: '100%' }, deadlineReasonLabel: { color: colors.text, fontSize: 12, fontWeight: '700' }, settingCopy: { flex: 1 }, settingLabel: { color: colors.text, fontSize: 14, fontWeight: '700' }, switch: { width: 42, height: 24, borderRadius: 14, padding: 2, justifyContent: 'center', backgroundColor: '#D0D5DD' }, switchOn: { backgroundColor: colors.brand }, switchThumb: { width: 20, height: 20, borderRadius: 10, backgroundColor: '#FFF' }, switchThumbOn: { alignSelf: 'flex-end' }, inlineField: { flexDirection: 'row', alignItems: 'flex-end', gap: 10 }, retentionField: { width: 180 }, unit: { color: colors.textMuted, fontSize: 13, paddingBottom: 12 }, sectionHeader: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }, badge: { color: colors.success, backgroundColor: '#DCFCE7', fontSize: 10, fontWeight: '800', paddingHorizontal: 8, paddingVertical: 4, borderRadius: 999 }, policyGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 10, marginTop: 6 }, policyItem: { minWidth: 130, flex: 1, backgroundColor: colors.canvas, borderRadius: 10, padding: 12 }, policyValue: { color: colors.brand, fontSize: 18, fontWeight: '800' }, policyLabel: { color: colors.textMuted, fontSize: 11, marginTop: 3 }, jsonField: { minHeight: 108, textAlignVertical: 'top' }, updatedNote: { color: colors.textMuted, fontSize: 11, textAlign: 'center', paddingBottom: 10 } });
+function Dialog({ visible, title, onClose, children }: { visible: boolean; title: string; onClose: () => void; children: ReactNode }) { return <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}><View style={styles.overlay}><Card style={styles.dialog}><View style={styles.heading}><Text accessibilityRole="header" style={styles.dialogTitle}>{title}</Text><Pressable accessibilityLabel="Close dialog" onPress={onClose}><Text style={styles.close}>×</Text></Pressable></View><ScrollView style={styles.dialogBody} contentContainerStyle={styles.dialogBodyContent} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator>{children}</ScrollView></Card></View></Modal>; }

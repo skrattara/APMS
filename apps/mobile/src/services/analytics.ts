@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useAuth } from "@/auth/AuthProvider";
 import type { ChartDatum } from "@/components/ui";
 import { supabase } from "./supabase";
+import { formatStudentName } from '@/utils/studentName';
 
 const MAX_ANALYTICS_ROWS = 5_000;
 
@@ -83,7 +84,7 @@ export function useLiveAnalytics(): LiveAnalytics {
       client
         .from("performance_evaluations")
         .select(
-          "score,risk_level,classification,calculated_at,enrollments(students(first_name,last_name,institutional_id),class_records(section,subjects(code)))",
+          "score,risk_level,classification,calculated_at,enrollments(students(first_name,middle_name,last_name,suffix,institutional_id),class_records(section,subjects(code)))",
           { count: "exact" },
         )
         .order("calculated_at", { ascending: false })
@@ -103,9 +104,8 @@ export function useLiveAnalytics(): LiveAnalytics {
         setEvaluations(rows.map((item: any, index) => {
           const student = item.enrollments?.students;
           const classRecord = item.enrollments?.class_records;
-          const studentName = student?.first_name && student?.last_name
-            ? `${student.first_name} ${student.last_name}`
-            : student?.institutional_id ?? `Record ${index + 1}`;
+          const formattedStudentName = formatStudentName({ firstName: student?.first_name, middleName: student?.middle_name, lastName: student?.last_name, suffix: student?.suffix });
+          const studentName = formattedStudentName || student?.institutional_id || `Record ${index + 1}`;
           const subject = classRecord?.subjects?.code;
           return {
             label: studentName,

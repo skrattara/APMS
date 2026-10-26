@@ -46,6 +46,8 @@ import { createGradingExcelFormulaBuilder } from '@/services/gradingExcelFormula
 import { styles } from '@/screens/FacultyLivePortalContent.styles';
 import type { GradebookCellOverlay, GradebookConditionalFormattingOperator, GradebookConditionalFormattingRule, GradebookOverlayControl } from './types';
 export type FullAssessmentViewProps = {
+  /** Keep the complete full-view experience available without exposing grade or assessment edits. */
+  readOnly?: boolean;
   classId: string;
   assessments: FacultyAssessment[];
   students: RosterStudent[];
@@ -316,6 +318,7 @@ type SavedGradebookView = {
 };
 
 type FullGradebookRowProps = {
+  readOnly?: boolean;
   student: RosterStudent;
   gradeResult: ReturnType<typeof calculateFullViewGrades>;
   cellOverlays: Map<string, GradebookCellOverlay>;
@@ -462,6 +465,12 @@ const FullGradebookRow = memo(function FullGradebookRow(row: FullGradebookRowPro
         const overlay = cellOverlayFor(column.id);
         const marksPreview = overlay?.mode === 'highlight' || overlay?.mode === 'value-highlight';
         const overlayValueLabel = overlay && (overlay.mode === 'value' || overlay.mode === 'value-highlight') ? overlay.label ?? overlay.value : undefined;
+        if (row.readOnly) return <View key={`${student.enrollmentId}-${assessment.id}`} accessible accessibilityRole="text" accessibilityLabel={`${student.name}, ${assessment.title}, score ${value || 'unscored'}${overlayValueLabel ? `, ${overlayValueLabel}` : ''}${hasConditionalFormatting ? ', conditional formatting applied' : ''}`} {...({ title: overlayValueLabel, dataSet: { gradebookCol: row.columnCssKey(column.id), gradebookColumnId: column.id, gradebookStudent: student.enrollmentId, gradebookHoverCell: 'true', ...(hasConditionalFormatting ? { gradebookFormatted: 'true' } : {}), ...(marksPreview ? { gradebookPreview: 'true' } : {}) } } as any)} {...row.columnHoverProps([column.id])} style={[styles.fullAssessmentColumn, { width: column.width, position: 'relative', justifyContent: 'center' }, containerFormatStyle(conditionalStyle), hoverFormatStyle(conditionalStyle?.backgroundColor ?? conditionalBadge?.backgroundColor), cellOverlayStyleFor(column.id), frozenPaneClip, categoricalTone === 'passing' ? { backgroundColor: '#EAF6EC' } : null, categoricalTone === 'failing' ? { backgroundColor: '#FCEBEC' } : null]}>
+          <Text style={[styles.fullScoreValue, { textAlign: 'center' }, categoricalTone === 'passing' ? { color: '#176B35' } : null, categoricalTone === 'failing' ? { color: '#A52B32' } : null, textFormatStyle(conditionalStyle)]}>{value || '—'}</Text>
+          {hasCellConditionalFormatting ? renderConditionalFormatMarker() : null}
+          {conditionalBadge ? <View pointerEvents="none" style={{ position: 'absolute', right: 2, bottom: 1, paddingHorizontal: 4, paddingVertical: 0, borderRadius: 7, backgroundColor: conditionalBadge.backgroundColor ?? '#E0E7FF' }}><Text style={{ color: conditionalBadge.textColor ?? '#3730A3', fontSize: 8, lineHeight: 10, fontWeight: '700' }}>{conditionalBadge.label}</Text></View> : null}
+          {renderCellOverlay(column.id)}
+        </View>;
         return <View key={`${student.enrollmentId}-${assessment.id}`} accessible accessibilityRole="text" accessibilityLabel={`${student.name}, ${assessment.title}, score ${value || 'unscored'}${overlayValueLabel ? `, ${overlayValueLabel}` : ''}${hasConditionalFormatting ? ', conditional formatting applied' : ''}`} {...({ title: overlayValueLabel, dataSet: { gradebookCol: row.columnCssKey(column.id), gradebookColumnId: column.id, gradebookStudent: student.enrollmentId, gradebookHoverCell: 'true', ...(hasConditionalFormatting ? { gradebookFormatted: 'true' } : {}), ...(marksPreview ? { gradebookPreview: 'true' } : {}) } } as any)} {...row.columnHoverProps([column.id])} style={[styles.fullAssessmentColumn, { width: column.width, position: 'relative' }, containerFormatStyle(conditionalStyle), hoverFormatStyle(conditionalStyle?.backgroundColor ?? conditionalBadge?.backgroundColor), cellOverlayStyleFor(column.id), frozenPaneClip]}>
           {mapping ? <SelectField compact label="" accessibilityLabel={`${student.name}, ${assessment.title} score`} controlDataSet={{ gradebookScoreControl: 'true' }} value={value} error={error} deferModalUntilOpen options={gradebookSelectOptions(mapping)} onChange={(next) => row.onChange(key, next)} controlRef={(input) => { if (input) row.scoreInputRefs.current.set(key, input); else row.scoreInputRefs.current.delete(key); }} onKeyDown={(event) => row.navigateScoreInput(event, student.enrollmentId, assessment.id, value)} containerStyle={[styles.fullScoreField, { gap: 0 }]} controlStyle={[styles.fullScoreControl, categoricalTone === 'passing' ? { backgroundColor: '#EAF6EC', borderColor: '#55A66A' } : null, categoricalTone === 'failing' ? { backgroundColor: '#FCEBEC', borderColor: '#D66B70' } : null, conditionalStyle?.backgroundColor ? { backgroundColor: conditionalStyle.backgroundColor } : null, conditionalStyle?.borderColor ? { borderColor: conditionalStyle.borderColor } : null]} valueStyle={[styles.fullScoreValue, categoricalTone === 'passing' ? { color: '#176B35' } : null, categoricalTone === 'failing' ? { color: '#A52B32' } : null, textFormatStyle(conditionalStyle)]} /> : <DebouncedGradebookScoreField accessibilityLabel={`${student.name}, ${assessment.title} score`} value={value} error={error} placeholder={`0–${assessment.maximumScore}`} onChangeText={(next) => row.onChange(key, next)} inputRef={(input) => { if (input) row.scoreInputRefs.current.set(key, input); else row.scoreInputRefs.current.delete(key); }} onKeyDown={(event) => row.navigateScoreInput(event, student.enrollmentId, assessment.id, value)} style={[styles.fullNumericInput, conditionalStyle?.backgroundColor ? { backgroundColor: conditionalStyle.backgroundColor } : null, textFormatStyle(conditionalStyle)]} containerStyle={styles.fullNumericScoreField} />}
           {hasCellConditionalFormatting ? renderConditionalFormatMarker() : null}
@@ -502,6 +511,7 @@ const FullGradebookRow = memo(function FullGradebookRow(row: FullGradebookRowPro
   && previous.anonymousIdWidth === next.anonymousIdWidth
   && previous.leftSpacerWidth === next.leftSpacerWidth
   && previous.rightSpacerWidth === next.rightSpacerWidth
+  && previous.readOnly === next.readOnly
   && previous.studentColumnOffsets.classNumber === next.studentColumnOffsets.classNumber
   && previous.studentColumnOffsets.name === next.studentColumnOffsets.name
   && previous.studentColumnOffsets.id === next.studentColumnOffsets.id
@@ -771,7 +781,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
   ), [gradingSystem]);
   const classNumberWidth = 40;
   const studentNameWidth = 136;
-  const studentIdWidth = 100;
+  const studentIdWidth = props.readOnly ? 120 : 120;
   const anonymousIdWidth = 76;
   const frozenStudentWidth = (showClassNumber ? classNumberWidth : 0) + (showStudentName ? studentNameWidth : 0) + (showStudentId ? studentIdWidth : 0) + (showAnonymousId ? anonymousIdWidth : 0);
   const showContextMenu = (event: any, actions: GradebookContextAction[]) => {
@@ -2124,8 +2134,10 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
             setScoreHistoryLoading(true);
             void props.onLoadScoreHistory(assessment.id, student.enrollmentId).then(setScoreHistory).catch((cause) => props.onToast(getErrorMessage(cause, 'Score history could not be loaded.'))).finally(() => setScoreHistoryLoading(false));
           } },
-          { label: 'Paste score', onSelect: async () => { const pasted = (await pasteText()).trim(); const pasteError = pasted ? validateAssessmentValue(pasted, assessment.maximumScore, mapping) : undefined; if (!pasted) return props.onToast('Clipboard has no score to paste.'); if (pasteError) return props.onToast(pasteError); props.onChange(key, pasted); } },
-          { label: 'Clear score', destructive: true, onSelect: () => props.onChange(key, '') },
+          ...(!props.readOnly ? [
+            { label: 'Paste score', onSelect: async () => { const pasted = (await pasteText()).trim(); const pasteError = pasted ? validateAssessmentValue(pasted, assessment.maximumScore, mapping) : undefined; if (!pasted) return props.onToast('Clipboard has no score to paste.'); if (pasteError) return props.onToast(pasteError); props.onChange(key, pasted); } },
+            { label: 'Clear score', destructive: true, onSelect: () => props.onChange(key, '') },
+          ] : []),
         ];
       } else {
         const gradeResult = gradeResults.get(student.enrollmentId) ?? calculateFullViewGrades(workspace, student.enrollmentId, gradingSystem, props.values, missingScoreHandling);
@@ -2173,7 +2185,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
     return `${condition}${value ? ` ${value}${rule.valueTo == null ? '' : ` – ${rule.valueTo}`}` : ''} · ${rule.applyTo === 'row' ? 'row' : 'cell'} · ${format}`;
   };
   const fullViewActions: { label: string; icon: AppIconName; onSelect: () => void; disabled?: boolean }[] = [
-    { label: 'Import scores', icon: 'upload', onSelect: () => { setScoreImportPreview(null); setScoreImportOpen(true); } },
+    ...(!props.readOnly ? [{ label: 'Import scores', icon: 'upload' as const, onSelect: () => { setScoreImportPreview(null); setScoreImportOpen(true); } }] : []),
     { label: exportingExcel ? 'Exporting Excel…' : 'Export Excel', icon: 'download', onSelect: () => void exportFullViewExcel(), disabled: exportingExcel },
     ...(props.overlayControl ? [{ label: props.overlayControl.active ? `Hide ${props.overlayControl.label}` : props.overlayControl.label, icon: 'evaluation' as const, onSelect: props.overlayControl.onToggle }] : []),
     { label: 'Version history', icon: 'history', onSelect: () => {
@@ -2220,7 +2232,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
             <Text style={styles.fullViewActionTriggerText}>Actions</Text><AppIcon name="chevronDown" size={14} color={colors.textMuted} />
           </Pressable>
         </View>
-        <Button label="Save all scores" loading={props.saving} disabled={!props.dirtyCount || !!props.invalidCount} onPress={props.onSave} />
+        {!props.readOnly ? <Button label="Save all scores" loading={props.saving} disabled={!props.dirtyCount || !!props.invalidCount} onPress={props.onSave} /> : null}
       </View>
       <Modal visible={fullViewActionsOpen} transparent animationType="none" onRequestClose={() => setFullViewActionsOpen(false)}>
         <View style={styles.fullViewActionModalRoot}>
@@ -2286,7 +2298,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
                     columnActions.push(...sortFilterActions(sortableColumnTarget));
                     columnActions.push({ label: 'Conditional formatting…', onSelect: () => openConditionalFormatting(column) });
                   }
-                  if (row.level === 'ASSESSMENT / RESULT' && range.length === 1 && range[0].kind === 'assessment' && range[0].assessment) {
+                  if (!props.readOnly && row.level === 'ASSESSMENT / RESULT' && range.length === 1 && range[0].kind === 'assessment' && range[0].assessment) {
                     const assessment = range[0].assessment;
                     const mapping = valueMappingForType(gradingSystem, assessment.gradingTypeId ?? assessment.component);
                     const applyColumnValue = (value: string) => props.onChangeMany(Object.fromEntries(filteredStudents.map((student) => [`${student.enrollmentId}:${assessment.id}`, value])));
@@ -2330,6 +2342,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
             {!props.paginationEnabled && safeVirtualStartIndex > 0 ? <View style={{ width: tableWidth, height: rowOffsets[safeVirtualStartIndex] ?? safeVirtualStartIndex * fullRowHeight }} /> : null}
             {renderedStudents.map((student) => <FullGradebookRow
               key={student.enrollmentId}
+              readOnly={props.readOnly}
               student={student}
               gradeResult={gradeResults.get(student.enrollmentId) ?? calculateFullViewGrades(workspace, student.enrollmentId, gradingSystem, props.values, missingScoreHandling)}
               cellOverlays={cellOverlayByKey}
@@ -2378,7 +2391,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
       )}
       {props.paginationEnabled && orderedStudents.length > 10 ? <View style={styles.pagination}><Button label="Previous" variant="secondary" disabled={props.page <= 1} onPress={() => props.onPageChange((current) => Math.max(1, current - 1))} /><Text style={styles.paginationText}>Page {props.page} of {localPageCount} · {orderedStudents.length} students</Text><Button label="Next" variant="secondary" disabled={props.page >= localPageCount} onPress={() => props.onPageChange((current) => Math.min(localPageCount, current + 1))} /></View> : null}
       <View style={styles.saveBar}>
-        <View style={styles.flex}><Text style={styles.saveState}>{props.dirtyCount ? `${props.dirtyCount} unsaved change${props.dirtyCount === 1 ? '' : 's'}` : 'All scores saved'}</Text><Text style={styles.help}>{props.invalidCount ? `${props.invalidCount} score${props.invalidCount === 1 ? '' : 's'} need correction before saving.` : props.autosaveEnabled ? 'Changes save automatically. Scores remain provisional monitoring data until recorded in SWU SIS.' : 'Scores remain provisional monitoring data until recorded in SWU SIS.'}</Text></View>
+        <View style={styles.flex}><Text style={styles.saveState}>{props.readOnly ? '' : props.dirtyCount ? `${props.dirtyCount} unsaved change${props.dirtyCount === 1 ? '' : 's'}` : 'All scores saved'}</Text><Text style={styles.help}>{props.readOnly ? '' : props.invalidCount ? `${props.invalidCount} score${props.invalidCount === 1 ? '' : 's'} need correction before saving.` : props.autosaveEnabled ? 'Changes save automatically. Scores remain provisional monitoring data until recorded in SWU SIS.' : 'Scores remain provisional monitoring data until recorded in SWU SIS.'}</Text></View>
       </View>
       <Modal transparent visible={!!conditionalFormattingTarget} animationType="fade" onRequestClose={() => setConditionalFormattingTarget(null)}>
         <View style={styles.viewOptionsOverlay}>
@@ -2640,23 +2653,23 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
                         setGradebookHistoryOpen(false);
                         props.onToast(`Previewing the previous value in ${changes.length} changed cell${changes.length === 1 ? '' : 's'}.`);
                       }} style={{ marginRight: 8, paddingHorizontal: 10, paddingVertical: 8, borderRadius: 6, borderWidth: 1, borderColor: colors.border }}><Text style={{ color: colors.text, fontSize: 13 }}>Preview change</Text></Pressable>
-                      <Pressable disabled={!assessment || !student} onPress={() => setScoreVersionToRestore({ id: entry.id, snapshot: entry.after, assessmentId: entry.assessmentId, enrollmentId: entry.enrollmentId, assessmentTitle: assessment?.title ?? 'Assessment', studentName: student?.name ?? 'Student', batchId: entry.batchId, restoreBatch: isBulk })} style={{ backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border, borderTopLeftRadius: 7, borderBottomLeftRadius: 7, paddingHorizontal: 12, paddingVertical: 9, opacity: !assessment || !student ? 0.5 : 1 }}>
+                      <Pressable disabled={props.readOnly || !assessment || !student} onPress={() => setScoreVersionToRestore({ id: entry.id, snapshot: entry.after, assessmentId: entry.assessmentId, enrollmentId: entry.enrollmentId, assessmentTitle: assessment?.title ?? 'Assessment', studentName: student?.name ?? 'Student', batchId: entry.batchId, restoreBatch: isBulk })} style={{ display: props.readOnly ? 'none' : 'flex', backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border, borderTopLeftRadius: 7, borderBottomLeftRadius: 7, paddingHorizontal: 12, paddingVertical: 9, opacity: !assessment || !student ? 0.5 : 1 }}>
                         <Text style={{ color: colors.text, fontSize: 13, fontWeight: '600' }}>{entry.batchId ? 'Restore this change' : 'Restore to this point'}</Text>
                       </Pressable>
-                      <Pressable accessibilityLabel="Choose restore scope" onPress={() => setRestoreMenuVersionId((current) => current === entry.id ? null : entry.id)} style={{ backgroundColor: colors.surfaceMuted, borderWidth: 1, borderLeftWidth: 0, borderColor: colors.border, borderTopRightRadius: 7, borderBottomRightRadius: 7, paddingHorizontal: 11, paddingVertical: 9 }}>
+                      <Pressable accessibilityLabel="Choose restore scope" disabled={props.readOnly} onPress={() => setRestoreMenuVersionId((current) => current === entry.id ? null : entry.id)} style={{ display: props.readOnly ? 'none' : 'flex', backgroundColor: colors.surfaceMuted, borderWidth: 1, borderLeftWidth: 0, borderColor: colors.border, borderTopRightRadius: 7, borderBottomRightRadius: 7, paddingHorizontal: 11, paddingVertical: 9 }}>
                         <Text style={{ color: colors.text, fontSize: 13 }}>▾</Text>
                       </Pressable>
-                      <Pressable onPress={() => { setGradebookVersionNameInput(entry.versionName ?? ''); setGradebookVersionToName({ id: entry.id, name: entry.versionName ?? '' }); }} style={{ marginLeft: 10, paddingHorizontal: 10, paddingVertical: 8 }}><Text style={{ color: colors.brand, fontSize: 13 }}>{entry.versionName ? 'Rename version' : 'Name version'}</Text></Pressable>
+                      <Pressable disabled={props.readOnly} onPress={() => { setGradebookVersionNameInput(entry.versionName ?? ''); setGradebookVersionToName({ id: entry.id, name: entry.versionName ?? '' }); }} style={{ display: props.readOnly ? 'none' : 'flex', marginLeft: 10, paddingHorizontal: 10, paddingVertical: 8 }}><Text style={{ color: colors.brand, fontSize: 13 }}>{entry.versionName ? 'Rename version' : 'Name version'}</Text></Pressable>
                     </View> : <View style={{ flexDirection: 'row', alignItems: 'center', gap: 0 }}>
-                      <Pressable disabled={!entry.before && !entry.after} onPress={() => setAssessmentVersionToRestore({ id: entry.id, assessmentTitle, action })} style={{ backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border, borderTopLeftRadius: 7, borderBottomLeftRadius: 7, paddingHorizontal: 12, paddingVertical: 9, opacity: !entry.before && !entry.after ? 0.5 : 1 }}>
+                      <Pressable disabled={props.readOnly || (!entry.before && !entry.after)} onPress={() => setAssessmentVersionToRestore({ id: entry.id, assessmentTitle, action })} style={{ display: props.readOnly ? 'none' : 'flex', backgroundColor: colors.surfaceMuted, borderWidth: 1, borderColor: colors.border, borderTopLeftRadius: 7, borderBottomLeftRadius: 7, paddingHorizontal: 12, paddingVertical: 9, opacity: !entry.before && !entry.after ? 0.5 : 1 }}>
                         <Text style={{ color: colors.text, fontSize: 13, fontWeight: '600' }}>Restore this version</Text>
                       </Pressable>
-                      <Pressable accessibilityLabel="Choose restore scope" onPress={() => setRestoreMenuVersionId((current) => current === entry.id ? null : entry.id)} style={{ backgroundColor: colors.surfaceMuted, borderWidth: 1, borderLeftWidth: 0, borderColor: colors.border, borderTopRightRadius: 7, borderBottomRightRadius: 7, paddingHorizontal: 11, paddingVertical: 9 }}>
+                      <Pressable accessibilityLabel="Choose restore scope" disabled={props.readOnly} onPress={() => setRestoreMenuVersionId((current) => current === entry.id ? null : entry.id)} style={{ display: props.readOnly ? 'none' : 'flex', backgroundColor: colors.surfaceMuted, borderWidth: 1, borderLeftWidth: 0, borderColor: colors.border, borderTopRightRadius: 7, borderBottomRightRadius: 7, paddingHorizontal: 11, paddingVertical: 9 }}>
                         <Text style={{ color: colors.text, fontSize: 13 }}>▾</Text>
                       </Pressable>
-                      <Pressable onPress={() => { setGradebookVersionNameInput(entry.versionName ?? ''); setGradebookVersionToName({ id: entry.id, name: entry.versionName ?? '' }); }} style={{ marginLeft: 10, paddingHorizontal: 10, paddingVertical: 8 }}><Text style={{ color: colors.brand, fontSize: 13 }}>{entry.versionName ? 'Rename version' : 'Name version'}</Text></Pressable>
+                      <Pressable disabled={props.readOnly} onPress={() => { setGradebookVersionNameInput(entry.versionName ?? ''); setGradebookVersionToName({ id: entry.id, name: entry.versionName ?? '' }); }} style={{ display: props.readOnly ? 'none' : 'flex', marginLeft: 10, paddingHorizontal: 10, paddingVertical: 8 }}><Text style={{ color: colors.brand, fontSize: 13 }}>{entry.versionName ? 'Rename version' : 'Name version'}</Text></Pressable>
                     </View>}
-                    {restoreMenuVersionId === entry.id ? <View style={{ alignSelf: 'flex-start', borderWidth: 1, borderColor: colors.border, borderRadius: 7, backgroundColor: colors.surfaceMuted, padding: 4, gap: 2 }}>
+                    {!props.readOnly && restoreMenuVersionId === entry.id ? <View style={{ alignSelf: 'flex-start', borderWidth: 1, borderColor: colors.border, borderRadius: 7, backgroundColor: colors.surfaceMuted, padding: 4, gap: 2 }}>
                       {entry.eventType === 'score' ? <Pressable disabled={!assessment || !student} onPress={() => { setRestoreMenuVersionId(null); setScoreVersionToRestore({ id: entry.id, snapshot: entry.after, assessmentId: entry.assessmentId, enrollmentId: entry.enrollmentId, assessmentTitle: assessment?.title ?? 'Assessment', studentName: student?.name ?? 'Student', batchId: entry.batchId, restoreBatch: (batchCounts.get(entry.batchId ?? '') ?? 0) > 1 }); }} style={{ paddingHorizontal: 10, paddingVertical: 8 }}><Text style={{ color: colors.text, fontSize: 13 }}>{(batchCounts.get(entry.batchId ?? '') ?? 0) > 1 ? 'Restore this bulk change' : 'Restore this score only'}</Text></Pressable> : null}
                       <Pressable onPress={() => { setRestoreMenuVersionId(null); setGradebookVersionToRestore({ id: entry.id, createdAt: entry.createdAt, assessmentTitle, studentName: student?.name ?? 'Student' }); }} style={{ paddingHorizontal: 10, paddingVertical: 8 }}><Text style={{ color: colors.danger, fontSize: 13 }}>Restore entire gradebook to this point</Text></Pressable>
                     </View> : null}
@@ -2728,7 +2741,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
                   <Text style={styles.gradebookContextActionText}>{oldValue}  →  {newValue}</Text>
                   <Text style={styles.help}>{date.toLocaleString()} by {actorLabel}</Text>
                   {entry.restoredFromVersionId ? <Text style={styles.help}>Restored from an earlier change</Text> : null}
-                  <Button label="Restore this version" variant="secondary" onPress={() => setScoreVersionToRestore({ id: entry.id, snapshot: entry.after, assessmentId: scoreHistoryTarget!.assessment.id, enrollmentId: scoreHistoryTarget!.student.enrollmentId, assessmentTitle: scoreHistoryTarget!.assessment.title, studentName: scoreHistoryTarget!.student.name, batchId: entry.batchId })} />
+                  {!props.readOnly ? <Button label="Restore this version" variant="secondary" onPress={() => setScoreVersionToRestore({ id: entry.id, snapshot: entry.after, assessmentId: scoreHistoryTarget!.assessment.id, enrollmentId: scoreHistoryTarget!.student.enrollmentId, assessmentTitle: scoreHistoryTarget!.assessment.title, studentName: scoreHistoryTarget!.student.name, batchId: entry.batchId })} /> : null}
                 </View>;
               })}
             </ScrollView> : <Text style={styles.help}>No score changes were found for this student and assessment.</Text>}

@@ -842,7 +842,7 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
   return <View style={styles.container}>
       <Card style={styles.card}>
       <Text accessibilityRole="header" style={styles.heading}>Report builder</Text>
-      <Text style={styles.copy}>Create a formatted report from {activeScopeLabel.toLowerCase()} data. Select several questions to combine useful insights in one report. Only the Data table template includes every matching record.</Text>
+      <Text style={styles.copy}>Create a formatted report from {activeScopeLabel.toUpperCase()} data. Select several questions to combine useful insights in one report. Only the Data table template includes every matching record.</Text>
       <Text style={styles.label}>Report title</Text><TextInput accessibilityLabel="Report title" value={title} onChangeText={setTitle} style={styles.input} />
       <Text style={styles.sectionHeading}>Report format</Text>
       <View style={styles.options}>

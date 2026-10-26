@@ -2,7 +2,7 @@ import { getErrorMessage } from '@/services/errors';
 import type { Role } from "@apms/domain";
 import { lazy, Suspense, useEffect, useMemo, useState, type ComponentProps } from "react";
 import { Modal, Pressable, StyleSheet, Text, View } from "react-native";
-import { SvgXml } from "react-native-svg";
+import QRCode from "react-native-qrcode-svg";
 
 import { useAuth, type AuthUser } from "@/auth/AuthProvider";
 import { AppShell } from "@/components/AppShell";
@@ -131,7 +131,7 @@ const SCREENS: Record<string, ScreenDefinition> = {
     action: "Create Class Record",
   },
   classes: {
-    title: "Classes Overview",
+    title: "Classes",
     subtitle: "Review assigned or authorized monitoring classes.",
     kind: "table",
   },
@@ -1281,8 +1281,8 @@ export function Settings({
 }
 
 function MfaSettings({ onMessage }: { onMessage: (message: string) => void }) {
-  const { demoMode, mfaEnabled, enrollMfa, verifyMfa, disableMfa } = useAuth();
-  const [enrollment, setEnrollment] = useState<{ factorId: string; qrCode: string; secret: string } | null>(null);
+  const { demoMode, mfaEnabled, mfaRequired, enrollMfa, verifyMfa, disableMfa } = useAuth();
+  const [enrollment, setEnrollment] = useState<{ factorId: string; uri: string; secret: string } | null>(null);
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const start = async () => {
@@ -1300,7 +1300,7 @@ function MfaSettings({ onMessage }: { onMessage: (message: string) => void }) {
     <Text style={styles.sectionTitle}>Scan this QR code</Text>
     <Text style={styles.muted}>Use Google Authenticator, Microsoft Authenticator, or another TOTP app.</Text>
     <View style={styles.qrCode} accessibilityLabel="MFA setup QR code">
-      <SvgXml xml={enrollment.qrCode} width="180" height="180" />
+      <QRCode value={enrollment.uri} size={160} quietZone={10} backgroundColor="#FFFFFF" color="#101828" ecl="M" />
     </View>
     <Text style={styles.muted}>Can’t scan? Enter this secret manually: {enrollment.secret}</Text>
     <Field label="Six-digit verification code" value={code} onChangeText={(value) => setCode(value.replace(/\D/g, "").slice(0, 6))} keyboardType="number-pad" />
@@ -1308,8 +1308,8 @@ function MfaSettings({ onMessage }: { onMessage: (message: string) => void }) {
   </View>;
   return <View style={styles.form}>
     <Text style={styles.sectionTitle}>Authenticator-app MFA</Text>
-    <Text style={styles.muted}>{mfaEnabled ? "Enabled. A six-digit code is required at sign-in." : "Add an authenticator app as a second factor."}</Text>
-    <Button label={mfaEnabled ? "Disable MFA" : "Set up MFA"} loading={busy} variant={mfaEnabled ? "secondary" : "primary"} onPress={() => void (mfaEnabled ? disable() : start())} />
+    <Text style={styles.muted}>{mfaEnabled ? "Enabled. A six-digit code is required at sign-in." : mfaRequired ? "Your System Admin requires an authenticator app for your account." : "Add an authenticator app as a second factor."}</Text>
+    <Button label={mfaEnabled ? (mfaRequired ? "MFA required" : "Disable MFA") : "Set up MFA"} loading={busy} disabled={mfaEnabled && mfaRequired} variant={mfaEnabled ? "secondary" : "primary"} onPress={() => void (mfaEnabled ? disable() : start())} />
   </View>;
 }
 

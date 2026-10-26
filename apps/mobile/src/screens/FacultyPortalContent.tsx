@@ -585,6 +585,7 @@ function RecordDialog({
     setAverage(String(record?.average ?? ""));
   }, [record, visible]);
   const numeric = [students, passed, failed, average].map(Number);
+  const sectionOptions = [...new Set([...FACULTY_RECORDS.map((item) => item.section), ...(record?.section ? [record.section] : [])])].sort().map((value) => ({ label: value, value }));
   const valid =
     subject.trim().length > 2 &&
     section.trim().length > 1 &&
@@ -613,13 +614,7 @@ function RecordDialog({
           placeholder="e.g. Data Structures"
           containerStyle={styles.dialogField}
         />
-        <Field
-          label="Class Section *"
-          value={section}
-          onChangeText={setSection}
-          placeholder="e.g. BSCS-3A"
-          containerStyle={styles.dialogField}
-        />
+        <SelectField label="Class Section *" value={section} options={sectionOptions} onChange={setSection} containerStyle={styles.dialogField} />
         <SelectField
           label="Semester"
           value={semester}

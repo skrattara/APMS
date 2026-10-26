@@ -64,11 +64,13 @@ export function useNotifications() {
           createdAt: item.created_at,
           target: notificationTarget(item.entity_type, item.entity_id, userRole),
           actionLabel: item.entity_type === "grade_encoding_deadline_request"
-            ? userRole === "system_admin" ? "Review request" : userRole === "academic_admin" ? "View request" : null
+            ? userRole === "system_admin" ? "Review request" : userRole === "academic_admin" ? "Review request" : userRole === "faculty" ? "View request" : null
             : item.entity_type === "grade_encoding_deadline_reminder"
               ? userRole === "faculty" ? "View gradebook" : userRole === "academic_admin" ? "View deadlines" : null
             : item.entity_type === "subject_request" || item.entity_type === "class_request"
               ? userRole === "academic_admin" ? "Review request" : userRole === "faculty" ? "View request" : null
+            : item.entity_type === "program_request"
+              ? userRole === "system_admin" ? "Review request" : userRole === "academic_admin" ? "View request" : null
             : null,
         }));
       setItems(nextItems);
@@ -99,11 +101,13 @@ export function useNotifications() {
         createdAt: item.created_at,
         target: notificationTarget(item.entity_type, item.entity_id, userRole),
         actionLabel: item.entity_type === "grade_encoding_deadline_request"
-          ? userRole === "system_admin" ? "Review request" : userRole === "academic_admin" ? "View request" : null
+          ? userRole === "system_admin" ? "Review request" : userRole === "academic_admin" ? "Review request" : userRole === "faculty" ? "View request" : null
           : item.entity_type === "grade_encoding_deadline_reminder"
             ? userRole === "faculty" ? "View gradebook" : userRole === "academic_admin" ? "View deadlines" : null
           : item.entity_type === "subject_request" || item.entity_type === "class_request"
             ? userRole === "academic_admin" ? "Review request" : userRole === "faculty" ? "View request" : null
+          : item.entity_type === "program_request"
+            ? userRole === "system_admin" ? "Review request" : userRole === "academic_admin" ? "View request" : null
           : null,
       }));
       setItems((current) => [...current, ...nextItems]);
@@ -246,6 +250,7 @@ function notificationTarget(
   if (entityType === "grade_encoding_deadline_request") {
     if (role === "system_admin") return "system?settingsCategory=Grade%20deadlines";
     if (role === "academic_admin") return "deadlines";
+    if (role === "faculty") return "deadlines";
     return null;
   }
   if (entityType === "grade_encoding_deadline_reminder") {
@@ -259,7 +264,13 @@ function notificationTarget(
     return null;
   }
   if (entityType === "class_request") {
-    if (role === "academic_admin" || role === "faculty") return "classes";
+    if (role === "academic_admin") return "classes?tab=requests";
+    if (role === "faculty") return "classes";
+    return null;
+  }
+  if (entityType === "program_request") {
+    if (role === "system_admin") return "setup?settingsCategory=Program%20requests";
+    if (role === "academic_admin") return "units";
     return null;
   }
   const screens: Record<string, string> = {

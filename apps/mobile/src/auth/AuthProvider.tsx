@@ -10,9 +10,9 @@ import { isSupabaseConfigured, supabase } from '@/services/supabase';
 import { getErrorMessage } from '@/services/errors';
 import { clearRememberedPortalRoute } from '@/auth/routeMemory';
 
-export type AuthUser = { id: string; email: string; firstName: string; lastName: string; role: Role };
-type AuthResult = { ok: true; user: AuthUser } | { ok: false; message: string } | { ok: false; mfaRequired: true; factorId: string };
-export type MfaEnrollment = { factorId: string; qrCode: string; secret: string };
+export type AuthUser = { id: string; email: string; firstName: string; lastName: string; role: Role; emailConfirmed: boolean; onboardingComplete: boolean };
+type AuthResult = { ok: true; user: AuthUser } | { ok: false; message: string } | { ok: false; mfaRequired: true; factorId: string } | { ok: false; mfaSetupRequired: true };
+export type MfaEnrollment = { factorId: string; uri: string; secret: string };
 type AuthContextValue = {
   user: AuthUser | null; loading: boolean; configured: boolean; demoMode: boolean;
   authError: string | null;
@@ -21,9 +21,13 @@ type AuthContextValue = {
   passwordRecoveryError: string | null;
   clearPasswordRecoveryError(): void;
   updatePassword(newPassword: string): Promise<{ ok: boolean; message: string }>;
+  setOnboardingPassword(newPassword: string): Promise<{ ok: boolean; message: string }>;
+  completeOnboarding(takeoverEmail?: string): Promise<{ ok: boolean; message: string }>;
   signIn(email: string, password: string): Promise<AuthResult>;
   mfaFactorId: string | null;
   mfaEnabled: boolean;
+  mfaRequired: boolean;
+  mfaSetupRequired: boolean;
   enrollMfa(): Promise<{ ok: true; enrollment: MfaEnrollment } | { ok: false; message: string }>;
   verifyMfa(code: string, factorId?: string): Promise<{ ok: boolean; message: string }>;
   disableMfa(): Promise<{ ok: boolean; message: string }>;
@@ -36,7 +40,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 const demoMode = process.env.EXPO_PUBLIC_DEMO_MODE === 'true';
 const demoSessionKey = 'apms.demo.session';
 
-type SessionResolution = { user: AuthUser | null; factorId: string | null; mfaEnabled: boolean };
+type SessionResolution = { user: AuthUser | null; factorId: string | null; mfaEnabled: boolean; mfaRequired: boolean; mfaSetupRequired: boolean };
 const sessionResolutions = new Map<string, Promise<SessionResolution>>();
 
 function recoveryLinkErrorFromCurrentUrl(): string | null {
@@ -62,22 +66,28 @@ function authCallbackErrorFromCurrentUrl(): string | null {
 
 async function loadSupabaseUser(session: Session): Promise<AuthUser | null> {
   if (!supabase) return null;
-  const { data, error } = await supabase
-    .from('profiles')
-    .select('id,email,first_name,last_name,status,user_roles!user_roles_user_id_fkey!inner(roles!inner(key))')
-    .eq('id', session.user.id)
-    .single();
-  // A missing/inaccessible profile means this account cannot enter APMS.
-  // Other failures (network, API, schema) are transient and must not be
-  // mistaken for an invalid session.
-  if (error) {
-    if (error.code === 'PGRST116') return null;
-    throw error;
+  let data: any = null;
+  let error: { code?: string } | null = null;
+  // Supabase sends the invite as soon as its Auth user is created. Give the
+  // account-provisioning Edge Function a moment to attach the APMS profile and
+  // role before resolving the invitation's just-created session.
+  for (let attempt = 0; attempt < 7; attempt += 1) {
+    const result = await supabase
+      .from('profiles')
+      .select('id,email,first_name,last_name,status,onboarding_completed_at,user_roles!user_roles_user_id_fkey!inner(roles!inner(key))')
+      .eq('id', session.user.id)
+      .single();
+    data = result.data;
+    error = result.error;
+    if (!error || error.code !== 'PGRST116' || attempt === 6) break;
+    await new Promise((resolve) => setTimeout(resolve, 350));
   }
+  // Other failures (network, API, schema) must not be mistaken for an invalid session.
+  if (error) { if (error.code === 'PGRST116') return null; throw error; }
   if (!data || data.status !== 'active') return null;
   const nested = data.user_roles as unknown as { roles: { key: Role } }[];
   const role = nested[0]?.roles?.key;
-  return role ? { id: data.id, email: data.email, firstName: data.first_name, lastName: data.last_name, role } : null;
+  return role ? { id: data.id, email: data.email, firstName: data.first_name, lastName: data.last_name, role, emailConfirmed: Boolean(session.user.email_confirmed_at), onboardingComplete: Boolean(data.onboarding_completed_at) } : null;
 }
 
 function resolveSupabaseSession(session: Session): Promise<SessionResolution> {
@@ -85,7 +95,7 @@ function resolveSupabaseSession(session: Session): Promise<SessionResolution> {
   if (cached) return cached;
 
   const resolution = (async (): Promise<SessionResolution> => {
-    if (!supabase) return { user: null, factorId: null, mfaEnabled: false };
+    if (!supabase) return { user: null, factorId: null, mfaEnabled: false, mfaRequired: false, mfaSetupRequired: false };
     const [assuranceResult, factorsResult] = await Promise.all([
       supabase.auth.mfa.getAuthenticatorAssuranceLevel(),
       supabase.auth.mfa.listFactors(),
@@ -93,13 +103,20 @@ function resolveSupabaseSession(session: Session): Promise<SessionResolution> {
     if (assuranceResult.error) throw assuranceResult.error;
     if (factorsResult.error) throw factorsResult.error;
     const factor = factorsResult.data?.totp.find((candidate) => candidate.status === 'verified');
-    const needsMfa = assuranceResult.data?.nextLevel === 'aal2'
+    const profileUser = await loadSupabaseUser(session);
+    const policyResult = await supabase.functions.invoke('auth-mfa-policy');
+    if (policyResult.error || policyResult.data?.error) throw policyResult.error ?? new Error(policyResult.data.error);
+    const mfaRequired = policyResult.data?.required === true;
+    const needsMfa = mfaRequired && assuranceResult.data?.nextLevel === 'aal2'
       && assuranceResult.data.currentLevel !== 'aal2'
       && Boolean(factor);
+    const mfaSetupRequired = mfaRequired && !factor && Boolean(profileUser?.onboardingComplete);
     return {
-      user: needsMfa ? null : await loadSupabaseUser(session),
+      user: needsMfa || mfaSetupRequired ? null : profileUser,
       factorId: needsMfa ? factor!.id : null,
       mfaEnabled: Boolean(factor),
+      mfaRequired,
+      mfaSetupRequired,
     };
   })();
 
@@ -114,13 +131,15 @@ function resolveSupabaseSession(session: Session): Promise<SessionResolution> {
 }
 
 function fromDemo(user: DemoUser): AuthUser {
-  return { id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName, role: user.role };
+  return { id: user.id, email: user.email, firstName: user.firstName, lastName: user.lastName, role: user.role, emailConfirmed: true, onboardingComplete: true };
 }
 
 export function AuthProvider({ children }: PropsWithChildren) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [mfaFactorId, setMfaFactorId] = useState<string | null>(null);
   const [mfaEnabled, setMfaEnabled] = useState(false);
+  const [mfaRequired, setMfaRequired] = useState(false);
+  const [mfaSetupRequired, setMfaSetupRequired] = useState(false);
   const [passwordRecovery, setPasswordRecovery] = useState(false);
   const [passwordRecoveryError, setPasswordRecoveryError] = useState<string | null>(recoveryLinkErrorFromCurrentUrl);
   const [authError, setAuthError] = useState<string | null>(authCallbackErrorFromCurrentUrl);
@@ -168,15 +187,31 @@ export function AuthProvider({ children }: PropsWithChildren) {
       const fragment = new URLSearchParams(hash);
       const query = Linking.parse(url).queryParams ?? {};
       const type = fragment.get('type') ?? (typeof query.type === 'string' ? query.type : null);
+      const code = fragment.get('code') ?? (typeof query.code === 'string' ? query.code : null);
+      const onboardingCallback = url.includes('/onboarding') || url.startsWith('apms://onboarding');
+      if (active && code && (onboardingCallback || type === 'invite')) {
+        try {
+          const { error } = await client.auth.exchangeCodeForSession(code);
+          if (error && active) setAuthError('This invitation link has expired or has already been used. Ask the System Admin to send another invitation.');
+        } catch {
+          if (active) setAuthError('This invitation link could not be verified. Ask the System Admin to send another invitation.');
+        }
+        return;
+      }
       const errorCode = fragment.get('error_code') ?? (typeof query.error_code === 'string' ? query.error_code : null);
+      const callbackError = fragment.get('error_description') ?? (typeof query.error_description === 'string' ? query.error_description : null);
+      if (active && onboardingCallback && (errorCode || callbackError)) {
+        setAuthError('This invitation link has expired or could not be verified. Ask the System Admin to send another invitation.');
+        return;
+      }
       if (errorCode === 'otp_expired') {
         setPasswordRecoveryError('This password reset link has expired or has already been used.');
         return;
       }
       const accessToken = fragment.get('access_token') ?? (typeof query.access_token === 'string' ? query.access_token : null);
       const refreshToken = fragment.get('refresh_token') ?? (typeof query.refresh_token === 'string' ? query.refresh_token : null);
-      if (!active || type !== 'recovery' || !accessToken || !refreshToken) return;
-      setPasswordRecovery(true);
+      if (!active || !['recovery', 'invite', 'signup'].includes(type ?? '') || !accessToken || !refreshToken) return;
+      if (type === 'recovery') setPasswordRecovery(true);
       try {
         const { error } = await client.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
         if (error && active) setPasswordRecovery(false);
@@ -198,13 +233,15 @@ export function AuthProvider({ children }: PropsWithChildren) {
         setUser(null);
         setMfaFactorId(null);
         setMfaEnabled(false);
+        setMfaRequired(false);
+        setMfaSetupRequired(false);
         return;
       }
       const resolution = await resolveSupabaseSession(session);
       if (!active || revision !== sessionRevision) return;
       const googleIdentity = session.user.app_metadata?.provider === 'google'
         || (Array.isArray(session.user.app_metadata?.providers) && session.user.app_metadata.providers.includes('google'));
-      if (googleIdentity && !resolution.user && !resolution.factorId) {
+      if (googleIdentity && !resolution.user && !resolution.factorId && !resolution.mfaSetupRequired) {
         setUser(null);
         setAuthError('This Google account does not have an active APMS account. Ask an APMS administrator to create or activate your account, then try again.');
         // Supabase may create an Auth identity during OAuth when sign-ups are
@@ -214,6 +251,8 @@ export function AuthProvider({ children }: PropsWithChildren) {
         return;
       }
       setMfaEnabled(resolution.mfaEnabled);
+      setMfaRequired(resolution.mfaRequired);
+      setMfaSetupRequired(resolution.mfaSetupRequired);
       setMfaFactorId(resolution.factorId);
       setUser(resolution.user);
     };
@@ -259,9 +298,16 @@ export function AuthProvider({ children }: PropsWithChildren) {
       return { ok: false, message: getErrorMessage(cause, 'Your account could not be verified right now. Please try again.') };
     }
     setMfaEnabled(resolution.mfaEnabled);
+    setMfaRequired(resolution.mfaRequired);
+    setMfaSetupRequired(resolution.mfaSetupRequired);
     if (resolution.factorId) {
       setMfaFactorId(resolution.factorId);
       return { ok: false, mfaRequired: true, factorId: resolution.factorId };
+    }
+    if (resolution.mfaSetupRequired) {
+      setMfaSetupRequired(true);
+      setUser(null);
+      return { ok: false, mfaSetupRequired: true };
     }
     const next = resolution.user;
     if (!next) {
@@ -283,6 +329,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
     if (!next) return { ok: false, message: 'Your account is inactive or has no assigned APMS role.' };
     setMfaFactorId(null); setUser(next);
     setMfaEnabled(true);
+    setMfaSetupRequired(false);
     return { ok: true, message: 'MFA verified.' };
   }, [mfaFactorId]);
 
@@ -297,11 +344,15 @@ export function AuthProvider({ children }: PropsWithChildren) {
     if (error || !data?.id || !data.totp) {
       return { ok: false as const, message: getErrorMessage(error, 'MFA setup could not be started. Try again.') };
     }
-    return { ok: true as const, enrollment: { factorId: data.id, qrCode: data.totp.qr_code, secret: data.totp.secret } };
+    return { ok: true as const, enrollment: { factorId: data.id, uri: data.totp.uri, secret: data.totp.secret } };
   }, []);
 
   const disableMfa = useCallback(async () => {
     if (!supabase) return { ok: false, message: 'APMS is not connected.' };
+    const policy = await supabase.functions.invoke('auth-mfa-policy');
+    if (policy.error || policy.data?.error) return { ok: false, message: 'The MFA policy could not be checked. Try again.' };
+    if (policy.data?.required === true) { setMfaRequired(true); return { ok: false, message: 'Your account is required to use two-step verification by your system administrator.' }; }
+    setMfaRequired(false);
     const { data: factors, error } = await supabase.auth.mfa.listFactors();
     const factor = factors?.totp.find((candidate) => candidate.status === 'verified');
     if (error || !factor) return { ok: false, message: 'No active MFA factor was found.' };
@@ -312,7 +363,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
 
   const clearPasswordRecoveryError = useCallback(() => setPasswordRecoveryError(null), []);
   const clearAuthError = useCallback(() => setAuthError(null), []);
-  const signOut = useCallback(async () => { clearRememberedPortalRoute(); setPasswordRecovery(false); setPasswordRecoveryError(null); setAuthError(null); if (supabase) await supabase.auth.signOut({ scope: 'local' }); if (demoMode) globalThis.localStorage?.removeItem(demoSessionKey); setUser(null); setMfaFactorId(null); }, []);
+  const signOut = useCallback(async () => { clearRememberedPortalRoute(); setPasswordRecovery(false); setPasswordRecoveryError(null); setAuthError(null); if (supabase) await supabase.auth.signOut({ scope: 'local' }); if (demoMode) globalThis.localStorage?.removeItem(demoSessionKey); setUser(null); setMfaFactorId(null); setMfaRequired(false); setMfaSetupRequired(false); }, []);
   const requestPasswordReset = useCallback(async (email: string) => {
     const normalized = email.trim().toLowerCase();
     if (!normalized || !/^\S+@\S+\.\S+$/.test(normalized)) return { ok: false, message: 'Enter a valid institutional email address first.' };
@@ -341,6 +392,26 @@ export function AuthProvider({ children }: PropsWithChildren) {
       return { ok: false, message: getErrorMessage(cause, 'The password could not be updated. Check your connection and try again.') };
     }
   }, [passwordRecovery]);
+  const setOnboardingPassword = useCallback(async (newPassword: string) => {
+    if (!supabase || !user || user.onboardingComplete) return { ok: false, message: 'Open your active invitation to set an onboarding password.' };
+    if (newPassword.length < 12) return { ok: false, message: 'Use at least 12 characters for your password.' };
+    try {
+      const { error } = await supabase.auth.updateUser({ password: newPassword });
+      return error ? { ok: false, message: getErrorMessage(error, 'The password could not be saved. Try again.') } : { ok: true, message: 'Password saved.' };
+    } catch (cause) { return { ok: false, message: getErrorMessage(cause, 'The password could not be saved. Check your connection and try again.') }; }
+  }, [user]);
+  const completeOnboarding = useCallback(async (takeoverEmail?: string) => {
+    if (!supabase || !user || user.onboardingComplete) return { ok: false, message: 'Open your active invitation to complete onboarding.' };
+    try {
+      const { data, error } = await supabase.functions.invoke('apms-onboarding', { body: { takeoverEmail: takeoverEmail?.trim() || null } });
+      if (error || data?.error) return { ok: false, message: getErrorMessage(error, data?.error ?? 'Your onboarding details could not be saved. Try again.') };
+      const { data: sessionData } = await supabase.auth.getSession();
+      const next = sessionData.session ? await loadSupabaseUser(sessionData.session) : null;
+      if (!next) return { ok: false, message: 'Onboarding was saved, but the account session needs to be refreshed. Sign in again.' };
+      setUser(next);
+      return { ok: true, message: 'Onboarding complete.' };
+    } catch (cause) { return { ok: false, message: getErrorMessage(cause, 'Your onboarding details could not be saved. Try again.') }; }
+  }, [user]);
   const signInWithGoogle = useCallback(async () => {
     if (demoMode) return { ok: false, message: 'Google sign-in is unavailable for development-only accounts.' };
     if (!supabase) return { ok: false, message: 'APMS is not connected. Google sign-in could not start.' };
@@ -376,7 +447,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       return { ok: false, message: getErrorMessage(cause, 'Google sign-in could not be completed. Check your connection and try again.') };
     }
   }, []);
-  const value = useMemo(() => ({ user, loading, configured: isSupabaseConfigured, demoMode, authError, clearAuthError, signIn, passwordRecovery, passwordRecoveryError, clearPasswordRecoveryError, updatePassword, mfaFactorId, mfaEnabled, enrollMfa, verifyMfa, disableMfa, signInWithGoogle, requestPasswordReset, signOut }), [user, loading, authError, clearAuthError, signIn, passwordRecovery, passwordRecoveryError, clearPasswordRecoveryError, updatePassword, mfaFactorId, mfaEnabled, enrollMfa, verifyMfa, disableMfa, signInWithGoogle, requestPasswordReset, signOut]);
+  const value = useMemo(() => ({ user, loading, configured: isSupabaseConfigured, demoMode, authError, clearAuthError, signIn, passwordRecovery, passwordRecoveryError, clearPasswordRecoveryError, updatePassword, setOnboardingPassword, completeOnboarding, mfaFactorId, mfaEnabled, mfaRequired, mfaSetupRequired, enrollMfa, verifyMfa, disableMfa, signInWithGoogle, requestPasswordReset, signOut }), [user, loading, authError, clearAuthError, signIn, passwordRecovery, passwordRecoveryError, clearPasswordRecoveryError, updatePassword, setOnboardingPassword, completeOnboarding, mfaFactorId, mfaEnabled, mfaRequired, mfaSetupRequired, enrollMfa, verifyMfa, disableMfa, signInWithGoogle, requestPasswordReset, signOut]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

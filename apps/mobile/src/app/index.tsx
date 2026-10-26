@@ -14,6 +14,8 @@ import {
 } from "react-native";
 
 import { useAuth } from "@/auth/AuthProvider";
+import type { MfaEnrollment } from "@/auth/AuthProvider";
+import QRCode from 'react-native-qrcode-svg';
 import { getRememberedPortalPath } from "@/auth/routeMemory";
 import { AppIcon } from "@/components/Icon";
 import { colors } from "@/theme/tokens";
@@ -34,6 +36,10 @@ export default function LoginPage() {
     passwordRecoveryError,
     signIn,
     mfaFactorId,
+    mfaSetupRequired,
+    mfaRequired,
+    mfaEnabled,
+    enrollMfa,
     verifyMfa,
     signOut,
     signInWithGoogle,
@@ -53,6 +59,8 @@ export default function LoginPage() {
   const [submitting, setSubmitting] = useState(false);
   const [mfaCode, setMfaCode] = useState("");
   const [mfaError, setMfaError] = useState("");
+  const [mfaEnrollment, setMfaEnrollment] = useState<MfaEnrollment | null>(null);
+  const [setupCode, setSetupCode] = useState("");
   const [remember, setRemember] = useState(() =>
     Boolean(globalThis.localStorage?.getItem(rememberedEmailKey)),
   );
@@ -69,6 +77,7 @@ export default function LoginPage() {
     setSubmitting(false);
     if (!result.ok) {
       if ('mfaRequired' in result) return;
+      if ('mfaSetupRequired' in result) return;
       setError(result.message);
       return;
     }
@@ -96,6 +105,21 @@ export default function LoginPage() {
     if (!result.ok) { setMfaError(result.message); return; }
     setMfaCode("");
   };
+  const startMfaSetup = async () => {
+    setMfaError(''); setSubmitting(true);
+    const result = await enrollMfa();
+    setSubmitting(false);
+    if (!result.ok) { setMfaError(result.message); return; }
+    setMfaEnrollment(result.enrollment);
+  };
+  const verifyMfaSetup = async () => {
+    if (!mfaEnrollment) return;
+    setMfaError(''); setSubmitting(true);
+    const result = await verifyMfa(setupCode, mfaEnrollment.factorId);
+    setSubmitting(false);
+    if (!result.ok) { setMfaError(result.message); return; }
+    setMfaEnrollment(null); setSetupCode('');
+  };
   const sendPasswordReset = async () => {
     setError("");
     setNotice("");
@@ -112,7 +136,7 @@ export default function LoginPage() {
       </View>
     );
   if (passwordRecovery || passwordRecoveryError) return <Redirect href="/reset-password" />;
-  if (user) return <Redirect href={getRememberedPortalPath(user.role) ?? homePath(user.role)} />;
+  if (user) return <Redirect href={!user.onboardingComplete ? '/onboarding' : getRememberedPortalPath(user.role) ?? homePath(user.role)} />;
   if (mfaFactorId) return (
     <View style={styles.challengePage}>
       <View style={styles.challengeCard}>
@@ -122,6 +146,26 @@ export default function LoginPage() {
         <TextInput value={mfaCode} onChangeText={(value) => setMfaCode(value.replace(/\D/g, "").slice(0, 6))} placeholder="000000" keyboardType="number-pad" maxLength={6} autoFocus style={styles.mfaInput} accessibilityLabel="MFA verification code" />
         {mfaError ? <Text accessibilityRole="alert" style={styles.error}>{mfaError}</Text> : null}
         <Pressable accessibilityRole="button" disabled={submitting || mfaCode.length !== 6} onPress={() => void submitMfa()} style={[styles.signIn, (submitting || mfaCode.length !== 6) && styles.disabled]}><Text style={styles.signInText}>{submitting ? "Verifying…" : "Verify code"}</Text></Pressable>
+        <Pressable accessibilityRole="button" onPress={() => void signOut()} style={styles.cancelMfa}><Text style={styles.forgot}>Cancel and sign out</Text></Pressable>
+      </View>
+    </View>
+  );
+  if (mfaSetupRequired && mfaRequired) return (
+    <View style={styles.challengePage}>
+      <View style={styles.challengeCard}>
+        <Image source={require("../../assets/apms/login-background.jpeg")} style={styles.logo} />
+        <Text style={styles.challengeTitle}>Set up two-step verification</Text>
+        <Text style={styles.challengeHelp}>Your organization requires an authenticator app for sign-in. Scan this code, then confirm with the six-digit code from the app.</Text>
+        {mfaEnabled ? <Text style={styles.notice}>Authenticator is enabled. Sign out and sign in again to continue.</Text> : mfaEnrollment ? <>
+          <View style={styles.loginQrCode}><QRCode value={mfaEnrollment.uri} size={180} quietZone={10} backgroundColor="#FFFFFF" color="#101828" ecl="M" /></View>
+          <Text style={styles.challengeHelp}>Or enter this setup key manually:</Text><Text selectable style={styles.mfaSecret}>{mfaEnrollment.secret}</Text>
+          <TextInput value={setupCode} onChangeText={(value) => setSetupCode(value.replace(/\D/g, '').slice(0, 6))} placeholder="000000" keyboardType="number-pad" maxLength={6} style={styles.mfaInput} accessibilityLabel="Authenticator setup code" />
+          {mfaError ? <Text accessibilityRole="alert" style={styles.error}>{mfaError}</Text> : null}
+          <Pressable accessibilityRole="button" disabled={submitting || setupCode.length !== 6} onPress={() => void verifyMfaSetup()} style={[styles.signIn, (submitting || setupCode.length !== 6) && styles.disabled]}><Text style={styles.signInText}>{submitting ? 'Verifying…' : 'Verify and continue'}</Text></Pressable>
+        </> : <>
+          {mfaError ? <Text accessibilityRole="alert" style={styles.error}>{mfaError}</Text> : null}
+          <Pressable accessibilityRole="button" disabled={submitting} onPress={() => void startMfaSetup()} style={[styles.signIn, submitting && styles.disabled]}><Text style={styles.signInText}>{submitting ? 'Preparing…' : 'Set up authenticator app'}</Text></Pressable>
+        </>}
         <Pressable accessibilityRole="button" onPress={() => void signOut()} style={styles.cancelMfa}><Text style={styles.forgot}>Cancel and sign out</Text></Pressable>
       </View>
     </View>
@@ -423,6 +467,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
     fontWeight: "500",
+    paddingHorizontal: 12
   },
   pressed: { opacity: 0.8 },
   disabled: { opacity: 0.55 },
@@ -478,6 +523,8 @@ const styles = StyleSheet.create({
   challengeCard: { width: 384, maxWidth: "100%", backgroundColor: "#FFF", borderRadius: 16, padding: 28, alignItems: "center", shadowColor: "#000", shadowOpacity: 0.12, shadowRadius: 18, shadowOffset: { width: 0, height: 8 }, elevation: 5 },
   challengeTitle: { color: "#101828", fontSize: 20, fontWeight: "700", marginTop: 16 },
   challengeHelp: { color: "#667085", fontSize: 13, lineHeight: 20, textAlign: "center", marginVertical: 12 },
+  loginQrCode: { width: 200, height: 200, alignSelf: "center", justifyContent: "center", alignItems: "center", backgroundColor: "#FFF", borderRadius: 8, marginVertical: 8 },
+  mfaSecret: { color: colors.text, fontSize: 13, fontWeight: "700", letterSpacing: 1, textAlign: "center", marginBottom: 10 },
   mfaInput: { width: "100%", height: 48, borderWidth: 1, borderColor: "#D0D5DD", borderRadius: 8, textAlign: "center", letterSpacing: 8, fontSize: 22, color: colors.text, marginBottom: 10 },
   cancelMfa: { padding: 14 },
 });

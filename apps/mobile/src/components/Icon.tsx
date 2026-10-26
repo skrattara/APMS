@@ -13,7 +13,7 @@ export type AppIconName =
   | 'format'
   | 'hide' | 'show' | 'expand' | 'collapse' | 'edit' | 'delete'
   | 'add' | 'save' | 'download' | 'upload' | 'cancel' | 'refresh' | 'apply'
-  | 'undo' | 'redo' | 'previous' | 'next' | 'history' | 'restore' | 'archive'
+  | 'undo' | 'redo' | 'previous' | 'next' | 'history' | 'restore' | 'archive' | 'more'
   | 'moveUp' | 'moveDown' | 'send' | 'connection' | 'select' | 'absent';
 
 const ICONS: Record<AppIconName, SymbolViewProps['name']> = {
@@ -83,6 +83,7 @@ const ICONS: Record<AppIconName, SymbolViewProps['name']> = {
   history: { ios: 'clock.arrow.circlepath', android: 'history', web: 'history' },
   restore: { ios: 'arrow.uturn.backward', android: 'restore', web: 'restore' },
   archive: { ios: 'archivebox.fill', android: 'archive', web: 'archive' },
+  more: { ios: 'ellipsis', android: 'more_vert', web: 'more_vert' },
   moveUp: { ios: 'arrow.up', android: 'arrow_upward', web: 'arrow_upward' },
   moveDown: { ios: 'arrow.down', android: 'arrow_downward', web: 'arrow_downward' },
   send: { ios: 'paperplane.fill', android: 'send', web: 'send' },

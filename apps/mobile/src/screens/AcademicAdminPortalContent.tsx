@@ -3,7 +3,9 @@ import { forecastError, formatForecastError } from '@/services/predictionErrors'
 import { planPredictionRequestBatches, predictionBatchItemLimit } from '@/services/predictionBatching';
 import { buildRecordedAssessmentColumns, formatRecordedAssessmentScore, isForecastOutputEnabled } from '@/services/forecastGradeColumns';
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Modal, Platform, Pressable, ScrollView, Share, StyleSheet, Text, View } from 'react-native';
+import { Modal, Platform, Pressable, ScrollView, Share, StyleSheet, Text, View, useWindowDimensions } from 'react-native';
+import { useLocalSearchParams } from 'expo-router';
+import * as DocumentPicker from 'expo-document-picker';
 
 import { useAuth } from '@/auth/AuthProvider';
 import { AppIcon } from '@/components/Icon';
@@ -17,16 +19,23 @@ import {
   applyDepartmentEvaluationCriteriaToClasses, applyPersonalEvaluationCriteriaToClasses, deleteDepartmentEvaluationCriteria, deletePersonalEvaluationCriteria, manageSubject, reviewSubjectRequest, saveDepartmentEvaluationCriteria, savePersonalEvaluationSystem, type AcademicSubject, type AcademicSubjectRequest, type AcademicWorkspace, type SavedEvaluationSystem,
   rejectAcademicAdminClassRequest, type ClassRequestReview, type DepartmentFacultyMember,
 } from '@/services/academic';
-import { applyGradingSystemToClasses, calculateEnrollmentGrade, deleteGradingSystem, encodePredictionInput, runAiPredictions, saveGradingSystem, summarizeEnrollmentStanding, type ClassWorkspace } from '@/services/faculty';
+import { addStudentToClass, applyGradingSystemToClasses, calculateEnrollmentGrade, deleteGradingSystem, encodePredictionInput, importRosterCsv, importRosterExcel, loadGradebookScoreHistory, previewRosterCsv, previewRosterExcel, removeStudentsFromClass, runAiPredictions, saveGradingSystem, summarizeEnrollmentStanding, updateStudentDetails, type ClassWorkspace, type GradebookHistoryCursor, type RosterStudent } from '@/services/faculty';
 import { calculateGradingSystem, calculateTrend, extractValidatedSavedAiFactorValues, IT_GLOBAL_GRADING_SYSTEM, validateGradingSystem, type GradingDefinition } from '@apms/domain';
 import { createGradingDefinitionId, GradingSystemBuilderForm } from '@/components/GradingSystemBuilderForm';
 import { EvaluationSystemBuilderForm } from '@/components/EvaluationSystemBuilderForm';
 import { DEFAULT_EVALUATION_SYSTEM, evaluateStudentPerformanceDetailed, validateEvaluationSystem, type EvaluationDefinition } from '@apms/domain';
 import { evaluationRiskOptions, evaluationRiskValue } from '@/services/evaluationRiskOptions';
-import { deleteYearLevel, loadYearLevels, saveYearLevel, type YearLevelRecord } from '@/services/admin';
+import { addProgramSections, deleteProgramSection, deleteYearLevel, loadInstitutionCode, loadProgramRequests, loadProgramSections, loadYearLevels, saveProgramSection, saveYearLevel, submitProgramRequest, type ProgramRequestRecord, type ProgramSectionRecord, type YearLevelRecord } from '@/services/admin';
 import { Settings as AccountSettings } from '@/screens/AppPortalScreen';
 import { buildClassAssessmentConstraints, buildClassPredictionInputs, StudentDetail } from '@/screens/FacultyLivePortalContent';
 import { colors } from '@/theme/tokens';
+import { FullAssessmentView } from '@/components/gradebook/FullAssessmentView';
+import { styles as facultyGradebookStyles } from '@/screens/FacultyLivePortalContent.styles';
+import { isValidStudentId, normalizeStudentId } from '@/utils/studentId';
+import { useStudentIdValidation, useYearLevels } from '@/hooks/useAcademicOptions';
+import { formatStudentName } from '@/utils/studentName';
+import { resolveInstitutionalSectionName } from '@/utils/academicSections';
+import { AcademicAdminUsersScreen } from '@/screens/AcademicAdminUsersScreen';
 
 function standing(workspace: ClassWorkspace, enrollmentId: string) {
   const summary = summarizeEnrollmentStanding(workspace, enrollmentId);
@@ -142,6 +151,7 @@ function useWorkspace(userId: string) {
 }
 
 export function AcademicAdminPortalContent({ screen }: { screen: string }) {
+  const params = useLocalSearchParams<{ tab?: string }>();
   const { user } = useAuth(); const state = useWorkspace(user?.id ?? ''); const toast = useToast();
   if (!user) return <PageState kind="error" title="Session required" message="Sign in again to continue." />;
   if (state.loading) return <PageState kind="loading" title="Loading Academic Admin workspace" message="Retrieving department-scoped monitoring records." />;
@@ -152,8 +162,8 @@ export function AcademicAdminPortalContent({ screen }: { screen: string }) {
     {screen === 'overview' ? <Overview {...props} /> : null}
     {screen === 'units' ? <Units {...props} /> : null}
     {screen === 'subjects' ? <Subjects {...props} /> : null}
-    {screen === 'classes' ? <Classes {...props} /> : null}
-    {screen === 'students' ? <Students {...props} /> : null}
+    {screen === 'classes' ? <Classes {...props} initialTab={params.tab === 'requests' ? 'Class requests' : 'Department classes'} /> : null}
+    {screen === 'users' ? <AcademicAdminUsersScreen departmentId={state.data.department!.id} toast={toast} /> : null}
     {screen === 'risk' ? <Risk {...props} /> : null}
     {screen === 'criteria' ? <Criteria {...props} /> : null}
     {screen === 'deadlines' ? <GradeDeadlineRequests {...props} /> : null}
@@ -163,7 +173,7 @@ export function AcademicAdminPortalContent({ screen }: { screen: string }) {
 }
 
 type Props = { data: AcademicWorkspace; refresh: () => void; userId: string; toast: ReturnType<typeof useToast> };
-function Heading({ title, subtitle, action }: { title: string; subtitle: string; action?: React.ReactNode }) { return <View style={styles.heading}><View style={styles.flex}><Text accessibilityRole="header" style={styles.title}>{title}</Text><Text style={styles.subtitle}>{subtitle}</Text></View>{action}</View>; }
+function Heading({ title, subtitle, action }: { title: string; subtitle: string; action?: React.ReactNode }) { return <View style={styles.heading}><View style={styles.headingCopy}><Text accessibilityRole="header" style={styles.title}>{title}</Text><Text style={styles.subtitle}>{subtitle}</Text></View>{action}</View>; }
 function allStudents(data: AcademicWorkspace) { return data.classes.flatMap((item) => item.workspace.students.map((student) => {
   const definition = item.workspace.evaluationSystem ?? data.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
   const summary = summarizeEnrollmentStanding(item.workspace, student.enrollmentId);
@@ -200,20 +210,34 @@ function GradeDeadlineRequests({ data, userId, toast }: Props) {
   const [rationale, setRationale] = useState('');
   const [requests, setRequests] = useState<any[]>([]);
   const [busy, setBusy] = useState(false);
+  const [requesterNames, setRequesterNames] = useState<Record<string, string>>({});
+  const [reviewingFacultyRequest, setReviewingFacultyRequest] = useState<any | null>(null);
+  const [facultyDeadlines, setFacultyDeadlines] = useState<Record<string, string>>({});
+  const [facultyForwardReason, setFacultyForwardReason] = useState('');
+  const [facultyRejectionReason, setFacultyRejectionReason] = useState('');
+  const [facultyReviewMode, setFacultyReviewMode] = useState<'forward' | 'reject'>('forward');
   const load = useCallback(async () => {
     if (!supabase) return;
     const [globalResult, requestResult] = await Promise.all([
       supabase.from('grade_encoding_deadlines').select('period_key,deadline_at').eq('scope_type', 'system'),
-      supabase.from('grade_encoding_deadline_requests').select('id,scope_type,program_id,year_level,class_record_id,requested_deadlines,rationale,status,review_note,created_at,reviewed_at').eq('requested_by', userId).order('created_at', { ascending: true }),
+      supabase.from('grade_encoding_deadline_requests').select('id,department_id,requested_by,scope_type,program_id,year_level,class_record_id,requested_periods,class_record_ids,requested_deadlines,rationale,academic_admin_reason,academic_admin_reviewed_by,status,review_note,created_at,reviewed_at').order('created_at', { ascending: true }),
     ]);
     const error = globalResult.error ?? requestResult.error;
     if (error) throw error;
-    setRequests([...(requestResult.data ?? [])].sort((a, b) => {
-      const pendingOrder = Number(b.status === 'pending') - Number(a.status === 'pending');
+    const loadedRequests = requestResult.data ?? [];
+    setRequests([...loadedRequests].sort((a, b) => {
+      const isPending = (status: string) => status === 'pending' || status === 'pending_academic_admin' || status === 'pending_system_admin';
+      const pendingOrder = Number(isPending(b.status)) - Number(isPending(a.status));
       if (pendingOrder) return pendingOrder;
-      if (a.status === 'pending') return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
+      if (isPending(a.status)) return new Date(a.created_at).getTime() - new Date(b.created_at).getTime();
       return new Date(b.reviewed_at ?? b.created_at).getTime() - new Date(a.reviewed_at ?? a.created_at).getTime();
     }));
+    const facultyRequesterIds = [...new Set(loadedRequests.filter((request) => request.scope_type === 'faculty').map((request) => request.requested_by))];
+    if (facultyRequesterIds.length) {
+      const { data: profiles, error: profileError } = await supabase.from('profiles').select('id,first_name,last_name').in('id', facultyRequesterIds);
+      if (profileError) throw profileError;
+      setRequesterNames(Object.fromEntries((profiles ?? []).map((profile) => [profile.id, `${profile.first_name ?? ''} ${profile.last_name ?? ''}`.trim() || 'Faculty member'])));
+    } else setRequesterNames({});
     return globalResult.data ?? [];
   }, [userId]);
   const [globalDeadlines, setGlobalDeadlines] = useState<Record<string, string>>({});
@@ -242,6 +266,35 @@ function GradeDeadlineRequests({ data, userId, toast }: Props) {
     } catch (cause) { toast.show(getErrorMessage(cause, 'The deadline request could not be submitted.')); }
     finally { setBusy(false); }
   };
+  const openFacultyReview = (request: any) => {
+    setReviewingFacultyRequest(request);
+    setFacultyDeadlines(Object.fromEntries((request.requested_periods ?? []).map((key: string) => [key, ''])));
+    setFacultyForwardReason('');
+    setFacultyRejectionReason('');
+    setFacultyReviewMode('forward');
+  };
+  const reviewFacultyRequest = async (action: 'forward' | 'reject') => {
+    if (!supabase || !reviewingFacultyRequest) return;
+    if (action === 'forward') {
+      if ((reviewingFacultyRequest.requested_periods ?? []).some((key: string) => !facultyDeadlines[key])) return toast.show('Set a deadline for every period the Faculty selected.');
+      if (facultyForwardReason.trim().length < 10) return toast.show('Add a reason for forwarding (at least 10 characters).');
+    }
+    setBusy(true);
+    try {
+      const { error } = await supabase.rpc('review_faculty_grade_deadline_request', {
+        p_request_id: reviewingFacultyRequest.id,
+        p_action: action,
+        p_deadlines: action === 'forward' ? Object.fromEntries(Object.entries(facultyDeadlines).map(([key, date]) => [key, `${date}T23:59:59+08:00`])) : {},
+        p_academic_admin_reason: action === 'forward' ? facultyForwardReason.trim() : null,
+        p_rejection_reason: action === 'reject' ? facultyRejectionReason.trim() || null : null,
+      });
+      if (error) throw error;
+      toast.show(action === 'forward' ? 'Deadline request forwarded to the System Admin.' : 'Faculty deadline request rejected.');
+      setReviewingFacultyRequest(null);
+      await load();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'The Faculty deadline request could not be reviewed.')); }
+    finally { setBusy(false); }
+  };
   const displayDeadline = (value: unknown) => {
     if (typeof value !== 'string' || !value) return 'Not set';
     const date = value.slice(0, 10);
@@ -249,6 +302,22 @@ function GradeDeadlineRequests({ data, userId, toast }: Props) {
   };
   return <>
     <Heading title="Grade encoding deadlines" subtitle="Request deadline changes for your department, a program, year level, or individual class." />
+    <Dialog visible={!!reviewingFacultyRequest} title="Review Faculty deadline request" onClose={() => { if (!busy) setReviewingFacultyRequest(null); }} wide>
+      {reviewingFacultyRequest ? <>
+        <Text style={styles.help}>{requesterNames[reviewingFacultyRequest.requested_by] ?? 'Faculty member'} requested a change for {(reviewingFacultyRequest.class_record_ids ?? []).length} selected classes: {(reviewingFacultyRequest.class_record_ids ?? []).map((id: string) => data.classes.find((item) => item.id === id)).filter(Boolean).map((item: any) => `${item.code} · ${item.section}`).join(', ') || 'class details unavailable'}.</Text>
+        <Text style={styles.help}>Faculty reason: {reviewingFacultyRequest.rationale}</Text>
+        {facultyReviewMode === 'forward' ? <>
+          <Text style={[styles.cardTitle, styles.deadlineCardTitle]}>Set the proposed deadlines</Text>
+          <View style={styles.formGrid}>{gradeDeadlinePeriods.filter(({ key }) => (reviewingFacultyRequest.requested_periods ?? []).includes(key)).map(({ key, label }) => <DateField key={key} label={`${label} deadline`} value={facultyDeadlines[key] ?? ''} onChange={(value) => setFacultyDeadlines((current) => ({ ...current, [key]: value }))} containerStyle={styles.deadlineDateField} />)}</View>
+          <Field label="Reason for forwarding to System Admin" value={facultyForwardReason} onChangeText={setFacultyForwardReason} multiline numberOfLines={3} maxLength={1000} placeholder="Explain why these changed deadlines are being requested." />
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}><Button label="Reject…" variant="secondary" disabled={busy} onPress={() => setFacultyReviewMode('reject')} /><View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8 }}><Button label="Cancel" variant="secondary" disabled={busy} onPress={() => setReviewingFacultyRequest(null)} /><Button label="Forward to System Admin" loading={busy} disabled={busy || facultyForwardReason.trim().length < 10 || (reviewingFacultyRequest.requested_periods ?? []).some((key: string) => !facultyDeadlines[key])} onPress={() => void reviewFacultyRequest('forward')} /></View></View>
+        </> : <>
+          <Text style={styles.help}>Reject this request? It will be closed immediately and the Faculty member will be notified.</Text>
+          <Field label="Optional rejection reason" value={facultyRejectionReason} onChangeText={setFacultyRejectionReason} multiline numberOfLines={3} maxLength={1000} placeholder="Leave blank to reject without a note." />
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'flex-end', gap: 8 }}><Button label="Back" variant="secondary" disabled={busy} onPress={() => setFacultyReviewMode('forward')} /><Button label="Cancel" variant="secondary" disabled={busy} onPress={() => setReviewingFacultyRequest(null)} /><Button label="Confirm rejection" variant="danger" loading={busy} disabled={busy} onPress={() => void reviewFacultyRequest('reject')} /></View>
+        </>}
+      </> : null}
+    </Dialog>
     <Card style={[styles.form, styles.deadlineCard]}>
       <View style={styles.deadlineCardHeader}><Text style={[styles.cardTitle, styles.deadlineCardTitle]}>Current system-wide deadlines</Text><Button compact label={requestFormOpen ? 'Close request form' : 'Request deadline change'} variant={requestFormOpen ? 'secondary' : 'primary'} onPress={() => setRequestFormOpen((open) => !open)} /></View>
       <View style={styles.deadlineSummaryGrid}>{gradeDeadlinePeriods.map(({ key, label }) => <View key={key} style={styles.deadlineSummaryItem}><Text style={styles.deadlineSummaryLabel}>{label}</Text><Text style={styles.deadlineSummaryValue}>{displayDeadline(globalDeadlines[key])}</Text></View>)}</View>
@@ -265,19 +334,42 @@ function GradeDeadlineRequests({ data, userId, toast }: Props) {
       <View style={[styles.subjectFormActions, styles.deadlineSubmitActions]}><Button label="Submit for review" loading={busy} disabled={busy || (scopeType === 'program' && !programId) || (scopeType === 'class' && !classId)} onPress={() => void submit()} /></View>
     </Card> : null}
     <Card style={[styles.form, styles.deadlineCard]}>
-      <Text style={[styles.cardTitle, styles.deadlineCardTitle]}>Your requests</Text>
-      {requests.length ? <View style={{ gap: 8 }}>{requests.map((request) => {
+      <Text style={[styles.cardTitle, styles.deadlineCardTitle]}>Requests</Text>
+      <Text style={[styles.cardTitle, styles.deadlineCardTitle, { fontSize: 13, marginTop: 2 }]}>Faculty requests</Text>
+      <Text style={styles.help}>Review requests from Faculty members in your department. Set the proposed deadline dates before forwarding to the System Admin.</Text>
+      {requests.filter((request) => request.scope_type === 'faculty').length ? <View style={{ gap: 8 }}>{requests.filter((request) => request.scope_type === 'faculty').map((request) => {
+        const pending = request.status === 'pending_academic_admin';
+        const statusTone = request.status === 'approved' ? 'success' : request.status === 'rejected' ? 'danger' : 'warning';
+        const selectedClassLabels = (request.class_record_ids ?? []).map((id: string) => data.classes.find((item) => item.id === id)).filter(Boolean).map((item: any) => `${item.code} · ${item.section}`);
+        return <View key={request.id} style={[styles.savedSystemRow, styles.deadlineRequestRow]}>
+          <View style={styles.flex}>
+            <View style={styles.deadlineRequestHeader}><Text style={styles.bulkClassName}>{requesterNames[request.requested_by] ?? 'Faculty member'} · {request.class_record_ids?.length ?? 0} selected classes</Text><Badge tone={statusTone}>{request.status === 'pending_academic_admin' ? 'Needs review' : request.status === 'pending_system_admin' ? 'Forwarded to System Admin' : request.status.charAt(0).toUpperCase() + request.status.slice(1)}</Badge></View>
+            <Text style={styles.help}>Requested {new Date(request.created_at).toLocaleString()} · {(request.requested_periods ?? []).map((key: string) => gradeDeadlinePeriods.find((item) => item.key === key)?.label ?? key).join(', ')}</Text>
+            <Text style={styles.help}>Classes: {selectedClassLabels.join(', ') || `${request.class_record_ids?.length ?? 0} selected`}</Text>
+            {Object.keys(request.requested_deadlines ?? {}).length ? <View style={styles.requestedDeadlinesGrid}>{gradeDeadlinePeriods.filter(({ key }) => request.requested_deadlines?.[key]).map(({ key, label }) => <View key={key} style={styles.requestedDeadlineItem}><Text style={styles.deadlineSummaryLabel}>{label}</Text><Text style={styles.deadlineSummaryValue}>{displayDeadline(request.requested_deadlines[key])}</Text></View>)}</View> : null}
+            <View style={styles.requestNotesGrid}>
+              <View style={[styles.requestReasonBox, !request.academic_admin_reason && !request.review_note && styles.requestNoteFullWidth]}><Text style={styles.requestReasonLabel}>Faculty reason</Text><Text style={styles.help}>{request.rationale}</Text></View>
+              {request.academic_admin_reason ? <View style={styles.requestReasonBox}><Text style={styles.requestReasonLabel}>Forwarded reason</Text><Text style={styles.help}>{request.academic_admin_reason}</Text></View> : null}
+              {request.review_note ? <View style={styles.requestReasonBox}><Text style={styles.requestReasonLabel}>Rejection reason</Text><Text style={styles.help}>{request.review_note}</Text></View> : null}
+            </View>
+          </View>
+          {pending ? <Button compact label="Review" variant="secondary" disabled={busy} onPress={() => openFacultyReview(request)} /> : null}
+        </View>;
+      })}</View> : <PageState kind="empty" title="No Faculty requests" message="Faculty deadline requests for your department will appear here." />}
+      <Text style={[styles.cardTitle, styles.deadlineCardTitle, { fontSize: 13, marginTop: 8 }]}>Your requests</Text>
+      {requests.filter((request) => request.scope_type !== 'faculty').length ? <View style={{ gap: 8 }}>{requests.filter((request) => request.scope_type !== 'faculty').map((request) => {
         const program = data.programs.find((item) => item.id === request.program_id);
         const requestClass = data.classes.find((item) => item.id === request.class_record_id);
         const statusTone = request.status === 'approved' ? 'success' : request.status === 'rejected' ? 'danger' : 'warning';
-        return <View key={request.id} style={[styles.savedSystemRow, styles.deadlineRequestRow]}><View style={styles.flex}><View style={styles.deadlineRequestHeader}><Text style={styles.bulkClassName}>{request.scope_type === 'program' ? `${program?.code ?? 'Program'} · ${program?.name ?? ''}` : request.scope_type === 'class' ? `${requestClass?.code ?? 'Subject'} · ${requestClass?.title ?? 'Untitled subject'} — ${requestClass?.section ?? 'Class'}` : `Year ${request.year_level} · All programs`}</Text><Badge tone={statusTone}>{request.status}</Badge></View><Text style={styles.help}>Requested {new Date(request.created_at).toLocaleString()}</Text><View style={styles.requestedDeadlinesGrid}>{gradeDeadlinePeriods.map(({ key, label }) => request.requested_deadlines?.[key] ? <View key={key} style={styles.requestedDeadlineItem}><Text style={styles.deadlineSummaryLabel}>{label}</Text><Text style={styles.deadlineSummaryValue}>{displayDeadline(request.requested_deadlines[key])}</Text></View> : null)}</View><View style={styles.requestNotesGrid}><View style={[styles.requestReasonBox, !request.review_note && styles.requestNoteFullWidth]}><Text style={styles.requestReasonLabel}>Reason for request</Text><Text style={styles.help}>{request.rationale}</Text></View>{request.review_note ? <View style={styles.requestReasonBox}><Text style={styles.requestReasonLabel}>{request.status === 'rejected' ? 'Reason for rejection' : 'Review note'}</Text><Text style={styles.help}>{request.review_note}</Text></View> : null}</View></View></View>;
+        return <View key={request.id} style={[styles.savedSystemRow, styles.deadlineRequestRow]}><View style={styles.flex}><View style={styles.deadlineRequestHeader}><Text style={styles.bulkClassName}>{request.scope_type === 'program' ? `${program?.code ?? 'Program'} · ${program?.name ?? ''}` : request.scope_type === 'class' ? `${requestClass?.code ?? 'Subject'} · ${requestClass?.title ?? 'Untitled subject'} — ${requestClass?.section ?? 'Class'}` : `Year ${request.year_level} · All programs`}</Text><Badge tone={statusTone}>{request.status.charAt(0).toUpperCase() + request.status.slice(1)}</Badge></View><Text style={styles.help}>Requested {new Date(request.created_at).toLocaleString()}</Text><View style={styles.requestedDeadlinesGrid}>{gradeDeadlinePeriods.map(({ key, label }) => request.requested_deadlines?.[key] ? <View key={key} style={styles.requestedDeadlineItem}><Text style={styles.deadlineSummaryLabel}>{label}</Text><Text style={styles.deadlineSummaryValue}>{displayDeadline(request.requested_deadlines[key])}</Text></View> : null)}</View><View style={styles.requestNotesGrid}><View style={[styles.requestReasonBox, !request.review_note && styles.requestNoteFullWidth]}><Text style={styles.requestReasonLabel}>Reason for request</Text><Text style={styles.help}>{request.rationale}</Text></View>{request.review_note ? <View style={styles.requestReasonBox}><Text style={styles.requestReasonLabel}>{request.status === 'rejected' ? 'Reason for rejection' : 'Review note'}</Text><Text style={styles.help}>{request.review_note}</Text></View> : null}</View></View></View>;
       })}</View> : <PageState kind="empty" title="No requests yet" message="Submitted deadline changes will appear here for review." />}
     </Card>
   </>;
 }
 
-function Units({ data }: Props) {
+function Units({ data, userId }: Props) {
   const toast = useToast();
+  const [unitsTab, setUnitsTab] = useState('Programs');
   const [programId, setProgramId] = useState(data.programs[0]?.id ?? '');
   const [rows, setRows] = useState<YearLevelRecord[]>([]);
   const [loading, setLoading] = useState(false);
@@ -287,15 +379,75 @@ function Units({ data }: Props) {
   const [level, setLevel] = useState('');
   const [label, setLabel] = useState('');
   const [deleting, setDeleting] = useState<YearLevelRecord | null>(null);
+  const [sectionYearLevel, setSectionYearLevel] = useState('');
+  const [sections, setSections] = useState<ProgramSectionRecord[]>([]);
+  const [sectionsLoading, setSectionsLoading] = useState(false);
+  const [sectionDialogOpen, setSectionDialogOpen] = useState(false);
+  const [editingSection, setEditingSection] = useState<ProgramSectionRecord | null>(null);
+  const [sectionNumber, setSectionNumber] = useState('');
+  const [deletingSection, setDeletingSection] = useState<ProgramSectionRecord | null>(null);
+  const [sectionSaving, setSectionSaving] = useState(false);
+  const [addSectionsYearLevel, setAddSectionsYearLevel] = useState<YearLevelRecord | null>(null);
+  const [addSectionsCount, setAddSectionsCount] = useState('1');
+  const [institutionCode, setInstitutionCode] = useState('SWU');
+  const [programRequests, setProgramRequests] = useState<ProgramRequestRecord[]>([]);
+  const [requestProgramOpen, setRequestProgramOpen] = useState(false);
+  const [programRequestCode, setProgramRequestCode] = useState('');
+  const [programRequestName, setProgramRequestName] = useState('');
+  const [programRequestReason, setProgramRequestReason] = useState('');
+  const [programRequestSaving, setProgramRequestSaving] = useState(false);
   const selectedProgram = data.programs.find((program) => program.id === programId);
+  useEffect(() => {
+    let active = true;
+    void loadInstitutionCode().then((code) => { if (active) setInstitutionCode(code); })
+      .catch((cause) => { if (active) toast.show(getErrorMessage(cause, 'Institution code could not be loaded; using SWU.')); });
+    return () => { active = false; };
+  }, [toast]);
+  useEffect(() => {
+    let active = true;
+    void loadProgramRequests().then((loaded) => { if (active) setProgramRequests(loaded); })
+      .catch((cause) => { if (active) toast.show(getErrorMessage(cause, 'Program requests could not be loaded.')); });
+    return () => { active = false; };
+  }, [toast]);
+  const submitNewProgramRequest = async () => {
+    if (!data.department || !programRequestCode.trim() || !programRequestName.trim()) return;
+    const code = programRequestCode.trim().toUpperCase();
+    if (data.programs.some((item) => item.code.toUpperCase() === code)) return toast.show('A program with this code already exists in your department.');
+    if (programRequests.some((item) => item.status === 'pending' && item.code.toUpperCase() === code)) return toast.show('A request for this program code is already pending.');
+    setProgramRequestSaving(true);
+    try {
+      await submitProgramRequest({ departmentId: data.department.id, code, name: programRequestName, rationale: programRequestReason });
+      toast.show('Program request sent to the System Admin.');
+      setRequestProgramOpen(false); setProgramRequestCode(''); setProgramRequestName(''); setProgramRequestReason('');
+      setProgramRequests(await loadProgramRequests());
+    } catch (cause) {
+      const code = typeof cause === 'object' && cause !== null && 'code' in cause ? String((cause as { code: unknown }).code) : '';
+      if (code === '23505') toast.show('A program with this code already exists or has a pending request.');
+      else toast.show(getErrorMessage(cause, 'Program request could not be sent.'));
+    } finally { setProgramRequestSaving(false); }
+  };
   const refresh = async () => {
     if (!programId) { setRows([]); return; }
     setLoading(true);
-    try { setRows(await loadYearLevels(programId)); }
+    try {
+      const loadedRows = await loadYearLevels(programId);
+      setRows(loadedRows);
+      setSectionYearLevel((current) => loadedRows.some((row) => String(row.level) === current) ? current : String(loadedRows[0]?.level ?? ''));
+    }
     catch (cause) { toast.show(getErrorMessage(cause, 'Program year levels could not be loaded.')); }
     finally { setLoading(false); }
   };
   useEffect(() => { void refresh(); }, [programId]);
+  useEffect(() => {
+    let active = true;
+    if (!programId) { setSections([]); return; }
+    setSectionsLoading(true);
+    void loadProgramSections(programId)
+      .then((loaded) => { if (active) setSections(loaded); })
+      .catch((cause) => { if (active) toast.show(getErrorMessage(cause, 'Program sections could not be loaded.')); })
+      .finally(() => { if (active) setSectionsLoading(false); });
+    return () => { active = false; };
+  }, [programId, toast]);
   const open = (row?: YearLevelRecord) => { setEditing(row ?? null); setLevel(row ? String(row.level) : ''); setLabel(row?.label ?? ''); setDialogOpen(true); };
   const save = async () => {
     const numericLevel = Number(level);
@@ -313,25 +465,238 @@ function Units({ data }: Props) {
     finally { setSaving(false); }
   };
   const availableLevels = Array.from({ length: 8 }, (_, index) => index + 1).filter((value) => editing ? value === editing.level : !rows.some((row) => row.level === value));
+  const openSection = (row?: ProgramSectionRecord) => {
+    setEditingSection(row ?? null);
+    setSectionYearLevel(String(row?.yearLevel ?? (sectionYearLevel || rows[0]?.level || '')));
+    setSectionNumber(row ? String(row.sectionNumber) : '');
+    setSectionDialogOpen(true);
+  };
+  const sectionLetter = (value: number) => String.fromCharCode(64 + value);
+  const sectionLabel = (row: ProgramSectionRecord) => `${sectionLetter(row.yearLevel)}${row.sectionNumber}`;
+  const firstNewSectionNumber = addSectionsYearLevel
+    ? Math.max(0, ...sections.filter((section) => section.yearLevel === addSectionsYearLevel.level).map((section) => section.sectionNumber)) + 1
+    : 0;
+  const addSectionsForYearLevel = async () => {
+    const count = Number(addSectionsCount);
+    if (!programId || !addSectionsYearLevel || !Number.isInteger(count) || count < 1 || firstNewSectionNumber + count - 1 > 99) return;
+    setSectionSaving(true);
+    try {
+      await addProgramSections({ programId, yearLevel: addSectionsYearLevel.level, firstSectionNumber: firstNewSectionNumber, count, userId });
+      setSections(await loadProgramSections(programId));
+      toast.show(`${count} section${count === 1 ? '' : 's'} added to ${addSectionsYearLevel.label}.`);
+      setAddSectionsYearLevel(null);
+    } catch (cause) {
+      const errorCode = typeof cause === 'object' && cause !== null && 'code' in cause ? String((cause as { code: unknown }).code) : '';
+      if (errorCode === '23505') toast.show('One or more of those section numbers already exist. Refresh the list and try again.');
+      else toast.show(getErrorMessage(cause, 'Sections could not be added.'));
+    } finally { setSectionSaving(false); }
+  };
+  const saveSection = async () => {
+    const numericYear = Number(sectionYearLevel);
+    const numericNumber = Number(sectionNumber);
+    if (!programId || !Number.isInteger(numericYear) || !Number.isInteger(numericNumber) || numericNumber < 1 || numericNumber > 99) return;
+    const duplicate = sections.some((row) => row.id !== editingSection?.id && row.yearLevel === numericYear && row.sectionNumber === numericNumber);
+    if (duplicate) return toast.show('A section for this program and year level with that section number already exists.');
+    setSectionSaving(true);
+    try {
+      await saveProgramSection({ id: editingSection?.id, programId, yearLevel: numericYear, sectionNumber: numericNumber, userId });
+      toast.show(`Section ${sectionLetter(numericYear)}${numericNumber} saved.`);
+      setSectionDialogOpen(false);
+      const loaded = await loadProgramSections(programId);
+      setSectionYearLevel(String(numericYear));
+      setSections(loaded);
+    } catch (cause) {
+      const errorCode = typeof cause === 'object' && cause !== null && 'code' in cause ? String((cause as { code: unknown }).code) : '';
+      const errorMessage = cause instanceof Error ? cause.message : typeof cause === 'object' && cause !== null && 'message' in cause ? String((cause as { message: unknown }).message) : '';
+      if (errorCode === '23505' || errorMessage.includes('program_sections_program_year_number_key')) toast.show('A section for this program and year level with that section number already exists.');
+      else toast.show(getErrorMessage(cause, 'Section could not be saved.'));
+    }
+    finally { setSectionSaving(false); }
+  };
+  const removeSection = async () => {
+    if (!deletingSection) return;
+    setSectionSaving(true);
+    try {
+      await deleteProgramSection(deletingSection.id);
+      toast.show(`Section ${sectionLabel(deletingSection)} removed.`);
+      setDeletingSection(null);
+      setSections(await loadProgramSections(programId));
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Section could not be removed.')); }
+    finally { setSectionSaving(false); }
+  };
   return <>
     <Heading title="Academic Units" subtitle="View your authorized department and manage year levels for each program." />
-    {data.department ? <DataTable compact columns={['Department', 'Code', 'Access']} rows={[[data.department.name, data.department.code, 'Authorized']]} widthMode="content" /> : null}
-    <Card><Text style={styles.cardTitle}>Programs</Text>{data.programs.length ? <DataTable columns={['Program', 'Code', 'Status']} rows={data.programs.map((program) => [program.name, program.code, 'Active'])} /> : <PageState kind="empty" title="No active programs" message="No program records are available in this department." />}</Card>
-    <Card>
-      <View style={styles.heading}><View style={styles.flex}><Text style={styles.cardTitle}>Program year levels</Text><Text style={styles.help}>Each program has its own year-level options. New programs start with four levels; existing student records are not changed when an option is removed.</Text></View><Button label="Add year level" disabled={!programId || !availableLevels.length} onPress={() => open()} /></View>
-      <SelectField label="Program" value={programId} options={data.programs.map((program) => ({ label: `${program.code} · ${program.name}`, value: program.id }))} onChange={setProgramId} />
-      {loading ? <PageState kind="loading" title="Loading year levels" message="Retrieving options for the selected program." /> : rows.length ? <DataTable columns={['Level', 'Display label', 'Manage']} rows={rows.map((row) => [String(row.level), row.label, <View key={row.level} style={{ flexDirection: 'row', gap: 8 }}><Button label="Edit" variant="secondary" onPress={() => open(row)} /><Button label="Delete" variant="danger" onPress={() => setDeleting(row)} /></View>])} /> : <PageState kind="empty" title="No year levels configured" message={`Add year levels for ${selectedProgram?.code ?? 'this program'}.`} />}
-    </Card>
+    <Tabs values={['Programs', 'Year Levels and Sections']} selected={unitsTab} onSelect={setUnitsTab} />
+    {unitsTab === 'Programs' ? <>
+    {data.department ? <DataTable compact columns={['Department', 'Code', 'Access']} rows={[[data.department.name, data.department.code, 'Authorized']]} columnWidths={[300, 120, 140]} columnFlex={[1, 0, 0]} widthMode="container" /> : null}
+    <View style={styles.unitSection}>
+      <View style={styles.heading}><Text style={styles.unitSectionTitle}>Programs</Text><Button label="Request program" variant="secondary" disabled={!data.department} onPress={() => setRequestProgramOpen(true)} /></View>
+      {data.programs.length ? <DataTable columns={['Program', 'Code', 'Status']} rows={data.programs.map((program) => [program.name, program.code, 'Active'])} columnFlex={[1, 0, 0]} /> : <PageState kind="empty" title="No active programs" message="No program records are available in this department." />}
+      <Text style={styles.unitSectionTitle}>My program requests</Text>
+      {programRequests.length ? <DataTable columns={['Program', 'Code', 'Request reason', 'Status', 'Submitted', 'Rejection reason']} rows={programRequests.map((request) => [request.name, request.code, request.rationale ?? '—', <Badge key={request.id} tone={request.status === 'approved' ? 'success' : request.status === 'rejected' ? 'danger' : 'warning'}>{request.status[0].toUpperCase() + request.status.slice(1)}</Badge>, new Date(request.createdAt).toLocaleDateString(), request.rejectionReason ?? '—'])} columnFlex={[1, 0, 1, 0, 0, 1]} /> : <Text style={styles.help}>Requests you submit will appear here.</Text>}
+    </View>
+    </> : null}
+    {unitsTab === 'Year Levels and Sections' ? <>
+    <SelectField label="Program" value={programId} options={data.programs.map((program) => ({ label: `${program.code} · ${program.name}`, value: program.id }))} onChange={setProgramId} />
+    <View style={styles.unitSection}>
+      <View style={styles.heading}><View style={styles.flex}><Text style={styles.unitSectionTitle}>Program year levels</Text><Text style={styles.help}>Each program has its own year-level options. New programs start with four levels; existing student records are not changed when an option is removed.</Text></View><Button label="Add year level" disabled={!programId || !availableLevels.length} onPress={() => open()} /></View>
+      {loading ? <PageState kind="loading" title="Loading year levels" message="Retrieving options for the selected program." /> : rows.length ? <DataTable columns={['Level', 'Display label', 'Actions']} columnWidths={[72, 170, 300]} columnFlex={[0, 1, 0]} widthMode="container" rows={rows.map((row) => [String(row.level), row.label, <View key={row.level} style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 6 }}><Button compact label="Add sections" variant="secondary" onPress={() => { setAddSectionsYearLevel(row); setAddSectionsCount('1'); }} /><Button compact label="Edit" variant="secondary" onPress={() => open(row)} /><Button compact label="Delete" variant="danger" onPress={() => setDeleting(row)} /></View>])} /> : <PageState kind="empty" title="No year levels configured" message={`Add year levels for ${selectedProgram?.code ?? 'this program'}.`} />}
+    </View>
+    <View style={styles.unitSection}>
+      <View style={styles.heading}>
+        <View style={styles.flex}>
+          <Text style={styles.unitSectionTitle}>Program sections</Text>
+          <Text style={styles.help}>Manage sections across all year levels in this program. Names use the year-level letter and section number, with {institutionCode} as the institution prefix.</Text>
+        </View>
+        <Button label="Add section" disabled={!programId || !rows.length} onPress={() => openSection()} />
+      </View>
+      {sectionsLoading ? <PageState kind="loading" title="Loading sections" message="Retrieving sections for this program." /> : sections.length ? <DataTable
+        columns={['Section', 'Year level', 'Short Code', 'Manage']}
+        columnWidths={[310, 180, 130, 180]}
+        columnFlex={[1, 0, 0, 0]}
+        widthMode="container"
+        rows={sections.map((row) => [`${institutionCode}-${selectedProgram?.code ?? 'PROGRAM'}${row.yearLevel}-${sectionLabel(row)}`, `${rows.find((level) => level.level === row.yearLevel)?.label ?? `Year ${row.yearLevel}`} · Year ${row.yearLevel}`, sectionLabel(row), <View key={row.id} style={{ flexDirection: 'row', gap: 6 }}><Button compact label="Edit" variant="secondary" onPress={() => openSection(row)} /><Button compact label="Delete" variant="danger" onPress={() => setDeletingSection(row)} /></View>])}
+      /> : <PageState kind="empty" title="No sections configured" message={`Add the first section${selectedProgram ? ` for ${selectedProgram.code}` : ''}.`} />}
+    </View>
+    </> : null}
     <Dialog visible={dialogOpen} title={editing ? 'Edit program year level' : 'Add program year level'} onClose={() => setDialogOpen(false)}>
       <SelectField label="Year level number" value={level} options={availableLevels.map((value) => ({ label: `Year ${value}`, value: String(value) }))} onChange={setLevel} />
       <Field label="Display label" value={label} onChangeText={setLabel} placeholder="e.g. First year" maxLength={80} />
       <Button label={editing ? 'Save year level' : 'Add year level'} loading={saving} disabled={!level || !label.trim()} onPress={() => void save()} />
     </Dialog>
     <ConfirmDialog visible={deleting !== null} title="Delete program year level?" message={`${deleting?.label ?? 'This level'} will no longer appear in this program's new student forms. Existing records remain unchanged.`} confirmLabel="Delete year level" danger pending={saving} onClose={() => { if (!saving) setDeleting(null); }} onConfirm={() => void remove()} />
+    <Dialog visible={sectionDialogOpen} title={editingSection ? 'Edit program section' : 'Add program section'} onClose={() => { if (!sectionSaving) setSectionDialogOpen(false); }}>
+      <SelectField label="Year level" value={sectionYearLevel} options={rows.map((row) => ({ label: `${row.label} · Year ${row.level}`, value: String(row.level) }))} onChange={setSectionYearLevel} />
+      <Field label="Section number" value={sectionNumber} onChangeText={(value) => setSectionNumber(value.replace(/\D/g, '').slice(0, 2))} inputType="text" keyboardType="number-pad" placeholder="e.g. 2" />
+      {sectionYearLevel && sectionNumber && Number(sectionYearLevel) <= 26 ? <View style={{ gap: 4, backgroundColor: colors.canvas, borderRadius: 8, padding: 10 }}>
+        <Text style={{ color: colors.text, fontSize: 12, fontWeight: '600' }}>Section name preview</Text>
+        <Text style={styles.help}>{sectionLetter(Number(sectionYearLevel))}{sectionNumber} · {selectedProgram?.code ?? 'PROGRAM'}-{sectionLetter(Number(sectionYearLevel))}{sectionNumber}</Text>
+        <Text style={styles.help}>Institution-wide: {institutionCode}-{selectedProgram?.code ?? 'PROGRAM'}{sectionYearLevel}-{sectionLetter(Number(sectionYearLevel))}{sectionNumber}</Text>
+      </View> : null}
+      <Button label={editingSection ? 'Save section' : 'Add section'} loading={sectionSaving} disabled={!sectionYearLevel || !sectionNumber || Number(sectionNumber) < 1 || Number(sectionNumber) > 99} onPress={() => void saveSection()} />
+    </Dialog>
+    <Dialog visible={addSectionsYearLevel !== null} title={`Add sections · ${addSectionsYearLevel?.label ?? 'Year level'}`} onClose={() => { if (!sectionSaving) setAddSectionsYearLevel(null); }}>
+      <Text style={styles.help}>Choose how many sections to create for {selectedProgram?.code ?? 'this program'} · Year {addSectionsYearLevel?.level ?? ''}. Section numbers continue after the highest existing number.</Text>
+      <Field label="Number of sections" value={addSectionsCount} onChangeText={(value) => setAddSectionsCount(value.replace(/\D/g, '').slice(0, 2))} inputType="text" keyboardType="number-pad" placeholder="e.g. 3" />
+      {addSectionsYearLevel && Number(addSectionsCount) > 0 ? <View style={{ gap: 4, backgroundColor: colors.canvas, borderRadius: 8, padding: 10 }}>
+        <Text style={{ color: colors.text, fontSize: 12, fontWeight: '600' }}>Sections to add</Text>
+        {firstNewSectionNumber + Number(addSectionsCount) - 1 <= 99
+          ? <Text style={styles.help}>{sectionLetter(addSectionsYearLevel.level)}{firstNewSectionNumber}–{sectionLetter(addSectionsYearLevel.level)}{firstNewSectionNumber + Number(addSectionsCount) - 1}</Text>
+          : <Text style={[styles.help, { color: colors.danger }]}>Section numbers can only go up to 99.</Text>}
+      </View> : null}
+      <Button label="Add sections" loading={sectionSaving} disabled={!addSectionsYearLevel || !Number(addSectionsCount) || firstNewSectionNumber + Number(addSectionsCount) - 1 > 99} onPress={() => void addSectionsForYearLevel()} />
+    </Dialog>
+    <Dialog visible={requestProgramOpen} title="Request a program" onClose={() => { if (!programRequestSaving) setRequestProgramOpen(false); }}>
+      <Text style={styles.help}>Request a new program for {data.department?.name ?? 'your department'}. The System Admin will review the request. A reason is optional.</Text>
+      <Field label="Program code" value={programRequestCode} onChangeText={(value) => setProgramRequestCode(value.toUpperCase())} placeholder="e.g. BSIT" maxLength={30} autoCapitalize="characters" />
+      <Field label="Program name" value={programRequestName} onChangeText={setProgramRequestName} placeholder="e.g. Bachelor of Science in Information Technology" maxLength={160} />
+      <Field label="Request reason (optional)" value={programRequestReason} onChangeText={setProgramRequestReason} multiline numberOfLines={3} maxLength={1000} placeholder="Add context for the System Admin, if helpful." />
+      <Button label="Send program request" loading={programRequestSaving} disabled={!programRequestCode.trim() || !programRequestName.trim()} onPress={() => void submitNewProgramRequest()} />
+    </Dialog>
+    <ConfirmDialog visible={deletingSection !== null} title="Remove program section?" message={`${deletingSection ? sectionLabel(deletingSection) : 'This section'} will no longer be available in this program/year section list.`} confirmLabel="Remove section" danger pending={sectionSaving} onClose={() => { if (!sectionSaving) setDeletingSection(null); }} onConfirm={() => void removeSection()} />
   </>;
 }
-function Classes({ data, refresh, toast }: Props) {
-  const [references, setReferences] = useState<{ subjects: { id: string; label: string; lectureUnits: number; laboratoryUnits: number }[]; terms: { id: string; label: string }[]; faculty: DepartmentFacultyMember[] }>({ subjects: [], terms: [], faculty: [] });
+function AcademicAdminReadOnlyGradebook({ item, onClose }: { item: AcademicWorkspace['classes'][number]; onClose: () => void }) {
+  const workspace = item.workspace;
+  const toast = useToast();
+  const [studentQuery, setStudentQuery] = useState('');
+  const [studentFilter, setStudentFilter] = useState('all');
+  const [studentSort, setStudentSort] = useState('class_number');
+  const [page, setPage] = useState(1);
+  const [paginationEnabled, setPaginationEnabled] = useState(true);
+  const visibleStudents = useMemo(() => {
+    const query = studentQuery.trim();
+    const queryId = normalizeStudentId(query);
+    const filtered = workspace.students.filter((student) => {
+      const matchesQuery = !query || student.name.toLocaleLowerCase().includes(query.toLocaleLowerCase()) || normalizeStudentId(student.institutionalId).includes(queryId);
+      if (!matchesQuery) return false;
+      if (studentFilter === 'missing') return workspace.assessments.some((assessment) => workspace.scores[`${student.enrollmentId}:${assessment.id}`] == null && workspace.categoricalScores[`${student.enrollmentId}:${assessment.id}`] == null);
+      if (studentFilter === 'at_risk') return risk(workspace, student.enrollmentId, workspace.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM) !== 'low';
+      if (studentFilter === 'passing') return summarizeEnrollmentStanding(workspace, student.enrollmentId).remarks === 'passing';
+      return true;
+    });
+    const originalOrder = new Map(workspace.students.map((student, index) => [student.enrollmentId, index]));
+    return filtered.sort((left, right) => {
+      if (studentSort === 'name') return left.name.localeCompare(right.name);
+      if (studentSort === 'risk') {
+        const order = { high: 0, medium: 1, low: 2, unavailable: 3 } as const;
+        const leftRisk = risk(workspace, left.enrollmentId, workspace.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM) as keyof typeof order;
+        const rightRisk = risk(workspace, right.enrollmentId, workspace.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM) as keyof typeof order;
+        return (order[leftRisk] ?? 3) - (order[rightRisk] ?? 3);
+      }
+      if (studentSort === 'standing') return (calculateEnrollmentGrade(workspace, right.enrollmentId).finalGrade ?? -1) - (calculateEnrollmentGrade(workspace, left.enrollmentId).finalGrade ?? -1);
+      const classNumber = (value: unknown) => typeof value === 'number' && Number.isFinite(value) ? value : typeof value === 'string' && value.trim() && Number.isFinite(Number(value)) ? Number(value) : null;
+      const leftNumber = classNumber(left.classNumber);
+      const rightNumber = classNumber(right.classNumber);
+      if (leftNumber != null && rightNumber != null && leftNumber !== rightNumber) return leftNumber - rightNumber;
+      return (originalOrder.get(left.enrollmentId) ?? 0) - (originalOrder.get(right.enrollmentId) ?? 0);
+    });
+  }, [workspace, studentQuery, studentFilter, studentSort]);
+  useEffect(() => { setPage(1); }, [studentQuery, studentFilter, studentSort, workspace.students.length]);
+  return <Modal visible animationType="fade" onRequestClose={onClose}>
+    <View style={{ flex: 1, backgroundColor: '#F5F6F8', padding: 18, gap: 12 }}>
+      <View style={{ flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+        <View style={{ flex: 1 }}>
+          <Text accessibilityRole="header" style={styles.title}>Gradebook · {item.code} · {item.section}</Text>
+          <Text style={styles.subtitle}>{item.title} · {item.term} · Read-only full view</Text>
+        </View>
+        <Pressable accessibilityRole="switch" accessibilityState={{ checked: paginationEnabled }} onPress={() => { setPaginationEnabled((current) => !current); setPage(1); }} style={facultyGradebookStyles.paginationToggle}>
+          <Text style={facultyGradebookStyles.paginationToggleLabel}>Pagination</Text>
+          <View style={[facultyGradebookStyles.paginationSwitch, paginationEnabled && facultyGradebookStyles.paginationSwitchOn]}><View style={[facultyGradebookStyles.paginationSwitchThumb, paginationEnabled && facultyGradebookStyles.paginationSwitchThumbOn]} /></View>
+          <Text style={facultyGradebookStyles.paginationToggleState}>{paginationEnabled ? 'On' : 'Off'}</Text>
+        </Pressable>
+        <Button label="Close" variant="secondary" onPress={onClose} />
+      </View>
+      <View style={{ flex: 1, minHeight: 0 }}>
+        <Card style={{ flex: 1, minHeight: 0, width: '100%' }}>
+        <FullAssessmentView
+          readOnly
+          classId={item.id}
+          assessments={workspace.assessments}
+          students={visibleStudents}
+          allStudents={visibleStudents}
+          workspace={workspace}
+          gradingSystem={workspace.criteria?.gradingSystemDefinition ?? workspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM}
+          values={{}}
+          onChange={() => undefined}
+          onChangeMany={() => undefined}
+          dirtyCount={0}
+          invalidCount={0}
+          saving={false}
+          onSave={() => undefined}
+          autosaveEnabled={false}
+          studentQuery={studentQuery}
+          onStudentQuery={(value) => { setStudentQuery(value); setPage(1); }}
+          studentFilter={studentFilter}
+          onStudentFilter={(value) => { setStudentFilter(value); setPage(1); }}
+          studentSort={(studentSort as 'class_number' | 'name' | 'risk' | 'standing')}
+          onStudentSort={(value) => { setStudentSort(value); setPage(1); }}
+          visibleCount={visibleStudents.length}
+          page={page}
+          pageCount={Math.max(1, Math.ceil(visibleStudents.length / 10))}
+          paginationEnabled={paginationEnabled}
+          onPageChange={(update) => setPage(update)}
+          onToast={(message) => toast.show(message)}
+          onEditAssessment={() => undefined}
+          onLoadScoreHistory={async (assessmentId, enrollmentId) => {
+            const history = await loadGradebookScoreHistory(item.id, null, 200);
+            return history.entries.filter((entry) => entry.eventType === 'score' && entry.assessmentId === assessmentId && entry.enrollmentId === enrollmentId).map(({ id, actorId, actorName, action, createdAt, before, after, restoredFromVersionId, batchId }) => ({ id, actorId, actorName, action, createdAt, before, after, restoredFromVersionId, batchId }));
+          }}
+          onLoadGradebookHistory={(classId, cursor?: GradebookHistoryCursor | null) => loadGradebookScoreHistory(classId, cursor)}
+          onRestoreScoreVersion={async () => {}}
+          onRestoreGradebookVersion={async () => 0}
+          onRestoreAssessmentVersion={async () => {}}
+          onNameGradebookVersion={async () => {}}
+        />
+        </Card>
+      </View>
+    </View>
+  </Modal>;
+}
+
+function Classes({ data, refresh, toast, initialTab = 'Department classes' }: Props & { initialTab?: string }) {
+  const [classesTab, setClassesTab] = useState(initialTab);
+  const [references, setReferences] = useState<{ subjects: { id: string; label: string; lectureUnits: number; laboratoryUnits: number }[]; terms: { id: string; label: string }[]; faculty: DepartmentFacultyMember[]; institutionCode: string; sections: { value: string; label: string; programCode: string; yearLevel: number; sectionNumber: number }[] }>({ subjects: [], terms: [], faculty: [], institutionCode: 'SWU', sections: [] });
   const [requests, setRequests] = useState<ClassRequestReview[]>([]);
   const [showCreate, setShowCreate] = useState(false);
   const [selectedRequest, setSelectedRequest] = useState<ClassRequestReview | null>(null);
@@ -349,9 +714,12 @@ function Classes({ data, refresh, toast }: Props) {
   const [confirmRejectRequest, setConfirmRejectRequest] = useState(false);
   const [requestReviewTab, setRequestReviewTab] = useState('Assign');
   const [manageFacultyClass, setManageFacultyClass] = useState<AcademicWorkspace['classes'][number] | null>(null);
+  const [viewGradebookClass, setViewGradebookClass] = useState<AcademicWorkspace['classes'][number] | null>(null);
+  const [rosterClassId, setRosterClassId] = useState<string | null>(null);
   const [manageFacultyIds, setManageFacultyIds] = useState<string[]>([]);
   const [savingFaculty, setSavingFaculty] = useState(false);
   const [busy, setBusy] = useState(false);
+  const displaySection = (value: string) => resolveInstitutionalSectionName(value, references.sections, references.institutionCode);
 
   const reload = useCallback(async () => {
     try { setRequests(await loadDepartmentClassRequests()); }
@@ -359,7 +727,7 @@ function Classes({ data, refresh, toast }: Props) {
   }, [toast]);
   useEffect(() => {
     let active = true;
-    Promise.all([loadClassCreationReferences(), loadDepartmentClassRequests()]).then(([nextReferences, nextRequests]) => {
+    Promise.all([loadClassCreationReferences(data.department?.id), loadDepartmentClassRequests()]).then(([nextReferences, nextRequests]) => {
       if (!active) return;
       setReferences(nextReferences);
       setRequests(nextRequests);
@@ -367,7 +735,7 @@ function Classes({ data, refresh, toast }: Props) {
       setTermId(nextReferences.terms[0]?.id ?? '');
     }).catch((cause) => { if (active) toast.show(getErrorMessage(cause, 'Could not load class management data.')); });
     return () => { active = false; };
-  }, [toast]);
+  }, [data.department?.id, toast]);
 
   const toggleFaculty = (userId: string, selected: string[], update: (value: string[]) => void) => update(selected.includes(userId) ? selected.filter((id) => id !== userId) : [...selected, userId]);
   const addSubject = () => {
@@ -395,7 +763,7 @@ function Classes({ data, refresh, toast }: Props) {
   const createClass = async (request?: ClassRequestReview) => {
     let targetSubject = request?.subjectId ?? subjectId;
     const targetTerm = request?.academicTermId ?? termId;
-    const targetSection = request?.section ?? section;
+    const targetSection = displaySection(request?.section ?? section);
     if (!targetSubject || (targetSubject === DRAFT_SUBJECT_OPTION_ID && !pendingSubject) || !targetTerm || !targetSection.trim() || !facultyIds.length) {
       toast.show('Choose a subject, term, section, and at least one Faculty member.');
       return;
@@ -418,12 +786,12 @@ function Classes({ data, refresh, toast }: Props) {
         setPendingSubject(null);
       }
       await Promise.all([reload(), refresh()]);
-      if (newlyCreatedSubjectId) void loadClassCreationReferences().then(setReferences).catch(() => undefined);
+      if (newlyCreatedSubjectId) void loadClassCreationReferences(data.department?.id).then(setReferences).catch(() => undefined);
     } catch (cause) {
       if (newlyCreatedSubjectId) {
         setSubjectId(newlyCreatedSubjectId);
         setPendingSubject(null);
-        void loadClassCreationReferences().then(setReferences).catch(() => undefined);
+        void loadClassCreationReferences(data.department?.id).then(setReferences).catch(() => undefined);
         toast.show(`Subject saved, but the class could not be created: ${getErrorMessage(cause, 'Please try again.')}`);
       } else toast.show(getErrorMessage(cause, 'Class could not be created.'));
     }
@@ -468,8 +836,9 @@ function Classes({ data, refresh, toast }: Props) {
   const departmentClassRows = useMemo(() => data.classes.map((item) => {
     const rows = item.workspace.students;
     const values = rows.flatMap((student) => { const value = standing(item.workspace, student.enrollmentId); return value == null ? [] : [value]; });
-    return [`${item.code} · ${item.title}`, item.section, item.term, item.assignedFaculty.map((member) => member.name).join(', ') || 'Unassigned', String(item.lectureUnits), String(item.laboratoryUnits), String(rows.length), values.length ? `${(values.reduce((a, b) => a + b, 0) / values.length).toFixed(1)}%` : '—', String(rows.filter((student) => risk(item.workspace, student.enrollmentId) !== 'low').length), <Button key={`manage-faculty-${item.id}`} label="Manage" variant="secondary" onPress={() => { setManageFacultyClass(item); setManageFacultyIds(item.assignedFaculty.map((member) => member.userId)); }} />];
-  }), [data.classes]);
+    return [`${item.code} · ${item.title}`, displaySection(item.section), item.term, item.assignedFaculty.map((member) => member.name).join(', ') || 'Unassigned', String(item.lectureUnits), String(item.laboratoryUnits), String(rows.length), values.length ? `${(values.reduce((a, b) => a + b, 0) / values.length).toFixed(1)}%` : '—', String(rows.filter((student) => risk(item.workspace, student.enrollmentId) !== 'low').length), <ClassActionsMenu key={`class-actions-${item.id}`} classLabel={`${item.code} · ${displaySection(item.section)}`} onManageRoster={() => setRosterClassId(item.id)} onViewGradebook={() => setViewGradebookClass(item)} onManageOptions={() => { setManageFacultyClass(item); setManageFacultyIds(item.assignedFaculty.map((member) => member.userId)); }} />];
+  }), [data.classes, references.sections, references.institutionCode]);
+  const rosterClass = rosterClassId ? data.classes.find((item) => item.id === rosterClassId) ?? null : null;
   const facultyPicker = (selected: string[], update: (value: string[]) => void) => (
     <View style={{ gap: 6 }}>
       <Text style={styles.cardTitle}>Assign Faculty (at least one)</Text>
@@ -480,19 +849,23 @@ function Classes({ data, refresh, toast }: Props) {
   );
 
   return <>
-    <Heading title="Classes" subtitle="Create department classes, assign at least one Faculty member, and review Faculty class requests." action={<Button label="Create class" disabled={!references.terms.length || !references.faculty.length} onPress={() => { setFacultyIds([]); setShowCreate(true); }} />} />
-    <Card style={styles.form}>
-      <Text style={styles.cardTitle}>Pending class requests</Text>
-      {requestRows.length ? requestRows.map((request) => <View key={request.id} style={styles.savedSystemRow}>
-        <View style={{ flex: 1, minWidth: 220 }}><Text style={styles.bulkClassName}>{request.subject} · {request.section}</Text><Text style={styles.help}>{request.term} · Lecture {request.lectureUnits} / Lab {request.laboratoryUnits} units · Requested by {request.requesterName}</Text><Text style={styles.help}>{request.rationale}</Text></View>
-        <Button label="Review and assign" variant="secondary" onPress={() => beginReview(request)} />
-      </View>) : <PageState kind="empty" title="No pending class requests" message="Faculty requests for new classes will appear here." />}
-    </Card>
-    {reviewedRows.length ? <Card style={styles.form}><Text style={styles.cardTitle}>Class request history</Text><DataTable columns={['Subject', 'Section', 'Term', 'Faculty requester', 'Status', 'Date', 'Review note']} rows={reviewedRows.map((request) => [request.subject, request.section, request.term, request.requesterName, <Badge key={request.id} tone={request.status === 'approved' ? 'success' : 'danger'}>{request.status.charAt(0).toUpperCase() + request.status.slice(1)}</Badge>, new Date(request.createdAt).toLocaleDateString(), request.reviewNote ?? '—'])} /></Card> : null}
-    <Card style={styles.form}>
-      <Text style={styles.cardTitle}>Department classes</Text>
-      {data.classes.length ? <DataTable columns={['Subject', 'Section', 'Term', 'Assigned faculty', 'Lecture units', 'Laboratory units', 'Students', 'Average', 'At risk', 'Actions']} rows={departmentClassRows} /> : <PageState kind="empty" title="No active classes" message="Create a class or approve a Faculty request to get started." />}
-    </Card>
+    <Heading title="Classes" subtitle="Create department classes, assign at least one Faculty member, and review Faculty class requests." action={<Button label="Create class" disabled={!references.terms.length || !references.faculty.length || !references.sections.length} onPress={() => { setFacultyIds([]); setShowCreate(true); }} />} />
+    <Tabs values={['Department classes', 'Class requests']} selected={classesTab} onSelect={setClassesTab} />
+    {classesTab === 'Class requests' ? <>
+      <Card style={styles.form}>
+        <Text style={styles.cardTitle}>Pending class requests</Text>
+        {requestRows.length ? requestRows.map((request) => <View key={request.id} style={styles.savedSystemRow}>
+          <View style={{ flex: 1, minWidth: 220 }}><Text style={styles.bulkClassName}>{request.subject} · {displaySection(request.section)}</Text><Text style={styles.help}>{request.term} · Lecture {request.lectureUnits} / Lab {request.laboratoryUnits} units · Requested by {request.requesterName}</Text><Text style={styles.help}>{request.rationale}</Text></View>
+          <Button label="Review and assign" variant="secondary" onPress={() => beginReview(request)} />
+        </View>) : <PageState kind="empty" title="No pending class requests" message="Faculty requests for new classes will appear here." />}
+      </Card>
+      <Card style={styles.form}>
+        <Text style={styles.cardTitle}>Class request history</Text>
+        {reviewedRows.length ? <DataTable columns={['Subject', 'Section', 'Term', 'Faculty requester', 'Status', 'Date', 'Review note']} rows={reviewedRows.map((request) => [request.subject, displaySection(request.section), request.term, request.requesterName, <Badge key={request.id} tone={request.status === 'approved' ? 'success' : 'danger'}>{request.status.charAt(0).toUpperCase() + request.status.slice(1)}</Badge>, new Date(request.createdAt).toLocaleDateString(), request.reviewNote ?? '—'])} /> : <PageState kind="empty" title="No class request history" message="Approved and rejected class requests will appear here." />}
+      </Card>
+    </> : <>
+      {data.classes.length ? <DataTable columns={['Subject', 'Section', 'Term', 'Assigned faculty', 'Lecture units', 'Laboratory units', 'Students', 'Average', 'At risk', 'Actions']} columnWidths={[230, 100, 110, 210, 90, 110, 75, 90, 75, 72]} columnFlex={[2, 0, 0, 2, 0, 0, 0, 0, 0, 0]} widthMode="container" rows={departmentClassRows} /> : <PageState kind="empty" title="No active classes" message="Create a class or approve a Faculty request to get started." />}
+    </>}
     <Dialog visible={showCreate} title="Create Department Class" onClose={() => { if (!busy) setShowCreate(false); }}>
       <SelectField label="Subject" value={showAddSubject ? ADD_SUBJECT_OPTION_ID : subjectId} options={[...references.subjects.map((item) => ({ label: item.label, value: item.id })), ...(pendingSubject ? [{ label: `${pendingSubject.code} · ${pendingSubject.title} (new)`, value: DRAFT_SUBJECT_OPTION_ID }] : []), { label: '+ Add subject…', value: ADD_SUBJECT_OPTION_ID }]} onChange={(value) => { if (value === ADD_SUBJECT_OPTION_ID) setShowAddSubject(true); else { setShowAddSubject(false); setSubjectId(value); } }} />
       {showAddSubject ? <View style={styles.inlineSubjectForm}>
@@ -512,13 +885,13 @@ function Classes({ data, refresh, toast }: Props) {
       </View> : null}
       {subjectId === DRAFT_SUBJECT_OPTION_ID && pendingSubject ? <Text style={styles.help}>New subject · Lecture {pendingSubject.lectureUnits} · Laboratory {pendingSubject.laboratoryUnits} units. This subject is saved when the class is created.</Text> : subjectId ? <Text style={styles.help}>Lecture {references.subjects.find((item) => item.id === subjectId)?.lectureUnits ?? 3} · Laboratory {references.subjects.find((item) => item.id === subjectId)?.laboratoryUnits ?? 0} units (set on the subject)</Text> : null}
       <SelectField label="Academic term" value={termId} options={references.terms.map((item) => ({ label: item.label, value: item.id }))} onChange={setTermId} />
-      <Field label="Section" value={section} onChangeText={setSection} placeholder="e.g. BSIT-3B" maxLength={80} />
+      <SelectField label="Section" value={section} options={references.sections} onChange={setSection} placeholder={references.sections.length ? 'Select a section' : 'No sections configured'} />
       {facultyPicker(facultyIds, setFacultyIds)}
       <Button label="Create and assign class" loading={busy} disabled={showAddSubject || !subjectId || !termId || !section.trim() || !facultyIds.length} onPress={() => void createClass()} />
     </Dialog>
     <Dialog visible={selectedRequest !== null} title="Review Class Request" onClose={() => { if (!busy) setSelectedRequest(null); }}>
       {selectedRequest ? <View style={{ gap: 10 }}>
-        <Text style={styles.bulkClassName}>{selectedRequest.subject} · {selectedRequest.section}</Text>
+        <Text style={styles.bulkClassName}>{selectedRequest.subject} · {displaySection(selectedRequest.section)}</Text>
         <Text style={styles.help}>{selectedRequest.term} · Lecture {selectedRequest.lectureUnits} / Lab {selectedRequest.laboratoryUnits} units</Text>
         <Text style={styles.help}>Requested by {selectedRequest.requesterName}: {selectedRequest.rationale}</Text>
         <Tabs values={['Assign', 'Reject request']} selected={requestReviewTab} onSelect={setRequestReviewTab} />
@@ -531,7 +904,7 @@ function Classes({ data, refresh, toast }: Props) {
         </View>}
       </View> : null}
     </Dialog>
-    <Dialog visible={manageFacultyClass !== null} title="Manage class faculty" onClose={() => { if (!savingFaculty) setManageFacultyClass(null); }}>
+    <Dialog visible={manageFacultyClass !== null} title="Manage class options" onClose={() => { if (!savingFaculty) setManageFacultyClass(null); }}>
       {manageFacultyClass ? <View style={{ gap: 10 }}>
         <Text style={styles.bulkClassName}>{manageFacultyClass.code} · {manageFacultyClass.title} · {manageFacultyClass.section}</Text>
         <Text style={styles.help}>{manageFacultyClass.term}</Text>
@@ -542,6 +915,8 @@ function Classes({ data, refresh, toast }: Props) {
         </View>
       </View> : null}
     </Dialog>
+    {rosterClass ? <AcademicAdminClassRosterDialog item={rosterClass} programs={data.programs} toast={toast} onClose={() => setRosterClassId(null)} onChanged={refresh} /> : null}
+    {viewGradebookClass ? <AcademicAdminReadOnlyGradebook item={viewGradebookClass} onClose={() => setViewGradebookClass(null)} /> : null}
     <ConfirmDialog
       visible={confirmRejectRequest}
       title="Reject this class request?"
@@ -555,11 +930,250 @@ function Classes({ data, refresh, toast }: Props) {
     />
   </>;
 }
-function Students({ data }: Props) { const rows = allStudents(data); return <><Heading title="Student Monitoring" subtitle="Aggregated SWUNEXT provisional standing, mastery, attendance, and risk across authorized classes." />{rows.length ? <DataTable columns={['Student ID', 'Student', 'Program', 'Class', 'Current', 'Mastery', 'Attendance', 'Risk']} rows={rows.map((row) => { const summary = summarizeEnrollmentStanding(row.item.workspace, row.student.enrollmentId); return [row.student.institutionalId, row.student.name, row.student.program, `${row.item.code} · ${row.item.section}`, row.score == null ? 'Missing' : `${row.score.toFixed(1)}%`, summary.mastery == null ? 'Missing' : `${summary.mastery.toFixed(1)}%`, row.rate == null ? 'No data' : `${row.rate.toFixed(0)}%`, <Badge key={`${row.student.enrollmentId}-risk`} color={row.risk === 'unavailable' ? '#94A3B8' : row.riskLevelColor ?? colors.textMuted}>{row.riskLevelName}</Badge>]; })} /> : <PageState kind="empty" title="No students to monitor" message="Faculty can add students manually or by CSV to populate department monitoring." />}</>; }
+
+function ClassActionsMenu({ classLabel, onManageRoster, onViewGradebook, onManageOptions }: { classLabel: string; onManageRoster: () => void; onViewGradebook: () => void; onManageOptions: () => void }) {
+  const triggerRef = useRef<View>(null);
+  const { width: screenWidth, height: screenHeight } = useWindowDimensions();
+  const [position, setPosition] = useState({ left: 8, top: 8 });
+  const [open, setOpen] = useState(false);
+  const showMenu = () => triggerRef.current?.measureInWindow((x, y, width, height) => {
+    setPosition({ left: Math.max(8, Math.min(screenWidth - 248, x + width - 240)), top: Math.max(8, Math.min(screenHeight - 168, y + height + 4)) });
+    setOpen(true);
+  });
+  const actions = [
+    { label: 'Manage class roster', icon: 'students' as const, onPress: onManageRoster },
+    { label: 'View gradebook', icon: 'grades' as const, onPress: onViewGradebook },
+    { label: 'Manage class options', icon: 'settings' as const, onPress: onManageOptions },
+  ];
+  return <>
+    <Pressable ref={triggerRef} accessibilityRole="button" accessibilityLabel={`More actions for ${classLabel}`} accessibilityHint="Open class actions" onPress={showMenu} style={rosterStyles.classActionsTrigger}>
+      <AppIcon name="more" size={18} color={colors.text} />
+    </Pressable>
+    <Modal visible={open} transparent animationType="fade" onRequestClose={() => setOpen(false)}>
+      <View style={rosterStyles.actionMenuOverlay}>
+        <Pressable accessibilityRole="button" accessibilityLabel="Close class actions" onPress={() => setOpen(false)} style={StyleSheet.absoluteFill} />
+        <View style={[rosterStyles.classActionMenu, position]}>
+          {actions.map((action) => <Pressable key={action.label} accessibilityRole="button" onPress={() => { setOpen(false); action.onPress(); }} style={({ pressed }) => [rosterStyles.classActionMenuItem, pressed && rosterStyles.classActionMenuItemPressed]}>
+            <AppIcon name={action.icon} size={16} color={colors.brand} />
+            <Text style={rosterStyles.classActionMenuText}>{action.label}</Text>
+          </Pressable>)}
+        </View>
+      </View>
+    </Modal>
+  </>;
+}
+
+type RosterImportFile = { name: string; kind: 'csv' | 'excel'; text?: string; data?: ArrayBuffer };
+type RosterImportPreview = ReturnType<typeof previewRosterCsv>;
+
+function AcademicAdminClassRosterDialog({ item, programs, toast, onClose, onChanged }: {
+  item: AcademicWorkspace['classes'][number];
+  programs: AcademicWorkspace['programs'];
+  toast: ReturnType<typeof useToast>;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
+  const validateStudentId = useStudentIdValidation();
+  const [childDialog, setChildDialog] = useState<'add' | 'edit' | 'import' | null>(null);
+  const [editingStudent, setEditingStudent] = useState<RosterStudent | null>(null);
+  const [selectedEnrollmentIds, setSelectedEnrollmentIds] = useState<string[]>([]);
+  const [deleteSelectedOpen, setDeleteSelectedOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [programId, setProgramId] = useState(item.workspace.students[0]?.programId ?? programs[0]?.id ?? '');
+  const [configuredSections, setConfiguredSections] = useState<ProgramSectionRecord[]>([]);
+  const [institutionCode, setInstitutionCode] = useState('SWU');
+  const [institutionalId, setInstitutionalId] = useState('');
+  const [email, setEmail] = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [middleName, setMiddleName] = useState('');
+  const [lastName, setLastName] = useState('');
+  const [suffix, setSuffix] = useState('');
+  const [yearLevel, setYearLevel] = useState('1');
+  const [rosterFile, setRosterFile] = useState<RosterImportFile | null>(null);
+  const [saving, setSaving] = useState(false);
+  const yearLevels = useYearLevels(programId);
+  useEffect(() => {
+    let active = true;
+    if (!programId) { setConfiguredSections([]); return; }
+    void Promise.all([loadProgramSections(programId), loadInstitutionCode()]).then(([loaded, code]) => {
+      if (!active) return;
+      setConfiguredSections(loaded);
+      setInstitutionCode(code);
+    }).catch((cause) => { if (active) toast.show(getErrorMessage(cause, 'Could not load configured sections.')); });
+    return () => { active = false; };
+  }, [programId, toast]);
+  const importSectionOptions = useMemo(() => {
+    const programCode = programs.find((program) => program.id === programId)?.code;
+    return programCode ? configuredSections.map((entry) => ({ programCode, yearLevel: entry.yearLevel, sectionNumber: entry.sectionNumber, institutionCode })) : [];
+  }, [configuredSections, institutionCode, programId, programs]);
+  const studentIdError = validateStudentId && institutionalId.trim() && !isValidStudentId(institutionalId) ? 'Use a 12-digit number or 05-XXXX-XXXXXX.' : undefined;
+  const preview: RosterImportPreview = useMemo(() => {
+    if (!rosterFile) return [];
+    try { return rosterFile.kind === 'excel' ? previewRosterExcel(rosterFile.data!, importSectionOptions) : previewRosterCsv(rosterFile.text ?? '', importSectionOptions); }
+    catch (cause) { return [{ rowNumber: 0, raw: {}, errors: [getErrorMessage(cause, 'Unable to read this file.')], duplicate: false, value: undefined }]; }
+  }, [rosterFile, importSectionOptions]);
+  const filteredStudents = useMemo(() => item.workspace.students.filter((student) => `${student.name} ${student.institutionalId} ${student.email}`.toLowerCase().includes(query.trim().toLowerCase())), [item.workspace.students, query]);
+  const toggleStudentSelection = (enrollmentId: string) => setSelectedEnrollmentIds((current) => current.includes(enrollmentId) ? current.filter((id) => id !== enrollmentId) : [...current, enrollmentId]);
+  const visibleSelection = filteredStudents.length > 0 && filteredStudents.every((student) => selectedEnrollmentIds.includes(student.enrollmentId));
+  const toggleVisibleSelection = () => setSelectedEnrollmentIds((current) => visibleSelection
+    ? current.filter((id) => !filteredStudents.some((student) => student.enrollmentId === id))
+    : Array.from(new Set([...current, ...filteredStudents.map((student) => student.enrollmentId)])));
+  const openAddDialog = () => {
+    setEditingStudent(null);
+    setProgramId(item.workspace.students[0]?.programId ?? programs[0]?.id ?? '');
+    setInstitutionalId(''); setEmail(''); setFirstName(''); setMiddleName(''); setLastName(''); setSuffix(''); setYearLevel('1');
+    setChildDialog('add');
+  };
+  const openEditDialog = (student: RosterStudent) => {
+    setEditingStudent(student);
+    setProgramId(student.programId);
+    setInstitutionalId(student.institutionalId); setEmail(student.email); setFirstName(student.firstName); setMiddleName(student.middleName); setLastName(student.lastName); setSuffix(student.suffix);
+    setYearLevel(String(student.yearLevel));
+    setChildDialog('edit');
+  };
+  useEffect(() => {
+    setProgramId(item.workspace.students[0]?.programId ?? programs[0]?.id ?? '');
+    setSelectedEnrollmentIds([]);
+    setQuery('');
+    setChildDialog(null);
+  }, [item.id, item.section]);
+
+  const chooseRosterFile = async () => {
+    try {
+      const result = await DocumentPicker.getDocumentAsync({ type: ['text/csv', 'text/comma-separated-values', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel'], copyToCacheDirectory: true });
+      if (result.canceled) return;
+      const asset = result.assets[0];
+      const response = await fetch(asset.uri);
+      if (/\.(xlsx|xls)$/i.test(asset.name)) setRosterFile({ name: asset.name, kind: 'excel', data: await response.arrayBuffer() });
+      else setRosterFile({ name: asset.name, kind: 'csv', text: await response.text() });
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Could not open the roster file.')); }
+  };
+  const downloadTemplate = async () => {
+    const templateContent = 'institutional_id,first_name,middle_name,last_name,suffix,email,year_level,section\n2024-0001,Juan,,Dela Cruz,,juan.delacruz@example.edu,3,' + item.section;
+    if (Platform.OS === 'web') {
+      const XLSX = await import('xlsx-js-style');
+      const workbook = XLSX.utils.book_new();
+      const worksheet = XLSX.utils.aoa_to_sheet([['institutional_id', 'first_name', 'middle_name', 'last_name', 'suffix', 'email', 'year_level', 'section'], ['2024-0001', 'Juan', '', 'Dela Cruz', '', 'juan.delacruz@example.edu', 3, item.section]]);
+      XLSX.utils.book_append_sheet(workbook, worksheet, 'Roster');
+      const output = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
+      const url = URL.createObjectURL(new Blob([output], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
+      const anchor = document.createElement('a'); anchor.href = url; anchor.download = 'apms-roster-template.xlsx'; anchor.click(); URL.revokeObjectURL(url);
+    } else await Share.share({ message: templateContent });
+    toast.show('Excel roster template downloaded.');
+  };
+  const addStudent = async () => {
+    if (!programId || studentIdError || !firstName.trim() || !lastName.trim()) return;
+    setSaving(true);
+    try {
+      await addStudentToClass({ classId: item.id, programId, institutionalId, email, firstName, middleName, lastName, suffix, yearLevel: Number(yearLevel), section: item.section });
+      toast.show('Student added to the class roster.');
+      setChildDialog(null); onChanged();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Student could not be added.')); }
+    finally { setSaving(false); }
+  };
+  const editStudent = async () => {
+    if (!editingStudent || !programId || studentIdError || !firstName.trim() || !lastName.trim()) return;
+    setSaving(true);
+    try {
+      await updateStudentDetails(editingStudent.studentId, { programId, institutionalId, email, firstName, middleName, lastName, suffix, yearLevel: Number(yearLevel), section: item.section });
+      toast.show('Student details updated.');
+      setChildDialog(null); setEditingStudent(null); onChanged();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Student details could not be updated.')); }
+    finally { setSaving(false); }
+  };
+  const removeSelected = async () => {
+    if (!selectedEnrollmentIds.length) return;
+    setSaving(true);
+    try {
+      await removeStudentsFromClass(item.id, selectedEnrollmentIds);
+      toast.show(`${selectedEnrollmentIds.length} student${selectedEnrollmentIds.length === 1 ? '' : 's'} removed from this class.`);
+      setSelectedEnrollmentIds([]); setDeleteSelectedOpen(false); onChanged();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Selected students could not be removed.')); }
+    finally { setSaving(false); }
+  };
+  const importRoster = async () => {
+    if (!rosterFile || !programId) return;
+    setSaving(true);
+    try {
+      const result = rosterFile.kind === 'excel'
+        ? await importRosterExcel(item.id, programId, rosterFile.name, rosterFile.data!, importSectionOptions)
+        : await importRosterCsv(item.id, programId, rosterFile.name, rosterFile.text!, importSectionOptions);
+      toast.show(`Roster import complete: ${result.success} imported, ${result.failures} rejected.`);
+      setRosterFile(null); setChildDialog(null); onChanged();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Roster import failed.')); }
+    finally { setSaving(false); }
+  };
+  const studentRows = filteredStudents.map((student: RosterStudent) => [
+    <Pressable key={`select-${student.enrollmentId}`} accessibilityRole="checkbox" accessibilityState={{ checked: selectedEnrollmentIds.includes(student.enrollmentId) }} accessibilityLabel={`Select ${student.name}`} onPress={() => toggleStudentSelection(student.enrollmentId)} style={[rosterStyles.rosterCheckbox, selectedEnrollmentIds.includes(student.enrollmentId) && rosterStyles.rosterCheckboxSelected]}><Text style={rosterStyles.rosterCheckboxMark}>{selectedEnrollmentIds.includes(student.enrollmentId) ? '✓' : ''}</Text></Pressable>,
+    student.institutionalId, [student.lastName, student.suffix].filter(Boolean).join(' ') || '—', student.firstName, student.middleName || '—', student.email || '—', String(student.yearLevel),
+    <Button key={`edit-${student.enrollmentId}`} label="Edit" variant="secondary" onPress={() => openEditDialog(student)} />,
+  ]);
+  return <>
+    <Dialog wide visible title={`Manage class roster · ${item.code} · ${item.section}`} onClose={onClose}>
+      <Text style={styles.help}>{item.title} · {item.term} · {item.workspace.students.length} students</Text>
+      <View style={rosterStyles.rosterToolbar}>
+        <SearchFilter value={query} onChange={setQuery} placeholder="Search students by name or ID" accessibilityLabel="Search class roster" containerStyle={rosterStyles.rosterSearch} inputStyle={rosterStyles.rosterSearchInput} />
+        <View style={[rosterStyles.rosterActions, rosterStyles.rosterToolbarButtons]}>
+          <Button label="Import roster" variant="secondary" containerStyle={rosterStyles.rosterToolbarButton} onPress={() => { setRosterFile(null); setChildDialog('import'); }} />
+          <Button label="Add student" containerStyle={rosterStyles.rosterToolbarButton} onPress={openAddDialog} />
+          {selectedEnrollmentIds.length ? <Button label={`Remove selected (${selectedEnrollmentIds.length})`} variant="danger" containerStyle={rosterStyles.rosterToolbarButton} onPress={() => setDeleteSelectedOpen(true)} /> : null}
+        </View>
+      </View>
+      {studentRows.length ? <DataTable columns={['Select', 'Student ID', 'Last Name', 'First name', 'Middle name', 'Email', 'Year', 'Actions']} rows={studentRows} columnWidths={[52, 145, 185, 190, 125, 220, 70, 90]} columnFlex={[0, 0, 1, 1.4, 0.8, 1.4, 0, 0]} columnHeaderContent={[<Pressable key="select-all" accessibilityRole="checkbox" accessibilityLabel="Select all matching students" accessibilityState={{ checked: visibleSelection }} onPress={toggleVisibleSelection} style={[rosterStyles.rosterCheckbox, visibleSelection && rosterStyles.rosterCheckboxSelected]}><Text style={rosterStyles.rosterCheckboxMark}>{visibleSelection ? '✓' : ''}</Text></Pressable>]} widthMode="container" /> : <PageState kind="empty" title={query ? 'No matching students' : 'No students in this class'} message={query ? 'Try another name, ID, or email.' : 'Add a student or import a roster to get started.'} />}
+    </Dialog>
+    <Dialog visible={childDialog === 'add'} title="Add student to class" onClose={() => { if (!saving) setChildDialog(null); }}>
+      <SelectField label="Program" value={programId} options={programs.map((program) => ({ label: `${program.code} · ${program.name}`, value: program.id }))} onChange={setProgramId} />
+      <View style={styles.formGrid}>
+        <View style={{ width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
+          <Field label="First name" value={firstName} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={setFirstName} />
+          <Field label="Middle name (optional)" value={middleName} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={setMiddleName} />
+          <Field label="Last name" value={lastName} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={setLastName} />
+          <Field label="Suffix (optional)" value={suffix} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={setSuffix} />
+        </View>
+        <View style={{ width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
+          <Field label="Student ID" value={institutionalId} error={studentIdError} containerStyle={{ flex: 1, flexBasis: 220, minWidth: 180 }} onChangeText={setInstitutionalId} />
+          <Field label="Email" value={email} keyboardType="email-address" containerStyle={{ flex: 1, flexBasis: 220, minWidth: 180 }} onChangeText={setEmail} />
+        </View>
+        <SelectField label="Year level" value={yearLevel} options={yearLevels.map((level) => ({ label: level.label, value: String(level.level) }))} onChange={setYearLevel} />
+      </View>
+      <Button label="Add to class roster" loading={saving} disabled={!programId || !institutionalId.trim() || !firstName.trim() || !lastName.trim() || Boolean(studentIdError)} onPress={() => void addStudent()} />
+    </Dialog>
+    <Dialog visible={childDialog === 'edit'} title="Edit student details" onClose={() => { if (!saving) { setChildDialog(null); setEditingStudent(null); } }}>
+      <SelectField label="Program" value={programId} options={programs.map((program) => ({ label: `${program.code} · ${program.name}`, value: program.id }))} onChange={setProgramId} />
+      <View style={styles.formGrid}>
+        <View style={{ width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
+          <Field label="First name" value={firstName} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={setFirstName} />
+          <Field label="Middle name (optional)" value={middleName} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={setMiddleName} />
+          <Field label="Last name" value={lastName} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={setLastName} />
+          <Field label="Suffix (optional)" value={suffix} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={setSuffix} />
+        </View>
+        <View style={{ width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
+          <Field label="Student ID" value={institutionalId} error={studentIdError} containerStyle={{ flex: 1, flexBasis: 220, minWidth: 180 }} onChangeText={setInstitutionalId} />
+          <Field label="Email" value={email} keyboardType="email-address" containerStyle={{ flex: 1, flexBasis: 220, minWidth: 180 }} onChangeText={setEmail} />
+        </View>
+        <SelectField label="Year level" value={yearLevel} options={yearLevels.map((level) => ({ label: level.label, value: String(level.level) }))} onChange={setYearLevel} />
+      </View>
+      <Button label="Save student details" loading={saving} disabled={!programId || !institutionalId.trim() || !firstName.trim() || !lastName.trim() || Boolean(studentIdError)} onPress={() => void editStudent()} />
+    </Dialog>
+    <Dialog visible={childDialog === 'import'} title="Import class roster" onClose={() => { if (!saving) setChildDialog(null); }}>
+      <SelectField label="Program for imported students" value={programId} options={programs.map((program) => ({ label: `${program.code} · ${program.name}`, value: program.id }))} onChange={setProgramId} />
+      <Text style={styles.help}>Choose an Excel or CSV roster. APMS validates sections against the selected program, converts recognized short or institution-wide names to the program format, and reports invalid or duplicate records before import.</Text>
+      <View style={rosterStyles.rosterActions}><Button label="Choose Excel or CSV" variant="secondary" onPress={() => void chooseRosterFile()} /><Button label="Download Excel template" variant="ghost" onPress={() => void downloadTemplate()} /></View>
+      {rosterFile ? <>
+        <Text style={styles.cardTitle}>{rosterFile.name}</Text>
+        <Text style={styles.help}>{preview.length} rows found · {preview.filter((row) => !row.errors.length).length} valid · {preview.filter((row) => row.errors.length).length} invalid</Text>
+        {preview.length ? <DataTable columns={['Row', 'Student ID', 'Name', 'Validation']} rows={preview.map((row) => [String(row.rowNumber), row.raw.institutional_id ?? '—', formatStudentName({ firstName: row.raw.first_name, middleName: row.raw.middle_name, lastName: row.raw.last_name, suffix: row.raw.suffix }), row.errors.join('; ') || 'Valid'])} /> : null}
+        <Button label="Import valid rows" loading={saving} disabled={!programId || !preview.some((row) => row.value && !row.errors.length && !row.duplicate)} onPress={() => void importRoster()} />
+      </> : null}
+    </Dialog>
+    <ConfirmDialog visible={deleteSelectedOpen} title="Remove selected students?" message={`Remove ${selectedEnrollmentIds.length} selected student${selectedEnrollmentIds.length === 1 ? '' : 's'} from this class? Their scores, attendance, and monitoring records for this class will also be removed. Student identities remain available for other classes.`} confirmLabel="Remove students" cancelLabel="Keep students" danger pending={saving} onClose={() => { if (!saving) setDeleteSelectedOpen(false); }} onConfirm={() => void removeSelected()} />
+  </>;
+}
+
 function Risk({ data, refresh, toast }: Props) {
   const [query, setQuery] = useState('');
   const [classFilter, setClassFilter] = useState('all');
-  const [riskFilter, setRiskFilter] = useState('attention');
+  const [riskFilter, setRiskFilter] = useState('all');
   const [trendFilter, setTrendFilter] = useState<'all' | 'declining' | 'stable' | 'improving'>('all');
   const [concernFilter, setConcernFilter] = useState('all');
   const [showPredictionMetadata, setShowPredictionMetadata] = useState(false);
@@ -710,7 +1324,7 @@ function Risk({ data, refresh, toast }: Props) {
       setPredictionRunning(false);
     }
   };
-  const clearFilters = () => { setQuery(''); setRiskFilter('attention'); setTrendFilter('all'); setConcernFilter('all'); };
+  const clearFilters = () => { setQuery(''); setRiskFilter('all'); setTrendFilter('all'); setConcernFilter('all'); };
   const gradeDetailCount = gradeColumnView === 'recorded' && selectedClass ? recordedAssessmentColumns.length : 3;
   const tableColumns = ['Student', 'Class', ...(gradeColumnView === 'recorded' && selectedClass ? recordedAssessmentColumns.map((column) => column.label) : ['Period 1', 'Period 2', 'Period 3']), 'Final percentage', 'Point / letter grade', 'Risk level', 'Matched evaluation rules', ...(hasPredictedStandingOutput ? ['Predicted standing'] : []), 'AI risk probability', 'Attendance', 'Trend', ...(showPredictionMetadata ? ['Prediction generated', 'AI provider', 'AI model', 'Model version'] : [])];
   const tableColumnWidths = [220, 190, ...(gradeColumnView === 'recorded' && selectedClass ? recordedAssessmentColumns.map(() => 150) : [100, 100, 100]), 110, 130, 150, 300, ...(hasPredictedStandingOutput ? [130] : []), 140, 100, 100, ...(showPredictionMetadata ? [175, 130, 180, 130] : [])];
@@ -744,7 +1358,7 @@ function Risk({ data, refresh, toast }: Props) {
     </View>
     <Card>
       <View style={styles.riskToolbar}>
-        <SearchFilter value={query} onChange={setQuery} placeholder="Search students..." accessibilityLabel="Search students" />
+        <SearchFilter value={query} onChange={setQuery} placeholder="Search students..." accessibilityLabel="Search students" containerStyle={styles.riskSearch} />
         <SelectField label="Class" value={classFilter} options={[{ label: 'All department classes', value: 'all' }, ...data.classes.map((item) => ({ label: `${item.code} · ${item.section}`, value: item.id }))]} onChange={(value) => { setClassFilter(value); setGradeColumnView('summary'); setShowPredictionMetadata(false); setPredictionRunError(null); }} containerStyle={styles.riskFilter} />
         <SelectField label="Risk" value={riskFilter} options={riskOptions} onChange={setRiskFilter} containerStyle={styles.riskFilter} />
         <SelectField label="Trend" value={trendFilter} options={[{ label: 'All Trends', value: 'all' }, { label: 'Declining', value: 'declining' }, { label: 'Stable', value: 'stable' }, { label: 'Improving', value: 'improving' }]} onChange={(value) => setTrendFilter(value as typeof trendFilter)} containerStyle={styles.riskFilter} />
@@ -1407,11 +2021,11 @@ function Subjects({ data, toast, refresh }: Props) {
   );
 }
 
-function Dialog({ visible, title, onClose, children }: { visible: boolean; title: string; onClose: () => void; children: ReactNode }) {
+function Dialog({ visible, title, onClose, children, wide = false }: { visible: boolean; title: string; onClose: () => void; children: ReactNode; wide?: boolean }) {
   return (
     <Modal visible={visible} transparent animationType="fade" onRequestClose={onClose}>
       <View style={styles.overlay}>
-        <Card style={styles.dialog}>
+        <Card style={[styles.dialog, wide && styles.wideDialog]}>
           <View style={styles.heading}>
             <Text accessibilityRole="header" style={styles.dialogTitle}>{title}</Text>
             <Pressable accessibilityLabel="Close dialog" onPress={onClose}>
@@ -1427,7 +2041,10 @@ function Dialog({ visible, title, onClose, children }: { visible: boolean; title
 
 const styles = StyleSheet.create({
   screen: { width: '100%', alignSelf: 'stretch', gap: 14 },
+  unitSection: { gap: 12, marginTop: 8 },
+  unitSectionTitle: { color: colors.text, fontSize: 15, fontWeight: '700' },
   heading: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  headingCopy: { flex: 1, minWidth: 240 },
   flex: { flex: 1 },
   title: { color: colors.text, fontSize: 22, lineHeight: 30, fontWeight: '700' },
   subtitle: { color: colors.textMuted, fontSize: 13, lineHeight: 19, marginTop: 3 },
@@ -1439,6 +2056,7 @@ const styles = StyleSheet.create({
   riskDangerText: { color: colors.danger },
   riskWarningText: { color: colors.warning },
   riskToolbar: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-end', gap: 10, marginBottom: 8 },
+  riskSearch: { flex: 1, flexBasis: 220, minWidth: 220, maxWidth: 420 },
   riskFilter: { flexGrow: 1, flexBasis: 160, minWidth: 150 },
   riskCount: { marginTop: 10, color: colors.textMuted, fontSize: 12 },
   studentRiskDetails: { gap: 10 },
@@ -1482,6 +2100,7 @@ const styles = StyleSheet.create({
   help: { color: colors.textMuted, fontSize: 12, lineHeight: 18 },
   overlay: { flex: 1, backgroundColor: '#00000066', alignItems: 'center', justifyContent: 'center', padding: 24 },
   dialog: { width: '100%', maxWidth: 760, maxHeight: '90%', padding: 22 },
+  wideDialog: { maxWidth: 1240, maxHeight: '94%' },
   dialogTitle: { fontSize: 19, fontWeight: '700', color: colors.text },
   dialogBody: { marginTop: 16 },
   dialogContent: { gap: 12 },
@@ -1491,4 +2110,22 @@ const styles = StyleSheet.create({
   rationaleText: { color: colors.textMuted, fontSize: 13, lineHeight: 18 },
   analyticsCharts: { flexDirection: 'row', flexWrap: 'wrap', gap: 14 },
   close: { fontSize: 28, color: colors.textMuted },
+});
+
+const rosterStyles = StyleSheet.create({
+  rosterToolbar: { width: '100%', flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 10 },
+  rosterSearch: { flex: 1, flexBasis: 300, minWidth: 240, width: 'auto', height: 36, paddingHorizontal: 8, paddingVertical: 0 },
+  rosterSearchInput: { fontSize: 15, paddingHorizontal: 4 },
+  rosterToolbarButtons: { justifyContent: 'flex-end' },
+  rosterToolbarButton: { height: 36, minHeight: 36 },
+  classActionsTrigger: { width: 36, height: 32, alignItems: 'center', justifyContent: 'center', borderRadius: 7, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface },
+  actionMenuOverlay: { flex: 1, backgroundColor: 'rgba(15, 23, 42, 0.08)' },
+  classActionMenu: { position: 'absolute', width: 240, paddingVertical: 5, borderRadius: 9, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, shadowColor: '#101828', shadowOpacity: 0.16, shadowRadius: 12, shadowOffset: { width: 0, height: 5 }, elevation: 20 },
+  classActionMenuItem: { minHeight: 40, flexDirection: 'row', alignItems: 'center', gap: 10, paddingHorizontal: 12 },
+  classActionMenuItemPressed: { backgroundColor: colors.surfaceMuted },
+  classActionMenuText: { color: colors.text, fontSize: 12, fontWeight: '600' },
+  rosterActions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, alignItems: 'center' },
+  rosterCheckbox: { width: 22, height: 22, borderWidth: 1, borderColor: colors.border, borderRadius: 5, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
+  rosterCheckboxSelected: { borderColor: colors.brand, backgroundColor: colors.brand },
+  rosterCheckboxMark: { color: '#FFFFFF', fontSize: 14, lineHeight: 17, fontWeight: '700' },
 });

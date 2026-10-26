@@ -224,7 +224,7 @@ Deno.serve(async (request) => {
     const studentRows = dataset.students.map((student: any) => {
       const parts = String(student.name).trim().split(/\s+/); const firstName = parts.shift() ?? 'Test'; const lastName = parts.join(' ') || 'Student'
       const id = databaseStudentIdBySource.get(student.id)!
-      return { id, synthetic_batch_id: batchId, program_id: program.id, institutional_id: `SYN-${batchId.slice(0, 8).toUpperCase()}-${student.studentNumber}`, email: `synthetic-${id}@example.invalid`, first_name: firstName.slice(0, 100), last_name: lastName.slice(0, 100), year_level: 1, section: classRow.section, remarks: `Synthetic data batch ${dataset.batchId}`, status: 'inactive' }
+      return { id, synthetic_batch_id: batchId, program_id: program.id, institutional_id: `SYN-${batchId.slice(0, 4).toUpperCase()}-${student.studentNumber}`, email: `synthetic-${id}@example.invalid`, first_name: firstName.slice(0, 100), last_name: lastName.slice(0, 100), year_level: 1, section: classRow.section, remarks: `Synthetic data batch ${dataset.batchId}`, status: 'inactive' }
     })
     batchStage = 'inserting generated students'
     for (let i = 0; i < studentRows.length; i += 500) { const { error } = await admin.from('students').insert(studentRows.slice(i, i + 500)); if (error) throw error }

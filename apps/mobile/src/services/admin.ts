@@ -2,7 +2,7 @@ import { supabase } from './supabase';
 import * as tus from 'tus-js-client';
 
 export type ManagedUser = {
-  id: string; email: string; firstName: string; lastName: string; status: 'active' | 'inactive' | 'suspended';
+  id: string; email: string; firstName: string; lastName: string; status: 'invited' | 'active' | 'inactive' | 'suspended'; takeoverEmail?: string | null; onboardingComplete?: boolean;
   role: 'system_admin' | 'academic_admin' | 'faculty' | null; roleName: string | null; scopeType: string | null; scopeId: string | null; lastLoginAt: string | null;
 };
 
@@ -23,6 +23,91 @@ export type DepartmentRecord = { id: string; code: string; name: string; status:
 export type ProgramRecord = { id: string; departmentId: string; code: string; name: string; status: 'active' | 'inactive' };
 export type AcademicTermRecord = { id: string; academicYear: string; semester: string; startsOn: string; endsOn: string; status: 'planned' | 'active' | 'closed' | 'archived' };
 export type YearLevelRecord = { level: number; label: string; sortOrder: number };
+export type ProgramSectionRecord = { id: string; programId: string; yearLevel: number; sectionNumber: number };
+export type ProgramRequestRecord = {
+  id: string; departmentId: string; requestedBy: string; code: string; name: string; rationale: string | null;
+  status: 'pending' | 'approved' | 'rejected'; rejectionReason: string | null; programId: string | null;
+  reviewedBy: string | null; reviewedAt: string | null; createdAt: string;
+};
+
+export async function loadProgramRequests(): Promise<ProgramRequestRecord[]> {
+  if (!supabase) throw new Error('APMS is not connected to Supabase.');
+  const { data, error } = await supabase.from('program_requests')
+    .select('id,department_id,requested_by,code,name,rationale,status,rejection_reason,program_id,reviewed_by,reviewed_at,created_at')
+    .order('created_at', { ascending: false });
+  if (error) throw error;
+  return (data ?? []).map((row) => ({
+    id: row.id, departmentId: row.department_id, requestedBy: row.requested_by, code: row.code, name: row.name,
+    rationale: row.rationale, status: row.status, rejectionReason: row.rejection_reason, programId: row.program_id,
+    reviewedBy: row.reviewed_by, reviewedAt: row.reviewed_at, createdAt: row.created_at,
+  }));
+}
+
+export async function submitProgramRequest(input: { departmentId: string; code: string; name: string; rationale?: string }) {
+  if (!supabase) throw new Error('APMS is not connected to Supabase.');
+  const { error } = await supabase.rpc('submit_program_request', {
+    p_department_id: input.departmentId, p_code: input.code.trim().toUpperCase(), p_name: input.name.trim(),
+    p_rationale: input.rationale?.trim() || null,
+  });
+  if (error) throw error;
+}
+
+export async function reviewProgramRequest(input: { requestId: string; decision: 'approved' | 'rejected'; rejectionReason?: string }) {
+  if (!supabase) throw new Error('APMS is not connected to Supabase.');
+  const { error } = await supabase.rpc('system_admin_review_program_request', {
+    p_request_id: input.requestId, p_decision: input.decision, p_rejection_reason: input.rejectionReason?.trim() || null,
+  });
+  if (error) throw error;
+}
+
+export async function loadInstitutionCode(): Promise<string> {
+  if (!supabase) throw new Error('APMS is not connected to Supabase.');
+  const { data, error } = await supabase.from('system_settings').select('value').eq('key', 'academic.institution_code').maybeSingle();
+  if (error) throw error;
+  return typeof data?.value === 'string' && data.value.trim() ? data.value.trim().toUpperCase() : 'SWU';
+}
+
+export async function loadProgramSections(programId: string): Promise<ProgramSectionRecord[]> {
+  if (!supabase) throw new Error('APMS is not connected to Supabase.');
+  const { data, error } = await supabase.from('program_sections').select('id,program_id,year_level,section_number')
+    .eq('program_id', programId).order('year_level').order('section_number');
+  if (error) throw error;
+  return (data ?? []).map((row) => ({ id: row.id, programId: row.program_id, yearLevel: row.year_level, sectionNumber: row.section_number }));
+}
+
+export async function saveProgramSection(input: Omit<ProgramSectionRecord, 'id'> & { id?: string; userId: string }) {
+  if (!supabase) throw new Error('APMS is not connected to Supabase.');
+  const row = { program_id: input.programId, year_level: input.yearLevel, section_number: input.sectionNumber, updated_by: input.userId };
+  const result = input.id
+    ? await supabase.from('program_sections').update(row).eq('id', input.id).select('id').maybeSingle()
+    : await supabase.from('program_sections').insert({ ...row, created_by: input.userId }).select('id').maybeSingle();
+  if (result.error) throw result.error;
+  if (!result.data) throw new Error('Section was not saved. Confirm you still have access to this program.');
+}
+
+export async function addProgramSections(input: { programId: string; yearLevel: number; firstSectionNumber: number; count: number; userId: string }) {
+  if (!supabase) throw new Error('APMS is not connected to Supabase.');
+  if (!Number.isInteger(input.count) || input.count < 1 || input.firstSectionNumber < 1 || input.firstSectionNumber + input.count - 1 > 99) {
+    throw new Error('Section numbers must fit within the supported range of 1–99.');
+  }
+  const records = Array.from({ length: input.count }, (_, index) => ({
+    program_id: input.programId,
+    year_level: input.yearLevel,
+    section_number: input.firstSectionNumber + index,
+    created_by: input.userId,
+    updated_by: input.userId,
+  }));
+  const { data, error } = await supabase.from('program_sections').insert(records).select('id');
+  if (error) throw error;
+  if (data?.length !== records.length) throw new Error('Not all requested sections were added. Refresh the page and try again.');
+}
+
+export async function deleteProgramSection(id: string) {
+  if (!supabase) throw new Error('APMS is not connected to Supabase.');
+  const { data, error } = await supabase.from('program_sections').delete().eq('id', id).select('id').maybeSingle();
+  if (error) throw error;
+  if (!data) throw new Error('Section was not removed. Confirm you still have access to this program.');
+}
 
 export async function loadYearLevels(programId: string): Promise<YearLevelRecord[]> {
   if (!supabase) throw new Error('APMS is not connected to Supabase.');
@@ -108,12 +193,24 @@ export async function saveAcademicTerm(input: { id?: string; academicYear: strin
   if (error) throw error;
 }
 
-export async function createManagedUser(input: { email: string; password: string; firstName: string; lastName: string; role: 'system_admin' | 'academic_admin' | 'faculty'; departmentId?: string; employeeId?: string }) {
+export async function createManagedUser(input: { email: string; redirectTo: string; firstName: string; lastName: string; role: 'system_admin' | 'academic_admin' | 'faculty'; departmentId?: string; employeeId?: string }) {
   return invoke<{ userId: string }>({ action: 'create', ...input });
 }
 
-export async function updateManagedUser(input: { userId: string; status?: 'active' | 'inactive' | 'suspended'; role?: 'system_admin' | 'academic_admin' | 'faculty'; departmentId?: string; employeeId?: string; password?: string }) {
+export async function resendManagedUserInvitation(input: { userId: string; redirectTo: string }) {
+  return invoke<{ userId: string; invitationSent: boolean }>({ action: 'resend_invitation', ...input });
+}
+
+export async function sendManagedUserPasswordReset(input: { userId: string; redirectTo: string }) {
+  return invoke<{ userId: string; passwordResetSent: boolean }>({ action: 'send_password_reset', ...input });
+}
+
+export async function updateManagedUser(input: { userId: string; status?: 'active' | 'inactive' | 'suspended'; role?: 'system_admin' | 'academic_admin' | 'faculty'; departmentId?: string; employeeId?: string }) {
   return invoke<{ userId: string }>({ action: 'update', ...input });
+}
+
+export async function deleteManagedUsers(userIds: string[], takeoverEmails: Record<string, string> = {}, redirectTo?: string, forceDeleteAcademicAdminWithoutTakeover = false, forceDeleteLinkedRecords = false) {
+  return invoke<{ deletedUserIds: string[]; failed: { userId: string; error: string }[]; createdTakeovers: { departmentId: string; email: string }[]; forcedDepartments: string[]; linkedRecordsDeletedUserIds: string[] }>({ action: 'delete', userIds, takeoverEmails, redirectTo, forceDeleteAcademicAdminWithoutTakeover, forceDeleteLinkedRecords });
 }
 
 export async function createJsonBackup(password: string) {
@@ -191,5 +288,11 @@ export async function saveBackupSchedule(userId: string, input: { id?: string; f
 export async function saveSystemSetting(userId: string, key: string, value: unknown) {
   if (!supabase) throw new Error('APMS is not connected to Supabase.');
   const { error } = await supabase.from('system_settings').upsert({ key, value, updated_by: userId }, { onConflict: 'key' });
+  if (error) throw error;
+}
+
+export async function deleteSystemSetting(key: string) {
+  if (!supabase) throw new Error('APMS is not connected to Supabase.');
+  const { error } = await supabase.from('system_settings').delete().eq('key', key);
   if (error) throw error;
 }

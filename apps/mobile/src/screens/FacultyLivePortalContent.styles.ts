@@ -6,7 +6,7 @@ export const styles = StyleSheet.create({
   bulkClassRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 10, padding: 12, borderWidth: 1, borderColor: colors.border, borderRadius: 10 },
   bulkClassCheck: { color: colors.brand, fontSize: 20, width: 26 },
   bulkClassName: { color: colors.text, fontSize: 13, fontWeight: '700' },
-  screen: { gap: 16 }, homePage: { gap: 16 }, flex: { flex: 1 }, heading: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, alignItems: 'center', justifyContent: 'space-between' },
+  screen: { gap: 16 }, homePage: { gap: 16 }, flex: { flex: 1 }, heading: { flexDirection: 'row', flexWrap: 'wrap', gap: 12, alignItems: 'center', justifyContent: 'space-between' }, headingCopy: { flex: 1, minWidth: 240 },
   title: { fontSize: 22, lineHeight: 30, fontWeight: '700', color: colors.text }, subtitle: { fontSize: 13, lineHeight: 19, color: colors.textMuted, marginTop: 3 },
   metrics: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 }, cardTitle: { fontSize: 15, fontWeight: '700', color: colors.text, marginBottom: 12 },
   classSelect: { maxWidth: 460 }, actions: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 }, formGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 12 },

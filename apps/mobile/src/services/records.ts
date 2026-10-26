@@ -5,6 +5,7 @@ import type { Role } from "@apms/domain";
 import { useAuth } from "@/auth/AuthProvider";
 import { EMPTY_SCREEN_RECORDS, MOCK_SCREEN_RECORDS } from "@/data/mockRecords";
 import { supabase } from "./supabase";
+import { formatStudentName } from '@/utils/studentName';
 
 export type ScreenData = { columns: string[]; rows: string[][] };
 type State = {
@@ -47,7 +48,7 @@ async function fetchScreenData(screen: string, role: Role): Promise<ScreenData> 
     const { data, error } = await supabase
       .from("students")
       .select(
-        "institutional_id,email,first_name,last_name,year_level,status,programs(code),profiles(email,phone)",
+        "institutional_id,email,first_name,middle_name,last_name,suffix,year_level,status,programs(code),profiles(email,phone)",
       )
       .order("institutional_id");
     if (error) throw error;
@@ -55,7 +56,7 @@ async function fetchScreenData(screen: string, role: Role): Promise<ScreenData> 
       columns: ["ID", "Name", "Contact", "Year", "Remarks", "Status"],
       rows: (data ?? []).map((item: any) => [
         text(item.institutional_id),
-        `${text(item.first_name)} ${text(item.last_name)}`,
+        formatStudentName({ firstName: item.first_name, middleName: item.middle_name, lastName: item.last_name, suffix: item.suffix }),
         `${text(item.profiles?.email ?? item.email)}${
           item.profiles?.phone ? `\n${text(item.profiles.phone)}` : ""
         }`,

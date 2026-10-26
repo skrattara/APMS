@@ -60,7 +60,7 @@ Deno.serve(async (request) => {
     .from('enrollments').select('id,student_id').eq('id', enrollmentId).eq('status', 'active').maybeSingle()
   if (enrollmentError || !enrollment) return json({ error: 'Student enrollment is not accessible' }, 403)
   const { data: student, error: studentError } = await userClient
-    .from('students').select('email,first_name,last_name').eq('id', enrollment.student_id).maybeSingle()
+    .from('students').select('email,first_name,middle_name,last_name,suffix').eq('id', enrollment.student_id).maybeSingle()
   if (studentError || !student?.email?.trim()) return json({ error: 'The student does not have a registered email address' }, 422)
 
   // Save the message as a private draft first. This invokes the normal scoped
@@ -86,7 +86,7 @@ Deno.serve(async (request) => {
     if (error) console.error('Could not record feedback email delivery attempt', error.message)
   }
 
-  const name = `${student.first_name ?? ''} ${student.last_name ?? ''}`.trim() || 'Student'
+  const name = [student.first_name, student.middle_name, student.last_name, student.suffix].filter((part) => typeof part === 'string' && part.trim()).map((part) => part.trim()).join(' ') || 'Student'
   const plainText = `Hello ${name},\n\n${feedbackBody}\n\nThis feedback was sent by your instructor through APMS.`
   const html = `<p>Hello ${escapeHtml(name)},</p>${feedbackBody.split(/\r?\n/).map((line) => line ? `<p>${escapeHtml(line)}</p>` : '<br>').join('')}<p>This feedback was sent by your instructor through APMS.</p>`
   let providerReference: string | null = null

@@ -17,6 +17,7 @@ export const NAVIGATION: Record<Role, NavItem[]> = {
   faculty: [
     { key: 'overview', label: 'Dashboard', icon: 'home' }, { key: 'classes', label: 'My Classes', icon: 'records' },
     { key: 'gradebook', label: 'Gradebook', icon: 'grades' }, { key: 'attendance', label: 'Attendance', icon: 'criteria' },
+    { key: 'deadlines', label: 'Grade Deadlines', icon: 'grades' },
     { key: 'students', label: 'Students', icon: 'students' }, { key: 'risk', label: 'At-Risk Students', icon: 'evaluation' },
     { key: 'criteria', label: 'Grading Criteria', icon: 'criteria' }, { key: 'feedback', label: 'Feedback', icon: 'feedback' },
     { key: 'analytics', label: 'Analytics & Reports', icon: 'analytics' },
@@ -24,8 +25,9 @@ export const NAVIGATION: Record<Role, NavItem[]> = {
   ],
   academic_admin: [
     { key: 'overview', label: 'Dashboard', icon: 'home' }, { key: 'units', label: 'Academic Units', icon: 'faculty' },
-    { key: 'subjects', label: 'Subjects', icon: 'records' }, { key: 'classes', label: 'Classes Overview', icon: 'records' },
-    { key: 'students', label: 'Student Monitoring', icon: 'students' }, { key: 'risk', label: 'At-Risk Overview', icon: 'evaluation' },
+    { key: 'subjects', label: 'Subjects', icon: 'records' }, { key: 'classes', label: 'Classes', icon: 'records' },
+    { key: 'users', label: 'User Management', icon: 'admins' },
+    { key: 'risk', label: 'Students', icon: 'evaluation' },
     { key: 'criteria', label: 'Evaluation Criteria', icon: 'criteria' }, { key: 'deadlines', label: 'Grade Deadlines', icon: 'grades' }, { key: 'analytics', label: 'Analytics & Reports', icon: 'analytics' },
     { key: 'ai-usage', label: 'AI Usage', icon: 'analytics' }, { key: 'notifications', label: 'Notifications', icon: 'notifications', hidden: true }, { key: 'settings', label: 'Settings', icon: 'settings' },
   ],

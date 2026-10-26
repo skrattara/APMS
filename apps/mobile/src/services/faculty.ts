@@ -23,6 +23,8 @@ import { supabase } from './supabase';
 import { forecastError, forecastRequestError, SavedForecastResponseError } from './predictionErrors';
 import { projectPredictionValuesToAIFactors } from './predictionEvaluation';
 import { formatImportedStudentId, normalizeStudentId } from '@/utils/studentId';
+import { extractStudentSuffixes, formatStudentName, parseStudentFullName } from '@/utils/studentName';
+import { institutionalSectionName, resolveInstitutionalSectionName, type AcademicSectionPattern } from '@/utils/academicSections';
 
 const CLASS_WORKSPACE_PAGE_SIZE = 1000;
 async function fetchAllPages<T>(fetchPage: (from: number, to: number) => PromiseLike<{ data: T[] | null; error: unknown | null }>) {
@@ -94,6 +96,8 @@ export type FacultyReferenceData = {
   subjects: { id: string; code: string; title: string; lecture_units: number; laboratory_units: number }[];
   terms: { id: string; label: string; status: 'active' | 'planned' }[];
   programs: { id: string; code: string; name: string }[];
+  institutionCode: string;
+  sections: { programId: string; programCode: string; yearLevel: number; sectionNumber: number; value: string }[];
 };
 
 export type RosterStudent = {
@@ -102,6 +106,10 @@ export type RosterStudent = {
   studentId: string;
   programId: string;
   institutionalId: string;
+  firstName: string;
+  middleName: string;
+  lastName: string;
+  suffix: string;
   name: string;
   email: string;
   program: string;
@@ -286,12 +294,26 @@ async function loadFacultyClassesRequest(includeStudentCounts: boolean, requeste
     .order('created_at', { ascending: false });
   const { data, error } = await buildQuery();
   if (error) throw error;
+  const [{ data: programs, error: programsError }, { data: sectionRows, error: sectionsError }, { data: institutionSetting, error: institutionError }] = await Promise.all([
+    client.from('programs').select('id,code').eq('status', 'active'),
+    client.from('program_sections').select('program_id,year_level,section_number'),
+    client.from('system_settings').select('value').eq('key', 'academic.institution_code').maybeSingle(),
+  ]);
+  if (programsError) throw programsError;
+  if (sectionsError) throw sectionsError;
+  if (institutionError) throw institutionError;
+  const institutionCode = typeof institutionSetting?.value === 'string' && institutionSetting.value.trim() ? institutionSetting.value.trim().toUpperCase() : 'SWU';
+  const programCodeById = new Map((programs ?? []).map((program: any) => [program.id, program.code]));
+  const sectionPatterns: AcademicSectionPattern[] = (sectionRows ?? []).flatMap((row: any) => {
+    const programCode = programCodeById.get(row.program_id);
+    return programCode ? [{ programCode, yearLevel: Number(row.year_level), sectionNumber: Number(row.section_number) }] : [];
+  });
   return (data ?? []).map((row: any) => ({
     id: row.id,
     subjectId: row.subject_id,
     code: row.subjects?.code ?? '—',
     title: row.subjects?.title ?? 'Untitled subject',
-    section: row.section,
+    section: resolveInstitutionalSectionName(row.section, sectionPatterns, institutionCode),
     term: `${row.academic_terms?.academic_year ?? ''} ${row.academic_terms?.semester ?? ''}`.trim(),
     studentCount: Number(row.enrollments?.[0]?.count ?? 0),
     lectureUnits: Number(row.subjects?.lecture_units ?? 3),
@@ -341,9 +363,12 @@ async function loadFacultyReferenceDataRequest(): Promise<FacultyReferenceData> 
   const subjectQuery = () => client.from('subjects').select('id,code,title,lecture_units,laboratory_units').order('code');
   const termsQuery = () => client.from('academic_terms').select('id,academic_year,semester,status').in('status', ['active', 'planned']).order('starts_on', { ascending: false });
   const programsQuery = () => client.from('programs').select('id,code,name').eq('status', 'active').order('code');
-  const [subjects, terms, programs] = await Promise.all([subjectQuery(), termsQuery(), programsQuery()]);
-  const error = subjects.error ?? terms.error ?? programs.error;
+  const sectionsQuery = () => client.from('program_sections').select('program_id,year_level,section_number').order('year_level').order('section_number');
+  const institutionQuery = () => client.from('system_settings').select('value').eq('key', 'academic.institution_code').maybeSingle();
+  const [subjects, terms, programs, sections, institution] = await Promise.all([subjectQuery(), termsQuery(), programsQuery(), sectionsQuery(), institutionQuery()]);
+  const error = subjects.error ?? terms.error ?? programs.error ?? sections.error ?? institution.error;
   if (error) throw error;
+  const institutionCode = typeof institution.data?.value === 'string' && institution.data.value.trim() ? institution.data.value.trim().toUpperCase() : 'SWU';
   return {
     subjects: subjects.data ?? [],
     terms: (terms.data ?? []).map((row) => ({
@@ -352,6 +377,14 @@ async function loadFacultyReferenceDataRequest(): Promise<FacultyReferenceData> 
       status: row.status as 'active' | 'planned',
     })),
     programs: programs.data ?? [],
+    institutionCode,
+    sections: (sections.data ?? []).flatMap((row: any) => {
+      const program = (programs.data ?? []).find((item: any) => item.id === row.program_id);
+      if (!program) return [];
+      const yearLevel = Number(row.year_level);
+      const sectionNumber = Number(row.section_number);
+      return [{ programId: row.program_id, programCode: program.code, yearLevel, sectionNumber, value: institutionalSectionName({ programCode: program.code, yearLevel, sectionNumber }, institutionCode) }];
+    }),
   };
 }
 
@@ -451,7 +484,9 @@ export type StudentInput = {
   institutionalId: string;
   email: string;
   firstName: string;
+  middleName?: string;
   lastName: string;
+  suffix?: string;
   yearLevel: number;
   section: string;
 };
@@ -463,7 +498,9 @@ export async function addStudentToClass(input: StudentInput) {
     p_institutional_id: input.institutionalId.trim(),
     p_email: input.email.trim().toLowerCase(),
     p_first_name: input.firstName.trim(),
+    p_middle_name: input.middleName?.trim() || null,
     p_last_name: input.lastName.trim(),
+    p_suffix: input.suffix?.trim() || null,
     p_year_level: input.yearLevel,
     p_section: input.section.trim(),
   });
@@ -479,7 +516,9 @@ export async function updateStudentDetails(studentId: string, input: Omit<Studen
       institutional_id: input.institutionalId.trim(),
       email: input.email.trim().toLowerCase(),
       first_name: input.firstName.trim(),
+      middle_name: input.middleName?.trim() || null,
       last_name: input.lastName.trim(),
+      suffix: input.suffix?.trim() || null,
       year_level: input.yearLevel,
       section: input.section.trim(),
       updated_at: new Date().toISOString(),
@@ -501,9 +540,11 @@ export type RosterCsvValue = Omit<StudentInput, 'classId' | 'programId'>;
 
 export function normalizeRosterRows(rows: Record<string, string>[]) {
   const aliases: Record<string, string[]> = {
-    institutional_id: ['institutional_id', 'student_id', 'student_number', 'student_no', 'student number', 'id'],
-    first_name: ['first_name', 'firstname', 'given_name', 'given name'],
-    last_name: ['last_name', 'lastname', 'surname', 'family_name', 'family name'],
+    institutional_id: ['institutional_id', 'institutional id', 'student_id', 'student id', 'student_number', 'student_no', 'student number', 'id'],
+    first_name: ['first_name', 'first name', 'firstname', 'given_name', 'given name'],
+    middle_name: ['middle_name', 'middle name', 'middlename', 'middle', 'middle_initial', 'middle initial'],
+    last_name: ['last_name', 'last name', 'lastname', 'surname', 'family_name', 'family name'],
+    suffix: ['suffix', 'name_suffix', 'name suffix', 'generation_suffix', 'generation suffix'],
     full_name: ['full_name', 'fullname', 'full name', 'student_name', 'student name', 'name'],
     email: ['email', 'email_address', 'email address', 'institutional_email'],
     year_level: ['year_level', 'year level', 'year', 'grade', 'level'],
@@ -514,12 +555,24 @@ export function normalizeRosterRows(rows: Record<string, string>[]) {
     const values = Object.fromEntries(entries);
     const get = (field: string) => aliases[field].map((alias) => values[alias]).find((value) => value?.trim())?.trim() ?? '';
     const fullName = get('full_name');
-    const nameParts = fullName.split(/\s+/).filter(Boolean);
+    const parsedName = parseStudentFullName(fullName);
+    const firstSource = get('first_name') || parsedName.firstName;
+    const middleSource = get('middle_name') || parsedName.middleName;
+    const lastSource = get('last_name') || parsedName.lastName;
+    const first = extractStudentSuffixes(firstSource);
+    const middle = extractStudentSuffixes(middleSource);
+    const last = extractStudentSuffixes(lastSource);
+    const firstName = first.value;
+    const middleName = middle.value;
+    const lastName = last.value;
+    const suffix = get('suffix') || [first.suffix, middle.suffix, last.suffix, parsedName.suffix].filter(Boolean).join(' ');
     return {
       ...row,
       institutional_id: formatImportedStudentId(get('institutional_id')),
-      first_name: get('first_name') || nameParts.shift() || '',
-      last_name: get('last_name') || nameParts.join(' '),
+      first_name: firstName,
+      middle_name: middleName,
+      last_name: lastName,
+      suffix,
       email: get('email'),
       year_level: get('year_level'),
       section: get('section'),
@@ -527,11 +580,37 @@ export function normalizeRosterRows(rows: Record<string, string>[]) {
   });
 }
 
-function validateRosterRows(rows: Record<string, string>[]) {
+export type RosterSectionOption = { programCode: string; yearLevel: number; sectionNumber: number; institutionCode?: string };
+
+function comparableSection(value: string) {
+  return value.toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
+function normalizeImportedSection(value: string, yearLevel: number, options?: RosterSectionOption[]) {
+  if (!options) return { value, error: null as string | null };
+  const input = comparableSection(value);
+  const match = options.find((option) => {
+    const code = comparableSection(option.programCode);
+    const letter = String.fromCharCode(64 + option.yearLevel);
+    const shortCode = `${letter}${option.sectionNumber}`;
+    return input === comparableSection(shortCode)
+      || input === comparableSection(`${option.programCode}-${shortCode}`)
+      || input === comparableSection(`${option.programCode}${option.yearLevel}-${shortCode}`)
+      || input.endsWith(`${code}${option.yearLevel}${shortCode}`);
+  });
+  if (!match) return { value, error: `section “${value}” is not configured for the selected program` };
+  if (match.yearLevel !== yearLevel) return { value, error: `section “${value}” does not match year level ${yearLevel}` };
+  const normalizedValue = institutionalSectionName(match, match.institutionCode ?? 'SWU');
+  return { value: normalizedValue, error: null as string | null };
+}
+
+function validateRosterRows(rows: Record<string, string>[], sectionOptions?: RosterSectionOption[]) {
   return validateCsvRows(normalizeRosterRows(rows), (row) => {
     const institutionalId = row.institutional_id?.trim();
     const firstName = row.first_name?.trim();
+    const middleName = row.middle_name?.trim() ?? '';
     const lastName = row.last_name?.trim();
+    const suffix = row.suffix?.trim() ?? '';
     const email = row.email?.trim().toLowerCase();
     const section = row.section?.trim();
     const yearLevel = Number(row.year_level);
@@ -542,19 +621,21 @@ function validateRosterRows(rows: Record<string, string>[]) {
     if (!email || !/^\S+@\S+\.\S+$/.test(email)) errors.push('valid email is required');
     if (!Number.isInteger(yearLevel) || yearLevel < 1 || yearLevel > 8) errors.push('year_level must be 1–8');
     if (!section) errors.push('section is required');
+    const normalizedSection = section ? normalizeImportedSection(section, yearLevel, sectionOptions) : null;
+    if (normalizedSection?.error) errors.push(normalizedSection.error);
     return {
       errors,
       duplicateKey: institutionalId ? normalizeStudentId(institutionalId) : undefined,
-      value: errors.length ? undefined : { institutionalId, firstName, lastName, email, yearLevel, section } as RosterCsvValue,
+      value: errors.length ? undefined : { institutionalId, firstName, middleName, lastName, suffix, email, yearLevel, section: normalizedSection?.value ?? section } as RosterCsvValue,
     };
   });
 }
 
-export function previewRosterCsv(csvText: string) {
-  return validateRosterRows(parseCsv(csvText));
+export function previewRosterCsv(csvText: string, sectionOptions?: RosterSectionOption[]) {
+  return validateRosterRows(parseCsv(csvText), sectionOptions);
 }
 
-export function previewRosterExcel(fileData: ArrayBuffer) {
+export function previewRosterExcel(fileData: ArrayBuffer, sectionOptions?: RosterSectionOption[]) {
   const workbook = XLSX.read(fileData, { type: 'array', cellDates: false });
   const sheet = workbook.Sheets[workbook.SheetNames[0] ?? ''];
   if (!sheet) throw new Error('Excel workbook must contain at least one worksheet.');
@@ -564,7 +645,7 @@ export function previewRosterExcel(fileData: ArrayBuffer) {
     Object.fromEntries(Object.entries(row).map(([key, value]) => [key.trim().toLowerCase(), String(value ?? '').trim()])),
   );
   if (!rows.length) throw new Error('The first Excel worksheet does not contain any student rows.');
-  return validateRosterRows(rows);
+  return validateRosterRows(rows, sectionOptions);
 }
 
 async function importRosterPreview(classId: string, programId: string, fileName: string, preview: ReturnType<typeof previewRosterCsv>, fileType: 'csv' | 'xlsx') {
@@ -575,7 +656,7 @@ async function importRosterPreview(classId: string, programId: string, fileName:
     total_count: preview.length, success_count: 0, failure_count: preview.length - valid.length,
     initiated_by: (await client.auth.getUser()).data.user?.id,
     file_name: fileName, import_kind: 'roster',
-    column_mapping: { institutional_id: 'institutional_id', first_name: 'first_name', last_name: 'last_name', email: 'email', year_level: 'year_level', section: 'section' },
+    column_mapping: { institutional_id: 'institutional_id', first_name: 'first_name', middle_name: 'middle_name', last_name: 'last_name', suffix: 'suffix', email: 'email', year_level: 'year_level', section: 'section' },
   }).select('id').single();
   if (jobError) throw jobError;
   let success = 0;
@@ -600,12 +681,12 @@ async function importRosterPreview(classId: string, programId: string, fileName:
   return { preview, success, failures };
 }
 
-export async function importRosterCsv(classId: string, programId: string, fileName: string, csvText: string) {
-  return importRosterPreview(classId, programId, fileName, previewRosterCsv(csvText), 'csv');
+export async function importRosterCsv(classId: string, programId: string, fileName: string, csvText: string, sectionOptions?: RosterSectionOption[]) {
+  return importRosterPreview(classId, programId, fileName, previewRosterCsv(csvText, sectionOptions), 'csv');
 }
 
-export async function importRosterExcel(classId: string, programId: string, fileName: string, fileData: ArrayBuffer) {
-  return importRosterPreview(classId, programId, fileName, previewRosterExcel(fileData), 'xlsx');
+export async function importRosterExcel(classId: string, programId: string, fileName: string, fileData: ArrayBuffer, sectionOptions?: RosterSectionOption[]) {
+  return importRosterPreview(classId, programId, fileName, previewRosterExcel(fileData, sectionOptions), 'xlsx');
 }
 
 export function loadClassWorkspace(classId: string, departmentEvaluationSystem?: EvaluationDefinition, facultyUserId?: string, personalClassEvaluationSystem?: EvaluationDefinition, options: FacultyWorkspaceLoadOptions = {}): Promise<ClassWorkspace> {
@@ -647,7 +728,7 @@ async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSy
   const includeFeedback = options.includeFeedback ?? true;
   const includeEvaluations = options.includeEvaluations ?? true;
   const [enrollments, assessments, criteriaSets, sessions, defaultSystemSetting, classMetaResult] = await Promise.all([
-    fetchAllPages((from, to) => client.from('enrollments').select('id,student_id,students(program_id,institutional_id,email,first_name,last_name,year_level,section,programs(id,code))').eq('class_record_id', classId).eq('status', 'active').order('created_at').order('id').range(from, to)),
+    fetchAllPages((from, to) => client.from('enrollments').select('id,student_id,students(program_id,institutional_id,email,first_name,middle_name,last_name,suffix,year_level,section,programs(id,code))').eq('class_record_id', classId).eq('status', 'active').order('created_at').order('id').range(from, to)),
     fetchAllPages((from, to) => client.from('assessments').select('id,title,type,component_key,module_number,maximum_score,assessment_date,grading_period,source,grading_type_id,grading_group_id,grading_period_id,grading_instance_weight,optional').eq('class_record_id', classId).neq('status', 'archived').order('assessment_date').order('id').range(from, to)),
     client.from('criteria_sets').select('id,name,version,passing_threshold,grading_system_id,grading_system_definition,criteria_nodes(id,label,weight)').eq('class_record_id', classId).eq('status', 'active').order('version', { ascending: false }).limit(1),
     includeAttendance
@@ -689,7 +770,8 @@ async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSy
     classNumber: index + 1,
     enrollmentId: row.id, studentId: row.student_id, institutionalId: row.students?.institutional_id,
     programId: row.students?.program_id,
-    name: `${row.students?.first_name ?? ''} ${row.students?.last_name ?? ''}`.trim(), email: row.students?.email ?? '',
+    firstName: row.students?.first_name ?? '', middleName: row.students?.middle_name ?? '', lastName: row.students?.last_name ?? '', suffix: row.students?.suffix ?? '',
+    name: formatStudentName({ firstName: row.students?.first_name, middleName: row.students?.middle_name, lastName: row.students?.last_name, suffix: row.students?.suffix }), email: row.students?.email ?? '',
     program: row.students?.programs?.code ?? '—', yearLevel: Number(row.students?.year_level ?? 0), section: row.students?.section ?? '',
   }));
   const assessmentRows: FacultyAssessment[] = (assessments.data ?? []).map((row) => ({

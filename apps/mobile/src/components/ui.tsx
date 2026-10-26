@@ -83,6 +83,7 @@ export function Button({
   icon,
   description,
   compact = false,
+  containerStyle,
 }: {
   label: string;
   onPress?: () => void;
@@ -92,6 +93,7 @@ export function Button({
   icon?: AppIconName;
   description?: string;
   compact?: boolean;
+  containerStyle?: StyleProp<ViewStyle>;
 }) {
   const hint = description ?? buttonDescription(label);
   const compactControls = useContext(CompactControlsContext);
@@ -111,6 +113,7 @@ export function Button({
         styles[`button_${variant}`],
         pressed && styles.pressed,
         (disabled || loading) && styles.disabled,
+        containerStyle,
       ]}
     >
       {loading ? (
@@ -482,6 +485,7 @@ function isTextCell(cell: DataTableCell): cell is string {
 function isStatusCell(cell: string) {
   return [
     "active",
+    "invited",
     "inactive",
     "pending",
     "approved",
@@ -512,6 +516,7 @@ export function DataTable<Row extends DataTableCell[]>({
   columnFlex,
   highlightRow,
   highlightCell,
+  formatCell,
 }: {
   columns: string[];
   rows: Row[];
@@ -524,6 +529,7 @@ export function DataTable<Row extends DataTableCell[]>({
   columnFlex?: number[];
   highlightRow?: (row: Row) => boolean;
   highlightCell?: (row: Row, columnIndex: number) => boolean;
+  formatCell?: (cell: Row[number], row: Row, columnIndex: number) => ReactNode | undefined;
 }) {
   const paginationPreference = useTablePaginationPreference();
   const highlightFailingGrades = paginationPreference.failingGradesRed;
@@ -668,6 +674,8 @@ export function DataTable<Row extends DataTableCell[]>({
                         ? "neutral"
                         : /high|failed|rejected|suspended|invalid/i.test(cell)
                         ? "danger"
+                        : /invited/i.test(cell)
+                          ? "info"
                         : /medium|warning|pending|planned/i.test(cell)
                           ? "warning"
                           : "success"
@@ -676,7 +684,7 @@ export function DataTable<Row extends DataTableCell[]>({
                       {cell}
                     </Badge>
                   ) : (
-                    isTextCell(cell) ? <Text style={[styles.cellText, onRowPress && cellIndex === 0 && styles.entityLink, highlightFailingGrades && (highlightCell?.(row, cellIndex) || isFailingGradeCell(columns[cellIndex], cell)) && styles.failingGradeCell]}>{studentIdColumns[cellIndex] ? formatStudentId(cell) : cell}</Text> : cell
+                    isTextCell(cell) ? formatCell?.(cell, row, cellIndex) ?? <Text style={[styles.cellText, onRowPress && cellIndex === 0 && styles.entityLink, highlightFailingGrades && (highlightCell?.(row, cellIndex) || isFailingGradeCell(columns[cellIndex], cell)) && styles.failingGradeCell]}>{studentIdColumns[cellIndex] ? formatStudentId(cell) : cell}</Text> : cell
                   )}
                 </View>
               ))}
@@ -845,12 +853,14 @@ export function SearchFilter({
   placeholder = "Search records...",
   accessibilityLabel = "Search records",
   containerStyle,
+  inputStyle,
 }: {
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
   accessibilityLabel?: string;
   containerStyle?: StyleProp<ViewStyle>;
+  inputStyle?: StyleProp<TextStyle>;
 }) {
   const compactControls = useContext(CompactControlsContext);
   return (
@@ -862,7 +872,7 @@ export function SearchFilter({
         onChangeText={onChange}
         placeholder={placeholder}
         placeholderTextColor="#99A1AF"
-        style={[styles.searchInput, compactControls && styles.searchInputDense]}
+        style={[styles.searchInput, compactControls && styles.searchInputDense, inputStyle]}
       />
     </View>
   );
