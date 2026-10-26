@@ -213,9 +213,9 @@ export async function deleteManagedUsers(userIds: string[], takeoverEmails: Reco
   return invoke<{ deletedUserIds: string[]; failed: { userId: string; error: string }[]; createdTakeovers: { departmentId: string; email: string }[]; forcedDepartments: string[]; linkedRecordsDeletedUserIds: string[] }>({ action: 'delete', userIds, takeoverEmails, redirectTo, forceDeleteAcademicAdminWithoutTakeover, forceDeleteLinkedRecords });
 }
 
-export async function createJsonBackup(password: string) {
+export async function createJsonBackup(password?: string) {
   if (!supabase) throw new Error('APMS is not connected to Supabase.');
-  const { data, error } = await supabase.functions.invoke('apms-backups', { body: { action: 'create', password } });
+  const { data, error } = await supabase.functions.invoke('apms-backups', { body: { action: 'create', password: password ?? '' } });
   if (error) throw error;
   if (data?.error) throw new Error(data.error);
   return data as { id: string; fileName: string; sizeBytes: number; checksum: string; downloadUrl: string };

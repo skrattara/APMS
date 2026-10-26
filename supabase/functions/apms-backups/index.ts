@@ -7,14 +7,14 @@ const corsHeaders = {
 }
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
 const tables = [
-  'roles','permissions','departments','academic_terms','programs','subjects','year_levels','profiles','faculty_profiles','students',
+  'roles','permissions','departments','academic_terms','programs','subjects','year_levels','program_sections','profiles','faculty_profiles','students',
   'class_records','class_record_templates','class_record_versions','user_roles','role_permissions','invitations','faculty_assignments',
   'enrollments','criteria_sets','criteria_nodes','grading_systems','evaluation_systems','evaluation_criteria_systems','class_evaluation_criteria',
   'faculty_class_evaluation_systems','academic_admin_class_evaluation_systems','user_evaluation_systems','academic_guidelines','assessments',
   'assessment_results','attendance_sessions','attendance_records','grader_assignments','grader_submissions','grader_reviews','model_versions',
   'prediction_criteria','performance_evaluations','prediction_runs','performance_predictions','feedback_templates','feedback_records','notifications',
   'notification_preferences','delivery_attempts','events','integrations','import_jobs','import_job_rows','grade_encoding_deadlines',
-  'grade_encoding_deadline_requests','class_requests','subject_requests','audit_logs','access_logs','system_logs','ai_model_usage',
+  'grade_encoding_deadline_requests','class_requests','subject_requests','program_requests','audit_logs','access_logs','system_logs','ai_model_usage',
   'gradebook_assessment_version_names','gradebook_score_versions','synthetic_data_batches','system_settings',
 ]
 const b64 = (bytes: Uint8Array) => {
@@ -123,7 +123,10 @@ Deno.serve(async (request) => {
   const token = authorization?.slice('Bearer '.length) ?? ''
   const url = Deno.env.get('SUPABASE_URL') ?? ''
   const anonKey = Deno.env.get('SUPABASE_ANON_KEY') ?? ''
-  const userClient = createClient(url, anonKey, { auth: { persistSession: false } })
+  const userClient = createClient(url, anonKey, {
+    auth: { persistSession: false },
+    global: { headers: { Authorization: `Bearer ${token}` } },
+  })
   const admin = createClient(url, serviceKey, { auth: { persistSession: false, autoRefreshToken: false } })
   const { data: auth, error: authError } = scheduledCall ? { data: { user: null }, error: null } : await userClient.auth.getUser(token)
   if (authError || (!scheduledCall && !auth.user)) return json({ error: 'Invalid session' }, 401)
@@ -164,9 +167,9 @@ Deno.serve(async (request) => {
 
   if (input.action === 'create') {
     const password = input.password ?? ''
-    if (password.length < 12) return json({ error: 'Use a backup password with at least 12 characters.' }, 400)
+    if (password.length > 0 && password.length < 12) return json({ error: 'Use a backup password with at least 12 characters, or leave it empty for an unencrypted backup.' }, 400)
     try {
-      const backup = await generateBackup(admin, auth.user!.id, password)
+      const backup = await generateBackup(admin, auth.user!.id, password || null)
       const { data: signed, error: signedError } = await admin.storage.from('apms-backups').createSignedUrl(backup.path, 300)
       if (signedError || !signed) throw signedError ?? new Error('Could not create backup download link')
       return json({ id: backup.id, fileName: backup.fileName, sizeBytes: backup.sizeBytes, checksum: backup.checksum, downloadUrl: signed.signedUrl })
@@ -187,7 +190,7 @@ Deno.serve(async (request) => {
       password = Deno.env.get('BACKUP_ENCRYPTION_KEY') ?? ''
       isStoredScheduledBackup = true
     }
-    if (!storagePath || (!isStoredScheduledBackup && password.length < 12) || (input.fileName && !input.fileName.endsWith('.json'))) return json({ error: 'Choose an encrypted APMS JSON backup and enter its password.' }, 400)
+    if (!storagePath || (input.fileName && !input.fileName.endsWith('.json'))) return json({ error: 'Choose an APMS JSON backup.' }, 400)
     const { data: restore, error: restoreInsertError } = await admin.from('backup_restores').insert({ backup_id: input.backupId ?? null, initiated_by: auth.user!.id, reason: 'System Admin initiated JSON restore', status: 'running' }).select('id').single()
     if (restoreInsertError || !restore) return json({ error: restoreInsertError?.message ?? 'Restore could not be started' }, 500)
     try {
@@ -197,13 +200,13 @@ Deno.serve(async (request) => {
       const envelope = JSON.parse(await blob.text())
       let snapshot: any
       if (envelope.format === 'apms-encrypted-json-backup' && envelope.algorithm === 'PBKDF2-SHA256/AES-256-GCM' && envelope.iterations === 210000) {
-        if (password.length < 12) throw new Error('The scheduled backup encryption key is not configured.')
+        if (password.length < 12) throw new Error(isStoredScheduledBackup ? 'The scheduled backup encryption key is not configured.' : 'Enter the password used to encrypt this backup.')
         const key = await passwordKey(password, unb64(envelope.salt))
         let plaintext: ArrayBuffer
         try { plaintext = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unb64(envelope.iv) }, key, unb64(envelope.ciphertext)) }
         catch { throw new Error('The backup password is incorrect or the file is damaged.') }
         snapshot = JSON.parse(new TextDecoder().decode(plaintext))
-      } else if (isStoredScheduledBackup && envelope.format === 'apms-json-backup') {
+      } else if (envelope.format === 'apms-json-backup') {
         snapshot = envelope
       } else {
         throw new Error('The selected file is not a supported APMS JSON backup.')

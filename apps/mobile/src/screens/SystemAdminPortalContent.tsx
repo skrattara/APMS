@@ -204,7 +204,8 @@ function Users({ data, refresh, toast, userId }: Props) {
 
 type SetupDialog = 'department' | 'program' | 'term' | null;
 function AcademicSetup({ data, refresh, userId, toast, initialSection }: Props & { initialSection?: string }) {
-  const [section, setSection] = useState(['Departments', 'Programs', 'Program requests', 'Academic terms', 'Institution code'].includes(initialSection ?? '') ? initialSection! : 'Departments');
+  const requestedSection = initialSection === 'Program requests' ? 'Program creation requests' : initialSection;
+  const [section, setSection] = useState(['Departments', 'Programs', 'Program creation requests', 'Academic terms', 'Institution code'].includes(requestedSection ?? '') ? requestedSection! : 'Departments');
   const [institutionCode, setInstitutionCode] = useState(String(data.settings.find((item) => item.key === 'academic.institution_code')?.value ?? 'SWU').toUpperCase());
   const [savingInstitutionCode, setSavingInstitutionCode] = useState(false);
   const [dialog, setDialog] = useState<SetupDialog>(null);
@@ -222,7 +223,7 @@ function AcademicSetup({ data, refresh, userId, toast, initialSection }: Props &
   useEffect(() => {
     let active = true;
     void loadProgramRequests().then((loaded) => { if (active) setProgramRequests(loaded); })
-      .catch((cause) => { if (active) toast.show(getErrorMessage(cause, 'Program requests could not be loaded.')); });
+      .catch((cause) => { if (active) toast.show(getErrorMessage(cause, 'Program creation requests could not be loaded.')); });
     return () => { active = false; };
   }, [data.programs, toast]);
   useEffect(() => { setInstitutionCode(String(data.settings.find((item) => item.key === 'academic.institution_code')?.value ?? 'SWU').toUpperCase()); }, [data.settings]);
@@ -259,18 +260,18 @@ function AcademicSetup({ data, refresh, userId, toast, initialSection }: Props &
       ? <Button label="Add program" disabled={!activeDepartments.length} onPress={() => openProgram()} />
       : section === 'Academic terms' ? <Button label="Add term" onPress={() => openTerm()} /> : undefined;
   return <><Heading title="Academic Setup" subtitle="Manage departments, programs, academic terms, and institution identity." action={sectionAction} />
-    <Tabs values={['Departments', 'Programs', 'Program requests', 'Academic terms', 'Institution code']} selected={section} onSelect={setSection} />
+    <Tabs values={['Departments', 'Programs', 'Program creation requests', 'Academic terms', 'Institution code']} selected={section} onSelect={setSection} />
     <View style={{ gap: 16 }}>
       {section === 'Departments' ? <>
         <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Departments</Text><Text style={styles.sectionHelp}>Departments define the scope available to Academic Admin and Faculty accounts.</Text></View>
-        {data.departments.length ? <DataTable columns={['Code', 'Department', 'Programs', 'Status', 'Actions']} rows={data.departments.map((item) => [item.code, item.name, String(data.programs.filter((program) => program.departmentId === item.id).length), item.status[0].toUpperCase() + item.status.slice(1), <Button compact key={item.id} label="Edit" variant="secondary" onPress={() => openDepartment(item)} />])} columnWidths={[96, 300, 88, 92, 96]} widthMode="content" /> : <PageState kind="empty" title="No departments yet" message="Use Add department above to create the first department." />}
+        {data.departments.length ? <DataTable columns={['Code', 'Department', 'Programs', 'Status', 'Actions']} rows={data.departments.map((item) => [item.code, item.name, String(data.programs.filter((program) => program.departmentId === item.id).length), item.status[0].toUpperCase() + item.status.slice(1), <Button compact key={item.id} label="Edit" variant="secondary" onPress={() => openDepartment(item)} />])} columnWidths={[96, 300, 88, 92, 96]} widthMode="container" /> : <PageState kind="empty" title="No departments yet" message="Use Add department above to create the first department." />}
       </> : null}
       {section === 'Programs' ? <>
         <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Programs</Text><Text style={styles.sectionHelp}>Programs are grouped under a department and can be activated or archived.</Text></View>
-        {data.programs.length ? <DataTable columns={['Code', 'Program', 'Department', 'Status', 'Actions']} rows={data.programs.map((item) => [item.code, item.name, data.departments.find((department) => department.id === item.departmentId)?.name ?? 'Unassigned', item.status[0].toUpperCase() + item.status.slice(1), <View key={item.id} style={{ flexDirection: 'row', gap: 6 }}><Button compact label="Edit" variant="secondary" onPress={() => openProgram(item)} /><Button compact label="Delete" variant="danger" onPress={() => setDeletingProgram(item)} /></View>])} columnWidths={[92, 320, 220, 92, 172]} widthMode="content" /> : <PageState kind="empty" title="No programs yet" message="Programs are optional, but useful for organizing department reports." action={<Button label="Create program" disabled={!activeDepartments.length} onPress={() => openProgram()} />} />}
+        {data.programs.length ? <DataTable columns={['Code', 'Program', 'Department', 'Status', 'Actions']} rows={data.programs.map((item) => [item.code, item.name, data.departments.find((department) => department.id === item.departmentId)?.name ?? 'Unassigned', item.status[0].toUpperCase() + item.status.slice(1), <View key={item.id} style={{ flexDirection: 'row', gap: 6 }}><Button compact label="Edit" variant="secondary" onPress={() => openProgram(item)} /><Button compact label="Delete" variant="danger" onPress={() => setDeletingProgram(item)} /></View>])} columnWidths={[92, 320, 220, 92, 172]} widthMode="container" /> : <PageState kind="empty" title="No programs yet" message="Programs are optional, but useful for organizing department reports." action={<Button label="Create program" disabled={!activeDepartments.length} onPress={() => openProgram()} />} />}
       </> : null}
-      {section === 'Program requests' ? <>
-        <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Program requests</Text><Text style={styles.sectionHelp}>Review program additions requested by Academic Admins. Approving creates an active program. Rejections require a reason.</Text></View>
+      {section === 'Program creation requests' ? <>
+        <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Program creation requests</Text><Text style={styles.sectionHelp}>Review program creation requests from Academic Admins. Approving creates an active program. Rejections require a reason.</Text></View>
         {programRequests.length ? programRequests.map((request) => {
           const department = data.departments.find((item) => item.id === request.departmentId);
           const requester = data.users.find((item) => item.id === request.requestedBy);
@@ -283,11 +284,11 @@ function AcademicSetup({ data, refresh, userId, toast, initialSection }: Props &
             </View> : null}
             {request.status === 'pending' ? <View style={styles.actions}><Button compact label="Approve and add program" disabled={reviewingProgramRequest} onPress={() => void reviewProgram(request, 'approved')} /><Button compact label="Reject…" variant="secondary" disabled={reviewingProgramRequest} onPress={() => { setSelectedProgramRequest(request); setProgramRequestRejectionReason(''); }} /></View> : request.programId ? <Text style={styles.help}>Created as an active program.</Text> : null}
           </Card>;
-        }) : <PageState kind="empty" title="No program requests" message="Program addition requests from Academic Admins will appear here." />}
+        }) : <PageState kind="empty" title="No program creation requests" message="Program creation requests from Academic Admins will appear here." />}
       </> : null}
       {section === 'Academic terms' ? <>
         <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Academic terms</Text><Text style={styles.sectionHelp}>Terms must exist before Faculty can create monitoring classes.</Text></View>
-        {data.terms.length ? <DataTable columns={['Academic year', 'Semester', 'Starts', 'Ends', 'Status', 'Actions']} rows={data.terms.map((item) => [item.academicYear, item.semester, item.startsOn, item.endsOn, item.status[0].toUpperCase() + item.status.slice(1), <Button compact key={item.id} label="Edit" variant="secondary" onPress={() => openTerm(item)} />])} columnWidths={[120, 120, 112, 112, 92, 96]} widthMode="content" /> : <PageState kind="empty" title="No academic terms yet" message="Create the current academic term before setting up classes." action={<Button label="Create term" onPress={() => openTerm()} />} />}
+        {data.terms.length ? <DataTable columns={['Academic year', 'Semester', 'Starts', 'Ends', 'Status', 'Actions']} rows={data.terms.map((item) => [item.academicYear, item.semester, item.startsOn, item.endsOn, item.status[0].toUpperCase() + item.status.slice(1), <Button compact key={item.id} label="Edit" variant="secondary" onPress={() => openTerm(item)} />])} columnWidths={[120, 120, 112, 112, 92, 96]} widthMode="container" /> : <PageState kind="empty" title="No academic terms yet" message="Create the current academic term before setting up classes." action={<Button label="Create term" onPress={() => openTerm()} />} />}
       </> : null}
       {section === 'Institution code' ? <Card style={{ gap: 12, maxWidth: 680 }}>
         <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Institution code</Text><Text style={styles.sectionHelp}>Used in institution-wide section names, for example {institutionCode || 'SWU'}-BSIT3-C2. Department codes are not used as institution prefixes.</Text></View>
@@ -311,6 +312,7 @@ function Backups({ data, refresh, userId, toast }: Props) {
   const [restoring, setRestoring] = useState(false);
   const [restoreProgress, setRestoreProgress] = useState<number | null>(null);
   const [restoreFile, setRestoreFile] = useState<{ file: File; name: string } | null>(null);
+  const [restoreRequiresPassword, setRestoreRequiresPassword] = useState(true);
   const [confirmRestore, setConfirmRestore] = useState(false);
   const [restoreStoredId, setRestoreStoredId] = useState<string | null>(null);
   const [frequency, setFrequency] = useState<'daily' | 'weekly' | 'monthly'>(data.backupSchedule?.frequency ?? 'daily');
@@ -322,13 +324,13 @@ function Backups({ data, refresh, userId, toast }: Props) {
     setRetentionDays(String(data.backupSchedule?.retentionDays ?? 30));
     setScheduleEnabled(data.backupSchedule?.enabled ?? false);
   }, [data.backupSchedule]);
-  const makeBackup = async () => {
-    if (backupPassword.length < 12) return toast.show('Use a backup password with at least 12 characters.');
+  const makeBackup = async (passwordProtected: boolean) => {
+    if (passwordProtected && backupPassword.length < 12) return toast.show('Use a backup password with at least 12 characters.');
     setCreating(true);
     try {
-      const result = await createJsonBackup(backupPassword);
+      const result = await createJsonBackup(passwordProtected ? backupPassword : undefined);
       setLatestBackupUrl({ url: result.downloadUrl, fileName: result.fileName });
-      toast.show(`Encrypted JSON backup created (${(result.sizeBytes / 1024 / 1024).toFixed(1)} MB).`);
+      toast.show(`${passwordProtected ? 'Encrypted' : 'Unencrypted'} JSON backup created (${(result.sizeBytes / 1024 / 1024).toFixed(1)} MB).`);
       setBackupPassword('');
       refresh();
     } catch (cause) { toast.show(getErrorMessage(cause, 'Backup could not be created.')); }
@@ -343,16 +345,20 @@ function Backups({ data, refresh, userId, toast }: Props) {
       const file = blob instanceof File ? blob : new File([blob], asset.name, { type: asset.mimeType ?? 'application/json' });
       if (!file.name.toLowerCase().endsWith('.json')) return toast.show('Choose an APMS backup JSON file.');
       if (file.size > 110 * 1024 * 1024) return toast.show('This backup is larger than the current 110 MB restore processing limit.');
+      const header = await file.slice(0, 1024).text();
+      const requiresPassword = /"format"\s*:\s*"apms-encrypted-json-backup"/.test(header);
       setRestoreFile({ file, name: file.name });
+      setRestoreRequiresPassword(requiresPassword);
+      setRestorePassword('');
       setRestoreProgress(null);
     } catch (cause) { toast.show(getErrorMessage(cause, 'Backup file could not be opened.')); }
   };
   const runRestore = async () => {
-    if (!restoreFile || restorePassword.length < 12) return;
+    if (!restoreFile || (restoreRequiresPassword && restorePassword.length < 12)) return;
     setRestoring(true);
     try {
       const uploaded = await uploadJsonBackup(restoreFile.file, setRestoreProgress);
-      const result = await restoreJsonBackup(uploaded.path, uploaded.name, restorePassword);
+      const result = await restoreJsonBackup(uploaded.path, uploaded.name, restoreRequiresPassword ? restorePassword : '');
       toast.show(`Restore complete. ${result.restored_rows.toLocaleString()} rows were recovered; existing rows were preserved.`);
       setRestoreFile(null);
       setRestorePassword('');
@@ -396,22 +402,24 @@ function Backups({ data, refresh, userId, toast }: Props) {
     } catch (cause) { popup?.close(); toast.show(getErrorMessage(cause, 'Backup could not be downloaded.')); }
   };
   return <>
-    <Heading title="Backup management" subtitle="Create password-protected JSON backups, restore them safely, and configure a recurring schedule." />
+    <Heading title="Backup management" subtitle="Create APMS application-data backups, restore them safely, and configure a recurring schedule." />
     <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'stretch', gap: 16 }}>
       <Card style={{ flex: 1, minWidth: 320, gap: 10 }}>
         <Text style={styles.sectionTitle}>Create encrypted backup</Text>
         <Text style={styles.sectionHelp}>The JSON backup contains APMS application records. Authentication passwords and AI provider credentials are excluded.</Text>
         <Field label="Backup password" value={backupPassword} onChangeText={setBackupPassword} secureTextEntry autoCapitalize="none" placeholder="At least 12 characters" />
-        <Button label="Create encrypted JSON backup" loading={creating} disabled={creating || backupPassword.length < 12} onPress={() => void makeBackup()} />
+        <Button label="Create encrypted JSON backup" loading={creating} disabled={creating || backupPassword.length < 12} onPress={() => void makeBackup(true)} />
+        <Button label="Create unencrypted JSON backup" variant="secondary" loading={creating} disabled={creating} onPress={() => void makeBackup(false)} />
+        <Text style={styles.sectionHelp}>Unencrypted backups can be restored without a password. Store them only in a secure location.</Text>
         {latestBackupUrl ? <Button label={`Download ${latestBackupUrl.fileName}`} variant="secondary" onPress={() => window.open(latestBackupUrl.url, '_blank', 'noopener,noreferrer')} /> : null}
       </Card>
       <Card style={{ flex: 1, minWidth: 320, gap: 10 }}>
         <Text style={styles.sectionTitle}>Restore from JSON</Text>
         <Text style={styles.sectionHelp}>Uploads above 6 MB use resumable chunks. The current restore processing limit is 110 MB. Matching rows are updated from the backup, and newer rows remain.</Text>
         <Button label={restoreFile ? `Selected: ${restoreFile.name}` : 'Choose backup JSON'} variant="secondary" onPress={() => void selectRestoreFile()} />
-        <Field label="Backup password" value={restorePassword} onChangeText={setRestorePassword} secureTextEntry autoCapitalize="none" placeholder="Enter the password used for this backup" />
+        <Field label={restoreRequiresPassword ? 'Backup password' : 'Backup password (not required for this file)'} value={restorePassword} onChangeText={setRestorePassword} secureTextEntry autoCapitalize="none" placeholder={restoreRequiresPassword ? 'Enter the password used for this backup' : 'This backup is unencrypted'} />
         {restoreProgress !== null ? <Text style={styles.sectionHelp}>{restoreProgress < 100 ? `Uploading backup: ${restoreProgress}% · upload can resume if interrupted` : 'Upload complete · preparing restore'}</Text> : null}
-        <Button label="Restore backup" disabled={!restoreFile || restorePassword.length < 12 || restoring} loading={restoring} onPress={() => setConfirmRestore(true)} />
+        <Button label="Restore backup" disabled={!restoreFile || (restoreRequiresPassword && restorePassword.length < 12) || restoring} loading={restoring} onPress={() => setConfirmRestore(true)} />
       </Card>
     </View>
     <Card style={{ gap: 10 }}>
