@@ -13,8 +13,8 @@ export type AdminWorkspace = {
   programs: ProgramRecord[];
   terms: AcademicTermRecord[];
   logs: { id: string; createdAt: string; action: string; entityType: string; entityId: string | null; actorId: string | null }[];
-  backups: { id: string; scope: string; status: string; createdAt: string; completedAt: string | null; fileName: string | null; sizeBytes: number | null; safeError: string | null; storagePath: string | null; scheduleId: string | null }[];
-  backupRestores: { id: string; status: string; createdAt: string; completedAt: string | null; safeError: string | null }[];
+  backups: { id: string; scope: string; status: string; createdAt: string; completedAt: string | null; fileName: string | null; sizeBytes: number | null; checksum: string | null; safeError: string | null; storagePath: string | null; scheduleId: string | null }[];
+  backupRestores: { id: string; status: string; createdAt: string; completedAt: string | null; backupCreatedAt: string | null; checksum: string | null; safeError: string | null }[];
   backupSchedule: { id: string; frequency: 'daily' | 'weekly' | 'monthly'; enabled: boolean; retentionDays: number; nextRunAt: string; lastRunAt: string | null } | null;
   settings: { key: string; value: unknown; updatedAt: string }[];
 };
@@ -145,8 +145,8 @@ export async function loadAdminWorkspace(): Promise<AdminWorkspace> {
     supabase.from('programs').select('id,department_id,code,name,status').order('code'),
     supabase.from('academic_terms').select('id,academic_year,semester,starts_on,ends_on,status').order('starts_on', { ascending: false }),
     supabase.from('audit_logs').select('id,created_at,action,entity_type,entity_id,actor_id').order('created_at', { ascending: false }).limit(100),
-    supabase.from('backups').select('id,scope,status,created_at,completed_at,file_name,size_bytes,safe_error,storage_path,schedule_id').order('created_at', { ascending: false }).limit(25),
-    supabase.from('backup_restores').select('id,status,created_at,completed_at,safe_error').order('created_at', { ascending: false }).limit(25),
+    supabase.from('backups').select('id,scope,status,created_at,completed_at,file_name,size_bytes,checksum,safe_error,storage_path,schedule_id').order('created_at', { ascending: false }).limit(25),
+    supabase.from('backup_restores').select('id,status,created_at,completed_at,backup_created_at,checksum,safe_error').order('created_at', { ascending: false }).limit(25),
     supabase.from('backup_schedules').select('id,frequency,enabled,retention_days,next_run_at,last_run_at').order('updated_at', { ascending: false }).limit(1),
     supabase.from('system_settings').select('key,value,updated_at').order('key'),
   ]);
@@ -159,8 +159,8 @@ export async function loadAdminWorkspace(): Promise<AdminWorkspace> {
     programs: (programs.data ?? []).map((row) => ({ id: row.id, departmentId: row.department_id, code: row.code, name: row.name, status: row.status })),
     terms: (terms.data ?? []).map((row) => ({ id: row.id, academicYear: row.academic_year, semester: row.semester, startsOn: row.starts_on, endsOn: row.ends_on, status: row.status })),
     logs: (logs.data ?? []).map((row) => ({ id: row.id, createdAt: row.created_at, action: row.action, entityType: row.entity_type, entityId: row.entity_id, actorId: row.actor_id })),
-    backups: (backups.data ?? []).map((row) => ({ id: row.id, scope: row.scope, status: row.status, createdAt: row.created_at, completedAt: row.completed_at, fileName: row.file_name, sizeBytes: row.size_bytes == null ? null : Number(row.size_bytes), safeError: row.safe_error, storagePath: row.storage_path, scheduleId: row.schedule_id })),
-    backupRestores: (restores.data ?? []).map((row) => ({ id: row.id, status: row.status, createdAt: row.created_at, completedAt: row.completed_at, safeError: row.safe_error })),
+    backups: (backups.data ?? []).map((row) => ({ id: row.id, scope: row.scope, status: row.status, createdAt: row.created_at, completedAt: row.completed_at, fileName: row.file_name, sizeBytes: row.size_bytes == null ? null : Number(row.size_bytes), checksum: row.checksum, safeError: row.safe_error, storagePath: row.storage_path, scheduleId: row.schedule_id })),
+    backupRestores: (restores.data ?? []).map((row) => ({ id: row.id, status: row.status, createdAt: row.created_at, completedAt: row.completed_at, backupCreatedAt: row.backup_created_at, checksum: row.checksum, safeError: row.safe_error })),
     backupSchedule: schedules.data?.[0] ? { id: schedules.data[0].id, frequency: schedules.data[0].frequency, enabled: schedules.data[0].enabled, retentionDays: schedules.data[0].retention_days, nextRunAt: schedules.data[0].next_run_at, lastRunAt: schedules.data[0].last_run_at } : null,
     settings: (settings.data ?? []).map((row) => ({ key: row.key, value: row.value, updatedAt: row.updated_at })),
   };
@@ -221,6 +221,26 @@ export async function createJsonBackup(password?: string) {
   return data as { id: string; fileName: string; sizeBytes: number; checksum: string; downloadUrl: string };
 }
 
+export async function deleteSelectedBackups(backupIds: string[]) {
+  if (!supabase) throw new Error('APMS is not connected to Supabase.');
+  const { data, error } = await supabase.functions.invoke('apms-backups', { body: { action: 'delete_selected', backupIds } });
+  if (error) throw error;
+  if (data?.error) throw new Error(data.error);
+  return data as { deletedIds: string[]; failed: { id: string; error: string }[] };
+}
+
+export async function resetApplicationData() {
+  if (!supabase) throw new Error('APMS is not connected to Supabase.');
+  const { data, error } = await supabase.functions.invoke('apms-backups', { body: { action: 'reset_application_data' } });
+  if (error) throw error;
+  if (data?.error) throw new Error(data.error);
+  return data as {
+    reset: boolean;
+    deleted_auth_accounts: number;
+    failed_auth_account_deletions: { userId: string; email: string | null; error: string }[];
+  };
+}
+
 export async function uploadJsonBackup(file: File, onProgress: (percent: number) => void) {
   if (!supabase) throw new Error('APMS is not connected to Supabase.');
   if (typeof window === 'undefined' || typeof File === 'undefined') throw new Error('Resumable backup restore is available in the web portal.');
@@ -260,7 +280,7 @@ export async function restoreJsonBackup(storagePath: string, fileName: string, p
   const { data, error } = await supabase.functions.invoke('apms-backups', { body: { action: 'restore', storagePath, fileName, password } });
   if (error) throw error;
   if (data?.error) throw new Error(data.error);
-  return data as { id: string; restored_rows: number };
+  return data as { id: string; restored_rows: number; recreated_auth_accounts?: number };
 }
 
 export async function restoreStoredScheduledBackup(backupId: string) {
@@ -268,7 +288,7 @@ export async function restoreStoredScheduledBackup(backupId: string) {
   const { data, error } = await supabase.functions.invoke('apms-backups', { body: { action: 'restore', backupId } });
   if (error) throw error;
   if (data?.error) throw new Error(data.error);
-  return data as { id: string; restored_rows: number };
+  return data as { id: string; restored_rows: number; recreated_auth_accounts?: number };
 }
 
 export async function saveBackupSchedule(userId: string, input: { id?: string; frequency: 'daily' | 'weekly' | 'monthly'; enabled: boolean; retentionDays: number }) {

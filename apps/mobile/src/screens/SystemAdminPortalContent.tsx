@@ -12,7 +12,7 @@ import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
 import { ReportComposer } from '@/components/reports/ReportComposer';
 import { AIServiceSettings } from '@/components/AIServiceSettings';
 import { Settings as AccountSettings } from '@/screens/AppPortalScreen';
-import { createJsonBackup, createManagedUser, deleteManagedUsers, deleteProgram, deleteSystemSetting, loadAdminWorkspace, loadProgramRequests, resendManagedUserInvitation, restoreJsonBackup, restoreStoredScheduledBackup, reviewProgramRequest, saveAcademicTerm, saveBackupSchedule, saveDepartment, saveProgram, saveSystemSetting, sendManagedUserPasswordReset, updateManagedUser, uploadJsonBackup, type AcademicTermRecord, type AdminWorkspace, type DepartmentRecord, type ManagedUser, type ProgramRecord, type ProgramRequestRecord } from '@/services/admin';
+import { createJsonBackup, createManagedUser, deleteManagedUsers, deleteProgram, deleteSelectedBackups, deleteSystemSetting, loadAdminWorkspace, loadProgramRequests, resendManagedUserInvitation, resetApplicationData, restoreJsonBackup, restoreStoredScheduledBackup, reviewProgramRequest, saveAcademicTerm, saveBackupSchedule, saveDepartment, saveProgram, saveSystemSetting, sendManagedUserPasswordReset, updateManagedUser, uploadJsonBackup, type AcademicTermRecord, type AdminWorkspace, type DepartmentRecord, type ManagedUser, type ProgramRecord, type ProgramRequestRecord } from '@/services/admin';
 import { IT_GLOBAL_GRADING_SYSTEM, type GradingDefinition } from '@apms/domain';
 import { colors } from '@/theme/tokens';
 
@@ -120,7 +120,7 @@ function Overview({ data }: Props) {
   const logsByDay = new Map<string, number>();
   for (const row of data.logs) { const day = row.createdAt.slice(0, 10); logsByDay.set(day, (logsByDay.get(day) ?? 0) + 1); }
   const auditTrend = [...logsByDay.entries()].sort(([a], [b]) => a.localeCompare(b)).map(([day, value]) => ({ label: new Date(`${day}T00:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }), value, kind: 'timeseries' as const, timestamp: day }));
-  return <><Heading title="System Administration Dashboard" subtitle="Live operational status for APMS accounts, access control, audit activity, and protected backups." /><View style={styles.metrics}><MetricCard label="User accounts" value={String(data.users.length)} /><MetricCard label="Active accounts" value={String(active)} tone="success" /><MetricCard label="Recent audit entries" value={String(data.logs.length)} tone="info" /><MetricCard label="Backups pending" value={String(queued)} tone={queued ? 'warning' : 'success'} /></View><View style={styles.userChartFilters}><SelectField label="User role" value={roleFilter} options={[{ label: 'All roles', value: 'all' }, ...roleOptions]} onChange={setRoleFilter} containerStyle={styles.filter} /><SelectField label="Account status" value={statusFilter} options={[{ label: 'All statuses', value: 'all' }, ...['active', 'inactive', 'suspended'].map((value) => ({ label: `${value[0].toUpperCase()}${value.slice(1)}`, value }))]} onChange={setStatusFilter} containerStyle={styles.filter} /></View><Text style={styles.chartCount}>Showing {visibleUsers.length.toLocaleString()} of {data.users.length.toLocaleString()} accounts</Text><View style={styles.analyticsCharts}><VisualizationPanel title="Accounts by role" description="Role distribution for filtered accounts." data={roleSeries} type="pie" /><VisualizationPanel title="Account status" description="Active, inactive, and suspended accounts." data={statusSeries} type="pie" /><VisualizationPanel title="Audit activity" description="Audit entries per day from the latest 100 authorized records." data={auditTrend} type="line" /></View><Card><Text style={styles.cardTitle}>Recent audit activity</Text>{data.logs.length ? <DataTable columns={['Time', 'Action', 'Entity', 'Actor', 'Status']} rows={data.logs.slice(0, 10).map((row) => [date(row.createdAt), row.action, row.entityType, row.actorId ?? 'System', 'Recorded'])} /> : <PageState kind="empty" title="No audit activity" message="Permission-checked administration events will appear here." />}</Card></>;
+  return <><Heading title="System Administration Dashboard" subtitle="Live operational status for APMS accounts, access control, audit activity, and protected backups." /><View style={styles.metrics}><MetricCard label="User accounts" value={String(data.users.length)} /><MetricCard label="Active accounts" value={String(active)} tone="success" /><MetricCard label="Recent audit entries" value={String(data.logs.length)} tone="info" /><MetricCard label="Backups pending" value={String(queued)} tone={queued ? 'warning' : 'success'} /></View><View style={styles.userChartFilters}><SelectField label="User role" value={roleFilter} options={[{ label: 'All roles', value: 'all' }, ...roleOptions]} onChange={setRoleFilter} containerStyle={styles.filter} /><SelectField label="Account status" value={statusFilter} options={[{ label: 'All statuses', value: 'all' }, ...['active', 'inactive', 'suspended'].map((value) => ({ label: `${value[0].toUpperCase()}${value.slice(1)}`, value }))]} onChange={setStatusFilter} containerStyle={styles.filter} /></View><Text style={styles.chartCount}>Showing {visibleUsers.length.toLocaleString()} of {data.users.length.toLocaleString()} accounts</Text><View style={styles.analyticsCharts}><VisualizationPanel title="Accounts by role" description="Role distribution for filtered accounts." data={roleSeries} type="pie" /><VisualizationPanel title="Account status" description="Active, inactive, and suspended accounts." data={statusSeries} type="pie" /><VisualizationPanel title="Audit activity" description="Audit entries per day from the latest 100 authorized records." data={auditTrend} type="line" /></View><Card><Text style={styles.cardTitle}>Recent audit activity</Text>{data.logs.length ? <DataTable columns={['Time', 'Action', 'Entity', 'Actor', 'Status']} rows={data.logs.slice(0, 10).map((row) => [date(row.createdAt), row.action, row.entityType, auditActorLabel(row.actorId, data), 'Recorded'])} columnWidths={[148, 240, 112, 200, 88]} columnFlex={[0, 0.5, 0.15, 0.25, 0]} widthMode="container" /> : <PageState kind="empty" title="No audit activity" message="Permission-checked administration events will appear here." />}</Card></>;
 }
 
 function Users({ data, refresh, toast, userId }: Props) {
@@ -268,7 +268,7 @@ function AcademicSetup({ data, refresh, userId, toast, initialSection }: Props &
       </> : null}
       {section === 'Programs' ? <>
         <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Programs</Text><Text style={styles.sectionHelp}>Programs are grouped under a department and can be activated or archived.</Text></View>
-        {data.programs.length ? <DataTable columns={['Code', 'Program', 'Department', 'Status', 'Actions']} rows={data.programs.map((item) => [item.code, item.name, data.departments.find((department) => department.id === item.departmentId)?.name ?? 'Unassigned', item.status[0].toUpperCase() + item.status.slice(1), <View key={item.id} style={{ flexDirection: 'row', gap: 6 }}><Button compact label="Edit" variant="secondary" onPress={() => openProgram(item)} /><Button compact label="Delete" variant="danger" onPress={() => setDeletingProgram(item)} /></View>])} columnWidths={[92, 320, 220, 92, 172]} widthMode="container" /> : <PageState kind="empty" title="No programs yet" message="Programs are optional, but useful for organizing department reports." action={<Button label="Create program" disabled={!activeDepartments.length} onPress={() => openProgram()} />} />}
+        {data.programs.length ? <DataTable columns={['Code', 'Program', 'Department', 'Status', 'Actions']} rows={data.programs.map((item) => [item.code, item.name, data.departments.find((department) => department.id === item.departmentId)?.name ?? 'Unassigned', item.status[0].toUpperCase() + item.status.slice(1), <View key={item.id} style={{ flexDirection: 'row', gap: 6 }}><Button compact label="Edit" variant="secondary" onPress={() => openProgram(item)} /><Button compact label="Delete" variant="danger" onPress={() => setDeletingProgram(item)} /></View>])} columnWidths={[92, 320, 220, 92, 172]} widthMode="container" /> : <PageState kind="empty" title="No programs yet" message="You may need to create a department first, if you haven't already." action={<Button label="Create program" disabled={!activeDepartments.length} onPress={() => openProgram()} />} />}
       </> : null}
       {section === 'Program creation requests' ? <>
         <View style={{ gap: 3 }}><Text style={styles.sectionTitle}>Program creation requests</Text><Text style={styles.sectionHelp}>Review program creation requests from Academic Admins. Approving creates an active program. Rejections require a reason.</Text></View>
@@ -305,10 +305,18 @@ function AcademicSetup({ data, refresh, userId, toast, initialSection }: Props &
 }
 function Roles({ data }: Props) { return <><Heading title="Roles & Permissions" subtitle="The revised APMS role model contains exactly System Admin, Academic Admin, and Faculty; Super Admin is merged and Grader is removed." /><Card><DataTable columns={['Role', 'Key', 'Assigned users', 'Permissions', 'Scope']} rows={data.roles.filter((role) => ['system_admin', 'academic_admin', 'faculty'].includes(role.key)).map((role) => [role.name, role.key, String(role.users), String(role.permissions), role.key === 'system_admin' ? 'Global' : 'Department / assigned classes'])} /></Card></>; }
 function Backups({ data, refresh, userId, toast }: Props) {
+  const [activeTab, setActiveTab] = useState('Backup');
+  const [selectedBackupIds, setSelectedBackupIds] = useState<string[]>([]);
+  const [deletingBackups, setDeletingBackups] = useState(false);
+  const [confirmDeleteBackups, setConfirmDeleteBackups] = useState(false);
   const [backupPassword, setBackupPassword] = useState('');
   const [latestBackupUrl, setLatestBackupUrl] = useState<{ url: string; fileName: string } | null>(null);
   const [restorePassword, setRestorePassword] = useState('');
   const [creating, setCreating] = useState(false);
+  const [resetting, setResetting] = useState(false);
+  const [confirmReset, setConfirmReset] = useState(false);
+  const [resetConfirmation, setResetConfirmation] = useState('');
+  const [resetResult, setResetResult] = useState<Awaited<ReturnType<typeof resetApplicationData>> | null>(null);
   const [restoring, setRestoring] = useState(false);
   const [restoreProgress, setRestoreProgress] = useState<number | null>(null);
   const [restoreFile, setRestoreFile] = useState<{ file: File; name: string } | null>(null);
@@ -319,6 +327,22 @@ function Backups({ data, refresh, userId, toast }: Props) {
   const [retentionDays, setRetentionDays] = useState(String(data.backupSchedule?.retentionDays ?? 30));
   const [scheduleEnabled, setScheduleEnabled] = useState(data.backupSchedule?.enabled ?? false);
   const [savingSchedule, setSavingSchedule] = useState(false);
+  const selectableBackups = data.backups.filter((backup) => !['deleted', 'running', 'queued'].includes(backup.status));
+  const allBackupsSelected = selectableBackups.length > 0 && selectableBackups.every((backup) => selectedBackupIds.includes(backup.id));
+  const toggleAllBackups = () => setSelectedBackupIds(allBackupsSelected ? [] : selectableBackups.map((backup) => backup.id));
+  const toggleBackup = (id: string) => setSelectedBackupIds((current) => current.includes(id) ? current.filter((selectedId) => selectedId !== id) : [...current, id]);
+  const deleteBackups = async () => {
+    if (!selectedBackupIds.length) return;
+    setDeletingBackups(true);
+    try {
+      const result = await deleteSelectedBackups(selectedBackupIds);
+      setSelectedBackupIds((current) => current.filter((id) => !result.deletedIds.includes(id)));
+      setConfirmDeleteBackups(false);
+      toast.show(result.failed.length ? `${result.deletedIds.length} backup${result.deletedIds.length === 1 ? '' : 's'} deleted; ${result.failed.length} could not be deleted.` : `${result.deletedIds.length} backup${result.deletedIds.length === 1 ? '' : 's'} deleted.`);
+      refresh();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Selected backups could not be deleted.')); }
+    finally { setDeletingBackups(false); }
+  };
   useEffect(() => {
     setFrequency(data.backupSchedule?.frequency ?? 'daily');
     setRetentionDays(String(data.backupSchedule?.retentionDays ?? 30));
@@ -359,7 +383,8 @@ function Backups({ data, refresh, userId, toast }: Props) {
     try {
       const uploaded = await uploadJsonBackup(restoreFile.file, setRestoreProgress);
       const result = await restoreJsonBackup(uploaded.path, uploaded.name, restoreRequiresPassword ? restorePassword : '');
-      toast.show(`Restore complete. ${result.restored_rows.toLocaleString()} rows were recovered; existing rows were preserved.`);
+      const accountNote = result.recreated_auth_accounts ? ` ${result.recreated_auth_accounts.toLocaleString()} account${result.recreated_auth_accounts === 1 ? ' was' : 's were'} recreated without a password or MFA; resend invitations so those users can complete setup.` : '';
+      toast.show(`Restore complete. ${result.restored_rows.toLocaleString()} rows were recovered; existing rows were preserved.${accountNote}`);
       setRestoreFile(null);
       setRestorePassword('');
       setRestoreProgress(null);
@@ -373,11 +398,24 @@ function Backups({ data, refresh, userId, toast }: Props) {
     setRestoring(true);
     try {
       const result = await restoreStoredScheduledBackup(restoreStoredId);
-      toast.show(`Restore complete. ${result.restored_rows.toLocaleString()} rows were recovered; existing rows were updated from the backup.`);
+      const accountNote = result.recreated_auth_accounts ? ` ${result.recreated_auth_accounts.toLocaleString()} account${result.recreated_auth_accounts === 1 ? ' was' : 's were'} recreated without a password or MFA; resend invitations so those users can complete setup.` : '';
+      toast.show(`Restore complete. ${result.restored_rows.toLocaleString()} rows were recovered; existing rows were updated from the backup.${accountNote}`);
       setRestoreStoredId(null);
       refresh();
     } catch (cause) { toast.show(getErrorMessage(cause, 'Scheduled backup could not be restored.')); }
     finally { setRestoring(false); }
+  };
+  const runApplicationReset = async () => {
+    if (resetConfirmation !== 'RESET') return;
+    setResetting(true);
+    try {
+      const result = await resetApplicationData();
+      setConfirmReset(false);
+      setResetConfirmation('');
+      setResetResult(result);
+      refresh();
+    } catch (cause) { toast.show(getErrorMessage(cause, 'Application data could not be reset.')); }
+    finally { setResetting(false); }
   };
   const saveSchedule = async () => {
     const retention = Number(retentionDays);
@@ -402,47 +440,79 @@ function Backups({ data, refresh, userId, toast }: Props) {
     } catch (cause) { popup?.close(); toast.show(getErrorMessage(cause, 'Backup could not be downloaded.')); }
   };
   return <>
-    <Heading title="Backup management" subtitle="Create APMS application-data backups, restore them safely, and configure a recurring schedule." />
-    <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'stretch', gap: 16 }}>
-      <Card style={{ flex: 1, minWidth: 320, gap: 10 }}>
-        <Text style={styles.sectionTitle}>Create encrypted backup</Text>
+    <Heading title="Backup management" subtitle="Create and restore APMS application-data backups, manage automatic backups, and review recent activity." />
+    <Tabs values={['Backup', 'Restore', 'Reset']} selected={activeTab} onSelect={setActiveTab} />
+    {activeTab === 'Backup' ? <>
+      <Card style={{ gap: 10 }}>
+        <Text style={styles.sectionTitle}>Create a backup</Text>
         <Text style={styles.sectionHelp}>The JSON backup contains APMS application records. Authentication passwords and AI provider credentials are excluded.</Text>
-        <Field label="Backup password" value={backupPassword} onChangeText={setBackupPassword} secureTextEntry autoCapitalize="none" placeholder="At least 12 characters" />
-        <Button label="Create encrypted JSON backup" loading={creating} disabled={creating || backupPassword.length < 12} onPress={() => void makeBackup(true)} />
-        <Button label="Create unencrypted JSON backup" variant="secondary" loading={creating} disabled={creating} onPress={() => void makeBackup(false)} />
-        <Text style={styles.sectionHelp}>Unencrypted backups can be restored without a password. Store them only in a secure location.</Text>
+        <Field label="Optional backup password" value={backupPassword} onChangeText={setBackupPassword} secureTextEntry autoCapitalize="none" placeholder="At least 12 characters for encryption" />
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+          <Button label="Create encrypted backup" loading={creating} disabled={creating || backupPassword.length < 12} onPress={() => void makeBackup(true)} />
+          <Button label="Create unencrypted backup" variant="secondary" loading={creating} disabled={creating} onPress={() => void makeBackup(false)} />
+        </View>
+        <Text style={styles.sectionHelp}>Choose encrypted to protect the file with your password, or unencrypted to create it without one. Store unencrypted files only in a secure location.</Text>
         {latestBackupUrl ? <Button label={`Download ${latestBackupUrl.fileName}`} variant="secondary" onPress={() => window.open(latestBackupUrl.url, '_blank', 'noopener,noreferrer')} /> : null}
       </Card>
-      <Card style={{ flex: 1, minWidth: 320, gap: 10 }}>
+      <Card style={{ gap: 10 }}>
+        <Text style={styles.sectionTitle}>Automatic backups</Text>
+        <Text style={styles.sectionHelp}>Choose how often APMS creates a server-managed backup and how long to retain scheduled copies.</Text>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-end', gap: 12 }}>
+          <SelectField label="Frequency" value={frequency} options={[{ label: 'Daily', value: 'daily' }, { label: 'Weekly', value: 'weekly' }, { label: 'Monthly', value: 'monthly' }]} onChange={(value) => setFrequency(value as typeof frequency)} containerStyle={{ flex: 1, minWidth: 160 }} />
+          <Field label="Keep backups (days)" value={retentionDays} onChangeText={setRetentionDays} keyboardType="numeric" containerStyle={{ flex: 1, minWidth: 160 }} />
+          <Button label={scheduleEnabled ? 'Disable schedule' : 'Enable schedule'} variant="secondary" onPress={() => setScheduleEnabled((value) => !value)} />
+          <Button label="Save schedule" loading={savingSchedule} disabled={savingSchedule} onPress={() => void saveSchedule()} />
+        </View>
+        {data.backupSchedule ? <Text style={styles.sectionHelp}>{data.backupSchedule.enabled ? 'Enabled' : 'Disabled'} · Next scheduled run {date(data.backupSchedule.nextRunAt)} · Last run {date(data.backupSchedule.lastRunAt)}</Text> : null}
+      </Card>
+      <View style={{ gap: 10, width: '100%' }}>
+        <View style={{ flexDirection: 'row', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: 10 }}>
+          <Text style={styles.sectionTitle}>Backup history</Text>
+          {selectedBackupIds.length ? <Button compact label={`Delete selected (${selectedBackupIds.length})`} variant="danger" disabled={deletingBackups} onPress={() => setConfirmDeleteBackups(true)} /> : null}
+        </View>
+        {data.backups.length ? <DataTable columns={['Select', 'Backup started', 'Backup completed', 'File', 'Size', 'Checksum (SHA-256)', 'Status', 'Details', 'Actions']} columnHeaderContent={[<Pressable key="select-all-backups" accessibilityRole="checkbox" accessibilityState={{ checked: allBackupsSelected }} accessibilityLabel={allBackupsSelected ? 'Deselect all backups' : 'Select all backups'} onPress={toggleAllBackups} style={styles.userCheckbox}><Text style={styles.userCheckboxMark}>{allBackupsSelected ? '✓' : ''}</Text></Pressable>]} rows={data.backups.map((row) => [<Pressable key={`select-${row.id}`} accessibilityRole="checkbox" accessibilityState={{ checked: selectedBackupIds.includes(row.id) }} accessibilityLabel={`${selectedBackupIds.includes(row.id) ? 'Deselect' : 'Select'} backup ${row.fileName ?? row.id}`} disabled={['deleted', 'running', 'queued'].includes(row.status)} onPress={() => toggleBackup(row.id)} style={[styles.userCheckbox, ['deleted', 'running', 'queued'].includes(row.status) && { opacity: 0.4 }]}><Text style={styles.userCheckboxMark}>{selectedBackupIds.includes(row.id) ? '✓' : ''}</Text></Pressable>, date(row.createdAt), date(row.completedAt), row.fileName ?? 'Backup', row.sizeBytes == null ? '—' : `${(row.sizeBytes / 1024 / 1024).toFixed(1)} MB`, row.checksum ?? '—', `${row.status[0].toUpperCase()}${row.status.slice(1)}`, row.safeError ?? '—', row.storagePath && row.status !== 'deleted' ? <View key={row.id} style={{ flexDirection: 'row', gap: 6 }}><Button compact label="Download" variant="secondary" onPress={() => void openBackup(row.storagePath!)} />{row.scheduleId ? <Button compact label="Restore" variant="secondary" onPress={() => setRestoreStoredId(row.id)} /> : null}</View> : '—'])} columnWidths={[42, 150, 150, 190, 80, 300, 96, 220, 220]} columnFlex={[0, 0, 0, 1.2, 0, 2, 0, 1, 0]} widthMode="container" formatCell={(cell, _row, columnIndex) => columnIndex === 6 && typeof cell === 'string' ? <Badge tone={cell === 'Completed' ? 'success' : cell === 'Failed' ? 'danger' : cell === 'Deleted' ? 'neutral' : 'warning'}>{cell}</Badge> : undefined} /> : <PageState kind="empty" title="No backups yet" message="Create a JSON backup to see it here." />}
+      </View>
+    </> : null}
+    {activeTab === 'Restore' ? <>
+      <Card style={{ gap: 10 }}>
         <Text style={styles.sectionTitle}>Restore from JSON</Text>
         <Text style={styles.sectionHelp}>Uploads above 6 MB use resumable chunks. The current restore processing limit is 110 MB. Matching rows are updated from the backup, and newer rows remain.</Text>
+        <Text style={styles.sectionHelp}>Deleted accounts are recreated with their original IDs but no password or MFA factors. Profile and role data are restored; resend invitations so users can complete setup. OAuth sign-in links are not restored.</Text>
         <Button label={restoreFile ? `Selected: ${restoreFile.name}` : 'Choose backup JSON'} variant="secondary" onPress={() => void selectRestoreFile()} />
         <Field label={restoreRequiresPassword ? 'Backup password' : 'Backup password (not required for this file)'} value={restorePassword} onChangeText={setRestorePassword} secureTextEntry autoCapitalize="none" placeholder={restoreRequiresPassword ? 'Enter the password used for this backup' : 'This backup is unencrypted'} />
         {restoreProgress !== null ? <Text style={styles.sectionHelp}>{restoreProgress < 100 ? `Uploading backup: ${restoreProgress}% · upload can resume if interrupted` : 'Upload complete · preparing restore'}</Text> : null}
         <Button label="Restore backup" disabled={!restoreFile || (restoreRequiresPassword && restorePassword.length < 12) || restoring} loading={restoring} onPress={() => setConfirmRestore(true)} />
       </Card>
-    </View>
-    <Card style={{ gap: 10 }}>
-      <Text style={styles.sectionTitle}>Scheduled backups</Text>
-      <Text style={styles.sectionHelp}>Scheduled copies use server-managed encryption. Configure the Supabase scheduler and backup encryption secrets to run while no one is signed in.</Text>
-      <View style={{ flexDirection: 'row', flexWrap: 'wrap', alignItems: 'flex-end', gap: 12 }}>
-        <SelectField label="Frequency" value={frequency} options={[{ label: 'Daily', value: 'daily' }, { label: 'Weekly', value: 'weekly' }, { label: 'Monthly', value: 'monthly' }]} onChange={(value) => setFrequency(value as typeof frequency)} containerStyle={{ flex: 1, minWidth: 160 }} />
-        <Field label="Keep backups (days)" value={retentionDays} onChangeText={setRetentionDays} keyboardType="numeric" containerStyle={{ flex: 1, minWidth: 160 }} />
-        <Button label={scheduleEnabled ? 'Disable schedule' : 'Enable schedule'} variant="secondary" onPress={() => setScheduleEnabled((value) => !value)} />
-        <Button label="Save schedule" loading={savingSchedule} disabled={savingSchedule} onPress={() => void saveSchedule()} />
+      <View style={{ gap: 10, width: '100%' }}>
+        <Text style={styles.sectionTitle}>Restore history</Text>
+        {data.backupRestores.length ? <DataTable columns={['Backup created', 'Restore started', 'Restore completed', 'Checksum (SHA-256)', 'Status', 'Details']} rows={data.backupRestores.map((row) => [date(row.backupCreatedAt), date(row.createdAt), date(row.completedAt), row.checksum ?? '—', `${row.status[0].toUpperCase()}${row.status.slice(1)}`, row.safeError ?? '—'])} columnWidths={[150, 150, 150, 300, 100, 280]} widthMode="container" formatCell={(cell, _row, columnIndex) => columnIndex === 4 && typeof cell === 'string' ? <Badge tone={cell === 'Completed' ? 'success' : cell === 'Failed' ? 'danger' : 'warning'}>{cell}</Badge> : undefined} /> : <Text style={styles.sectionHelp}>Completed and failed restore attempts will appear here.</Text>}
       </View>
-      {data.backupSchedule ? <Text style={styles.sectionHelp}>{data.backupSchedule.enabled ? 'Enabled' : 'Disabled'} · Next scheduled run {date(data.backupSchedule.nextRunAt)} · Last run {date(data.backupSchedule.lastRunAt)}</Text> : null}
-    </Card>
-    <Card>
-      <Text style={styles.sectionTitle}>Backup history</Text>
-      {data.backups.length ? <DataTable columns={['Created', 'File', 'Size', 'Status', 'Actions']} rows={data.backups.map((row) => [date(row.createdAt), row.fileName ?? 'Backup', row.sizeBytes == null ? '—' : `${(row.sizeBytes / 1024 / 1024).toFixed(1)} MB`, row.safeError ? `Failed · ${row.safeError}` : `${row.status[0].toUpperCase()}${row.status.slice(1)}`, row.storagePath ? <View key={row.id} style={{ flexDirection: 'row', gap: 6 }}><Button compact label="Download" variant="secondary" onPress={() => void openBackup(row.storagePath!)} />{row.scheduleId ? <Button compact label="Restore" variant="secondary" onPress={() => setRestoreStoredId(row.id)} /> : null}</View> : '—'])} columnWidths={[160, 280, 96, 280, 220]} widthMode="content" /> : <PageState kind="empty" title="No backups yet" message="Create an encrypted JSON backup to see it here." />}
-    </Card>
-    <Card>
-      <Text style={styles.sectionTitle}>Restore history</Text>
-      {data.backupRestores.length ? <DataTable columns={['Started', 'Completed', 'Status', 'Details']} rows={data.backupRestores.map((row) => [date(row.createdAt), date(row.completedAt), `${row.status[0].toUpperCase()}${row.status.slice(1)}`, row.safeError ?? '—'])} /> : <Text style={styles.sectionHelp}>Completed and failed restore attempts will appear here.</Text>}
-    </Card>
+    </> : null}
+    {activeTab === 'Reset' ? <Card style={{ gap: 10, borderColor: '#FECACA', backgroundColor: '#FFFBFA' }}>
+      <Text style={[styles.sectionTitle, { color: colors.danger }]}>Reset application data</Text>
+      <Text style={styles.sectionHelp}>Permanently removes all accounts except your active System Admin account, along with departments, academic terms, programs, classes, students, gradebooks, evaluations, requests, and other application records. Roles, permissions, system settings, and backup history and schedules are retained.</Text>
+      <View style={{ alignSelf: 'flex-start' }}><Button label="Reset application data" variant="danger" onPress={() => { setResetConfirmation(''); setConfirmReset(true); }} /></View>
+    </Card> : null}
     <ConfirmDialog visible={confirmRestore} title="Restore this APMS backup?" message="Rows from the backup will be restored. Matching rows will be updated to the saved values, and records added after the backup will remain. The restore will be recorded in the audit log." confirmLabel="Restore backup" cancelLabel="Cancel" pending={restoring} onClose={() => { if (!restoring) setConfirmRestore(false); }} onConfirm={() => void runRestore()} />
+    <ConfirmDialog visible={confirmDeleteBackups} title="Delete selected backups?" message={`Delete ${selectedBackupIds.length} selected backup${selectedBackupIds.length === 1 ? '' : 's'} and their stored files? Restore history will be kept, and these backups will be marked as deleted.`} confirmLabel="Delete selected" cancelLabel="Cancel" danger pending={deletingBackups} onClose={() => { if (!deletingBackups) setConfirmDeleteBackups(false); }} onConfirm={() => void deleteBackups()} />
     <ConfirmDialog visible={Boolean(restoreStoredId)} title="Restore scheduled backup?" message="Rows in this scheduled backup will be restored, and existing rows with the same primary key will be updated to match the backup. Newer rows will remain. The action will be added to the audit log." confirmLabel="Restore scheduled backup" cancelLabel="Cancel" pending={restoring} onClose={() => { if (!restoring) setRestoreStoredId(null); }} onConfirm={() => void runStoredRestore()} />
+    <Dialog visible={confirmReset} title="Reset all application data?" onClose={() => { if (!resetting) { setConfirmReset(false); setResetConfirmation(''); } }}>
+      <Text style={styles.dialogIntro}>This cannot be undone. Your current System Admin account will remain active. All other accounts and application records will be deleted, including departments and academic terms. Roles, permissions, system settings, and existing backups and schedules will remain.</Text>
+      <Text style={styles.sectionHelp}>To confirm, type RESET below.</Text>
+      <Field label="Confirmation" value={resetConfirmation} onChangeText={setResetConfirmation} autoCapitalize="characters" autoCorrect={false} placeholder="RESET" />
+      <View style={styles.dialogActions}>
+        <Button label="Cancel" variant="secondary" disabled={resetting} onPress={() => { setConfirmReset(false); setResetConfirmation(''); }} />
+        <Button label="Reset application data" variant="danger" loading={resetting} disabled={resetConfirmation !== 'RESET' || resetting} onPress={() => void runApplicationReset()} />
+      </View>
+    </Dialog>
+    <Dialog visible={Boolean(resetResult)} title={resetResult?.failed_auth_account_deletions.length ? 'Application data reset partially complete' : 'Application data reset complete'} onClose={() => setResetResult(null)}>
+      <Text style={styles.dialogIntro}>Application records were cleared. {resetResult?.deleted_auth_accounts.toLocaleString() ?? '0'} other account{resetResult?.deleted_auth_accounts === 1 ? '' : 's'} were deleted. Your signed-in System Admin account was retained.</Text>
+      {resetResult?.failed_auth_account_deletions.length ? <>
+        <Text style={[styles.sectionHelp, { color: colors.danger }]}>These authentication accounts could not be deleted. Their application records have been removed, so they may need to be cleaned up or invited again.</Text>
+        {resetResult.failed_auth_account_deletions.map((item) => <View key={item.userId} style={styles.forceDeleteWarning}><Text style={styles.forceDeleteLabel}>{item.email || item.userId}</Text><Text style={styles.sectionHelp}>{item.error}</Text></View>)}
+      </> : <Text style={styles.sectionHelp}>Roles, permissions, system settings, and backup history and schedules were preserved.</Text>}
+      <View style={styles.dialogActions}><Button label="Done" onPress={() => setResetResult(null)} /></View>
+    </Dialog>
   </>;
 }
 function Logs({ data }: Props) { return <><Heading title="Access & System Logs" subtitle="Immutable audit trail for account, data, criteria, and administrative operations." />{data.logs.length ? <DataTable columns={['Log ref', 'Timestamp', 'Action', 'Entity', 'Actor', 'Status']} rows={data.logs.map((row) => [`Log ${compactReference(row.id)}`, date(row.createdAt), row.action, auditEntityLabel(row, data), auditActorLabel(row.actorId, data), 'Recorded'])} columnWidths={[112, 160, 240, 220, 170, 100]} columnFlex={[0.5, 0.7, 1, 1, 0.8, 0.3]} widthMode="container" /> : <PageState kind="empty" title="No logs" message="No audit records are visible." />}</>; }
