@@ -66,6 +66,19 @@ function parseJson(text: string): unknown {
   return JSON.parse(text.trim().replace(/^```json\s*/i, '').replace(/^```\s*/i, '').replace(/\s*```$/, ''))
 }
 
+function safeProviderErrorMessage(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined
+  const message = value
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[redacted API key]')
+    .replace(/\bsk-[0-9A-Za-z_-]{20,}/g, '[redacted API key]')
+    .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+    .trim()
+    .slice(0, 500)
+  return message || undefined
+}
+
 function stableJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(',')}]`
   if (value && typeof value === 'object') {
@@ -931,7 +944,12 @@ async function handlePredictionRequest(request: Request, trace: RequestTrace): P
         : response.status === 429
           ? 'provider_busy'
           : 'provider_unavailable'
-    return json({ error: 'The prediction provider returned an error response', upstream_status: response.status }, 502, trace.failureCode)
+    const providerMessage = geminiSelected ? safeProviderErrorMessage(usagePayload?.error?.message) : undefined
+    return json({
+      error: 'The prediction provider returned an error response',
+      upstream_status: response.status,
+      ...(providerMessage ? { provider_message: providerMessage } : {}),
+    }, 502, trace.failureCode)
   }
   setRequestStage(trace, 'prediction_validation')
   let rawResults: any

@@ -61,6 +61,9 @@ export type AssessmentForecastForDisplay = {
   value: string;
   label: string;
   color: string;
+  /** Preserve numeric values so a host can apply its own display precision. */
+  numericValue?: number;
+  numericMaximum?: number;
 };
 
 /**
@@ -166,6 +169,15 @@ export function buildUnscoredAssessmentForecastOverlays<T extends {
     const value = prediction.result.kind === 'numeric'
       ? `${prediction.result.value} / ${prediction.result.maximum}`
       : prediction.result.value;
-    return [{ enrollmentId: student.enrollmentId, assessmentId: prediction.assessment_id, value, label: `AI · ${value}`, color: '#64748B' }];
+    return [{
+      enrollmentId: student.enrollmentId,
+      assessmentId: prediction.assessment_id,
+      value,
+      label: `AI · ${value}`,
+      color: '#64748B',
+      ...(prediction.result.kind === 'numeric'
+        ? { numericValue: prediction.result.value, numericMaximum: prediction.result.maximum }
+        : {}),
+    }];
   }));
 }

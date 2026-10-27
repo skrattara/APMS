@@ -310,7 +310,7 @@ function useFacultyWorkspace(screen: string) {
       timer = setTimeout(refresh, 300);
     };
     const channel = client.channel(`faculty-workspace-${user.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
-    for (const table of ['class_records', 'enrollments', 'assessments', 'assessment_results', 'criteria_sets', 'attendance_records', 'attendance_sessions', 'performance_evaluations', 'performance_predictions', 'faculty_class_evaluation_systems']) {
+    for (const table of ['class_records', 'enrollments', 'assessments', 'assessment_results', 'criteria_sets', 'attendance_records', 'attendance_sessions', 'performance_evaluations', 'performance_predictions', 'faculty_class_evaluation_systems', 'class_evaluation_criteria', 'evaluation_criteria_systems', 'evaluation_systems']) {
       channel.on('postgres_changes', { event: '*', schema: 'public', table }, scheduleRefresh);
     }
     channel.subscribe();
@@ -344,16 +344,21 @@ export function FacultyLivePortalContent({ screen }: { screen: string }) {
     const classInfo = state.classes.find((item) => item.id === classId);
     const classLabel = classInfo ? `${classInfo.code} · ${classInfo.section}` : 'selected class';
     try {
-      const gradingDefinition = state.workspace.criteria?.gradingSystemDefinition ?? state.workspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
-      const evaluationDefinition = state.workspace.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
+      // Re-read the applied schemas before inference so another admin's recent
+      // criteria changes cannot leave this request using a cached snapshot.
+      const predictionWorkspace = await loadClassWorkspace(classId, undefined, state.userId, undefined, {
+        includeAttendance: true, includeFeedback: false, includeEvaluations: true, forceRefresh: true,
+      });
+      const gradingDefinition = predictionWorkspace.criteria?.gradingSystemDefinition ?? predictionWorkspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
+      const evaluationDefinition = predictionWorkspace.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
       // Check the locally applied schemas before preparing inputs so zero-eligible
       // counts do not hide a grading or evaluation configuration problem.
       if (!validateGradingSystem(gradingDefinition).valid) throw forecastError('invalid_grading');
       if (!validateEvaluationSystem(evaluationDefinition).valid) throw forecastError('invalid_criteria');
-      const inputs = buildClassPredictionInputs(state.workspace, evaluationDefinition);
+      const inputs = buildClassPredictionInputs(predictionWorkspace, evaluationDefinition);
       requested = inputs.length;
       if (!requested) throw forecastError('no_eligible_students');
-      const assessmentInstances = buildClassAssessmentConstraints(state.workspace);
+      const assessmentInstances = buildClassAssessmentConstraints(predictionWorkspace);
       // Preflight every exact wire body before the first inference. A very large
       // schema or single student record must not fail after earlier batches save.
       const baseRequest = { class_id: classId, grading_system: gradingDefinition, evaluation_criteria: evaluationDefinition };

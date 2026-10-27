@@ -1,5 +1,7 @@
 # Cloudflare Containers gateway
 
+For a second deployment of the already packaged assessment-context model, follow [parallel experimental deployment](../../../../docs/AI_EXPERIMENTAL_PARALLEL_DEPLOYMENT.md). Use `wrangler.experimental.example.jsonc` as the separate template, copy it to ignored `wrangler.experimental.local.jsonc`, and always select that file explicitly for its secret/deploy commands. The existing default config continues targeting the original Worker.
+
 This Worker exposes only the authenticated model prediction and status routes. Its Cloudflare service key must match the model container's `APMS_AI_SERVICE_API_KEY`; set it as a Worker secret, never in `wrangler.jsonc` or client configuration.
 
 Follow [service key management](../../../../docs/AI_SERVICE_KEY_MANAGEMENT.md#native-cloudflare-containers) for provisioning and rotation. A running Python process retains its startup key; a Worker secret update alone is not proof that the process has reloaded it. The guide also covers the separate Tunnel/Access deployment and optional artifact token.

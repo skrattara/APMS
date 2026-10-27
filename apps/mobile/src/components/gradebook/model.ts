@@ -39,7 +39,21 @@ export function adaptAssessmentForecastOverlay(overlay: AssessmentForecastForDis
     value: overlay.value,
     label: overlay.label,
     color: overlay.color,
+    numericValue: overlay.numericValue,
+    numericMaximum: overlay.numericMaximum,
   };
+}
+
+/** Format a numeric forecast with the active Full View decimal-place setting. */
+export function formatAssessmentForecastOverlay<T extends {
+  numericValue?: number;
+  numericMaximum?: number;
+  value?: string;
+  label?: string;
+}>(overlay: T, decimalPlaces: number): T {
+  if (!Number.isFinite(overlay.numericValue) || !Number.isFinite(overlay.numericMaximum)) return overlay;
+  const value = `${overlay.numericValue!.toFixed(decimalPlaces)} / ${overlay.numericMaximum}`;
+  return { ...overlay, value, label: `AI · ${value}` };
 }
 
 export function componentLabel(component: SwunextAssessmentComponent, typeId?: string | null, gradingSystem?: any) {

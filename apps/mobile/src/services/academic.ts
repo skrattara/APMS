@@ -187,6 +187,16 @@ export async function loadAcademicWorkspace(userId: string): Promise<AcademicWor
   };
 }
 
+export async function loadAcademicClassWorkspace(userId: string, departmentId: string, classId: string): Promise<ClassWorkspace> {
+  const { data, error } = await client().from('academic_admin_class_evaluation_systems')
+    .select('definition').eq('department_id', departmentId).eq('user_id', userId).eq('class_record_id', classId).maybeSingle();
+  if (error) throw error;
+  const privateDefinition = data?.definition as EvaluationDefinition | undefined;
+  return loadClassWorkspace(classId, undefined, undefined, privateDefinition, {
+    includeAttendance: true, includeFeedback: false, includeEvaluations: true, forceRefresh: true,
+  });
+}
+
 export async function saveEvaluationSystem(userId: string, departmentId: string, definition: EvaluationDefinition): Promise<void> {
   const validation = validateEvaluationSystem(definition);
   if (!validation.valid) throw new Error(validation.errors.join(' '));

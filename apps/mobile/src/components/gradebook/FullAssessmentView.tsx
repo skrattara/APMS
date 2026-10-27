@@ -28,6 +28,7 @@ import {
   fullAssessmentColumnWidth,
   assessmentColumnId,
   assessmentPreviewColumnWidth,
+  formatAssessmentForecastOverlay,
   fullViewColumns,
   fullAssessmentHeaderRows,
   fullViewColumnValue,
@@ -608,10 +609,13 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
   const [selectedSavedViewId, setSelectedSavedViewId] = useState('');
   const cellOverlayByKey = useMemo(() => {
     const overlays = new Map<string, GradebookCellOverlay>();
-    for (const overlay of props.cellOverlays ?? []) overlays.set(`${overlay.enrollmentId}:${overlay.columnId}`, overlay);
+    for (const overlay of props.cellOverlays ?? []) {
+      const formattedOverlay = formatAssessmentForecastOverlay(overlay, gradeDecimalPlaces);
+      overlays.set(`${formattedOverlay.enrollmentId}:${formattedOverlay.columnId}`, formattedOverlay);
+    }
     for (const overlay of historyPreviewOverlays) overlays.set(`${overlay.enrollmentId}:${overlay.columnId}`, overlay);
     return overlays;
-  }, [props.cellOverlays, historyPreviewOverlays]);
+  }, [props.cellOverlays, historyPreviewOverlays, gradeDecimalPlaces]);
   const savedViewStorageKey = user?.id && props.classId ? `apms:gradebook-views:${user.id}:${props.classId}` : '';
   const savedViewFileUri = FileSystem.documentDirectory ? `${FileSystem.documentDirectory}gradebook-views-${user?.id ?? 'user'}-${props.classId || 'class'}.json` : null;
   useEffect(() => {

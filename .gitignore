@@ -20,6 +20,7 @@ playwright-live-report/
 .env.*
 !.env.example
 *.local
+services/ai/deploy/cloudflare/wrangler.experimental.local.jsonc
 services/ai/secrets/
 /run/secrets/
 

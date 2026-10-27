@@ -8,6 +8,8 @@ export type GradebookCellOverlay = {
   value?: string;
   label?: string;
   color?: string;
+  numericValue?: number;
+  numericMaximum?: number;
 };
 
 export type GradebookOverlayControl = { label: string; active: boolean; onToggle: () => void };

@@ -623,10 +623,16 @@ function SystemSettings({ data, refresh, userId, toast, initialCategory }: Props
     setSaving(true);
     try {
       for (const row of data.settings) {
-        if (row.key === 'grading.swunext_global_modules' || row.key === 'grading.default_system_id' || row.key === 'grading.default_system_definition' || row.key === 'FEEDBACK_FROM_EMAIL' || row.key === 'FEEDBACK_FROM_NAME' || row.key.startsWith('security.mfa_required') || quotaFields.some((field) => field.key === row.key)) continue;
+        if (row.key === 'grading.swunext_global_modules' || row.key === 'grading.default_system_id' || row.key === 'grading.default_system_definition' || row.key === 'FEEDBACK_FROM_EMAIL' || row.key === 'FEEDBACK_FROM_NAME' || row.key.startsWith('security.mfa_required') || row.key.startsWith('ai.') || quotaFields.some((field) => field.key === row.key)) continue;
         let value: unknown = values[row.key] ?? '';
         try { value = JSON.parse(value as string); } catch { /* plain strings remain valid JSONB values */ }
         await saveSystemSetting(userId, row.key, value);
+      }
+      // These switches must be upserted even if their system_settings rows are
+      // missing. Iterating only data.settings silently skipped newly introduced
+      // settings that had not yet been seeded in an existing installation.
+      for (const key of ['ai.enabled', 'ai.assessment_data.enabled', 'ai.attendance_data.enabled']) {
+        await saveSystemSetting(userId, key, boolValue(key));
       }
       await saveSystemSetting(userId, 'FEEDBACK_FROM_EMAIL', feedbackFromEmail.trim());
       await saveSystemSetting(userId, 'FEEDBACK_FROM_NAME', feedbackFromName.trim());

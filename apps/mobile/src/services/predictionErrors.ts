@@ -1,4 +1,4 @@
-/** Safe, user-facing forecast failures. Raw service messages are deliberately never rendered. */
+/** Safe, user-facing forecast failures. Only bounded, server-sanitized provider diagnostics may be shown. */
 export type ForecastErrorCode =
   | 'no_eligible_students'
   | 'invalid_grading'
@@ -26,7 +26,7 @@ export type ForecastErrorCode =
 export class SafeForecastError extends Error {
   readonly name = 'SafeForecastError';
 
-  constructor(readonly code: ForecastErrorCode, readonly status?: number) {
+  constructor(readonly code: ForecastErrorCode, readonly status?: number, readonly providerMessage?: string) {
     super(code);
   }
 }
@@ -49,8 +49,21 @@ export function forecastError(code: Exclude<ForecastErrorCode, 'request_status' 
   return new SafeForecastError(code);
 }
 
-/** Converts only explicit, bounded response metadata to a status; it never reads the body. */
-export function forecastRequestError(context: unknown): SafeForecastError {
+function safeProviderMessage(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const message = value
+    .replace(/[\u0000-\u001f\u007f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .replace(/AIza[0-9A-Za-z_-]{20,}/g, '[redacted API key]')
+    .replace(/\bsk-[0-9A-Za-z_-]{20,}/g, '[redacted API key]')
+    .replace(/Bearer\s+\S+/gi, 'Bearer [redacted]')
+    .trim()
+    .slice(0, 500);
+  return message || undefined;
+}
+
+/** Converts allowlisted response metadata and a bounded provider diagnostic to a safe error. */
+export function forecastRequestError(context: unknown, providerMessage?: unknown): SafeForecastError {
   if (context && typeof context === 'object') {
     const status = (context as { status?: unknown }).status;
     const headers = (context as { headers?: { get?: (name: string) => string | null } }).headers;
@@ -69,7 +82,7 @@ export function forecastRequestError(context: unknown): SafeForecastError {
       ? rawCode as ForecastErrorCode
       : undefined;
     if (typeof status === 'number' && Number.isInteger(status) && status >= 100 && status <= 599) {
-      return new SafeForecastError(code ?? 'request_status', status);
+      return new SafeForecastError(code ?? 'request_status', status, safeProviderMessage(providerMessage));
     }
   }
   return new SafeForecastError('network_unconfirmed');
@@ -94,6 +107,9 @@ export function formatForecastError(error: unknown): string {
   if (!(error instanceof SafeForecastError)) {
     return 'The forecast result could not be confirmed. Check saved predictions before retrying; student records remain available.';
   }
+  const withProviderMessage = (message: string) => error.providerMessage
+    ? `${message}\nProvider response: ${error.providerMessage}`
+    : message;
   switch (error.code) {
     case 'no_eligible_students':
       return 'No students have usable scores in the enabled AI inputs. Save assessment scores and enable Recent scores to forecast before a final standing is available. Current-standing-only inputs need a calculable current standing.';
@@ -105,9 +121,9 @@ export function formatForecastError(error: unknown): string {
       return 'The service did not confirm whether the forecast was saved. Check saved predictions before retrying; student records remain available.';
     case 'request_status':
       if (error.status === 409) return 'The forecast request did not match the active grading or model setup. Ask an administrator to review the settings. (HTTP 409)';
-      return responseMessages[error.status ?? -1]
+      return withProviderMessage(responseMessages[error.status ?? -1]
         ? `${responseMessages[error.status ?? -1]} (HTTP ${error.status})`
-        : `The forecast request failed (HTTP ${error.status}). Check saved predictions before retrying.`;
+        : `The forecast request failed (HTTP ${error.status}). Check saved predictions before retrying.`);
     case 'partial_inventory_unsupported':
       return 'This model runtime does not support forecasting from the assessments currently recorded. Update the model service, or turn off Assessment score predictions to run standing and risk forecasts using Recent scores.';
     case 'assessment_context_unsupported':
@@ -126,15 +142,15 @@ export function formatForecastError(error: unknown): string {
     case 'request_timeout':
       return 'The forecast service timed out. Check saved predictions before retrying.';
     case 'provider_unavailable':
-      return 'The forecast provider is temporarily unavailable. Check saved predictions before retrying.';
+      return withProviderMessage('The forecast provider is temporarily unavailable. Check saved predictions before retrying.');
     case 'provider_authentication_failed':
-      return 'The forecast provider could not authenticate. Check saved predictions, then ask an administrator to verify the provider credentials.';
+      return withProviderMessage('The forecast provider could not authenticate. Check saved predictions, then ask an administrator to verify the provider credentials.');
     case 'provider_request_rejected':
-      return 'The forecast provider rejected the request. Check saved predictions, then ask an administrator to review service compatibility and logs.';
+      return withProviderMessage('The forecast provider rejected the request. Check saved predictions, then ask an administrator to review service compatibility and logs.');
     case 'provider_busy':
-      return 'The forecast provider is busy. Check saved predictions before deciding whether to try again later; the app will not retry automatically.';
+      return withProviderMessage('The forecast provider is busy. Check saved predictions before deciding whether to try again later; the app will not retry automatically.');
     case 'provider_connection_failed':
-      return 'The forecast service could not connect to its provider. Check saved predictions before trying again later.';
+      return withProviderMessage('The forecast service could not connect to its provider. Check saved predictions before trying again later.');
     case 'invalid_response':
       return 'The forecast provider returned a response that could not be verified. Check saved predictions before retrying.';
     default:

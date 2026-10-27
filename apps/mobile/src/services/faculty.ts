@@ -206,11 +206,11 @@ const inFlightFacultyReads = new Map<string, Promise<unknown>>();
 const facultyClassesCache = new Map<string, { classes: FacultyClass[]; loadedAt: number }>();
 const FACULTY_CLASSES_CACHE_TTL_MS = 60_000;
 
-type FacultyWorkspaceLoadOptions = { includeAttendance?: boolean; includeFeedback?: boolean; includeEvaluations?: boolean };
+type FacultyWorkspaceLoadOptions = { includeAttendance?: boolean; includeFeedback?: boolean; includeEvaluations?: boolean; forceRefresh?: boolean };
 type FacultyWorkspaceCacheEntry = {
   workspace: ClassWorkspace;
   loadedAt: number;
-  includes: Required<FacultyWorkspaceLoadOptions>;
+  includes: { includeAttendance: boolean; includeFeedback: boolean; includeEvaluations: boolean };
 };
 const facultyWorkspaceCache = new Map<string, FacultyWorkspaceCacheEntry>();
 const FACULTY_WORKSPACE_CACHE_TTL_MS = 60_000;
@@ -691,6 +691,7 @@ export async function importRosterExcel(classId: string, programId: string, file
 
 export function loadClassWorkspace(classId: string, departmentEvaluationSystem?: EvaluationDefinition, facultyUserId?: string, personalClassEvaluationSystem?: EvaluationDefinition, options: FacultyWorkspaceLoadOptions = {}): Promise<ClassWorkspace> {
   const optionsKey = `${options.includeAttendance ?? true}:${options.includeFeedback ?? true}:${options.includeEvaluations ?? true}`;
+  const forceRefresh = options.forceRefresh === true;
   const systemsKey = `${JSON.stringify(departmentEvaluationSystem ?? null)}:${JSON.stringify(personalClassEvaluationSystem ?? null)}`;
   const evaluationLookupKey = facultyUserId ? `faculty-evaluation:${facultyUserId}` : 'default-evaluation-lookup';
   const requested = {
@@ -699,9 +700,10 @@ export function loadClassWorkspace(classId: string, departmentEvaluationSystem?:
     includeEvaluations: options.includeEvaluations ?? true,
   };
   const cacheKey = facultyUserId ? `${facultyUserId}:${classId}` : null;
+  if (forceRefresh && cacheKey) facultyWorkspaceCache.delete(cacheKey);
   const cached = cacheKey ? facultyWorkspaceCache.get(cacheKey) : undefined;
   const now = Date.now();
-  if (cached && now - cached.loadedAt < FACULTY_WORKSPACE_CACHE_TTL_MS
+  if (!forceRefresh && cached && now - cached.loadedAt < FACULTY_WORKSPACE_CACHE_TTL_MS
     && (!requested.includeAttendance || cached.includes.includeAttendance)
     && (!requested.includeFeedback || cached.includes.includeFeedback)
     && (!requested.includeEvaluations || cached.includes.includeEvaluations)) {
@@ -712,14 +714,15 @@ export function loadClassWorkspace(classId: string, departmentEvaluationSystem?:
     if (cacheKey) {
       const previous = facultyWorkspaceCache.get(cacheKey);
       // Keep the richer valid snapshot if a narrower request finishes after it.
-      const keepPrevious = previous && now - previous.loadedAt < FACULTY_WORKSPACE_CACHE_TTL_MS
+      const keepPrevious = !forceRefresh && previous && now - previous.loadedAt < FACULTY_WORKSPACE_CACHE_TTL_MS
         && Object.entries(requested).every(([key, value]) => !value || previous.includes[key as keyof typeof requested]);
       facultyWorkspaceCache.set(cacheKey, { workspace: keepPrevious ? previous.workspace : workspace, loadedAt: Date.now(), includes: keepPrevious ? previous.includes : requested });
       while (facultyWorkspaceCache.size > 12) facultyWorkspaceCache.delete(facultyWorkspaceCache.keys().next().value!);
     }
     return workspace;
   };
-  return shareForSignedInUser(facultyUserId, `workspace:${classId}:${optionsKey}:${systemsKey}:${evaluationLookupKey}`, load);
+  const requestKey = `workspace:${classId}:${optionsKey}:${systemsKey}:${evaluationLookupKey}${forceRefresh ? `:fresh:${Date.now()}` : ''}`;
+  return shareForSignedInUser(facultyUserId, requestKey, load);
 }
 
 async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSystem?: EvaluationDefinition, facultyUserId?: string, personalClassEvaluationSystem?: EvaluationDefinition, options: FacultyWorkspaceLoadOptions = {}): Promise<ClassWorkspace> {
@@ -1261,9 +1264,14 @@ export async function runAiPredictions(classId: string, gradingSystem: GradingDe
     });
     if (error) {
       const functionError = error as typeof error & { context?: Response };
-      // Response bodies and SDK error messages can contain private data. Only show
-      // a fixed category based on the response status, never arbitrary server text.
-      throw forecastRequestError(functionError.context);
+      // Only the Edge Function's bounded, sanitized provider_message is shown;
+      // ignore arbitrary upstream bodies and SDK error strings.
+      let providerMessage: unknown;
+      try {
+        const payload = await functionError.context?.clone().json();
+        providerMessage = payload && typeof payload === 'object' ? (payload as { provider_message?: unknown }).provider_message : undefined;
+      } catch { /* Non-JSON and empty error bodies keep the fixed safe message. */ }
+      throw forecastRequestError(functionError.context, providerMessage);
     }
     const payload = data as { run_id?: string; predictions?: any[]; provider?: string; model?: string; model_version?: string; data_basis?: string };
     if (typeof payload?.run_id !== 'string' || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(payload.run_id)) throw new Error('Prediction response is missing saved-run provenance.');

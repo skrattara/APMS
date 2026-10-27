@@ -15,7 +15,7 @@ import { useAnalyticsFilters } from '@/components/charts/AnalyticsFilters';
 import { ReportComposer, type ReportRecord } from '@/components/reports/ReportComposer';
 import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
 import {
-  academicReportCsv, createAcademicAdminClass, updateAcademicAdminClassFaculty, loadAcademicWorkspace, loadClassCreationReferences, loadDepartmentClassRequests, loadDepartmentSubjects, loadSubjectRequests,
+  academicReportCsv, createAcademicAdminClass, updateAcademicAdminClassFaculty, loadAcademicWorkspace, loadAcademicClassWorkspace, loadClassCreationReferences, loadDepartmentClassRequests, loadDepartmentSubjects, loadSubjectRequests,
   applyDepartmentEvaluationCriteriaToClasses, applyPersonalEvaluationCriteriaToClasses, deleteDepartmentEvaluationCriteria, deletePersonalEvaluationCriteria, manageSubject, reviewSubjectRequest, saveDepartmentEvaluationCriteria, savePersonalEvaluationSystem, type AcademicSubject, type AcademicSubjectRequest, type AcademicWorkspace, type SavedEvaluationSystem,
   rejectAcademicAdminClassRequest, type ClassRequestReview, type DepartmentFacultyMember,
 } from '@/services/academic';
@@ -140,7 +140,7 @@ function useWorkspace(userId: string) {
     let timer: ReturnType<typeof setTimeout> | undefined;
     const scheduleRefresh = () => { if (timer) clearTimeout(timer); timer = setTimeout(refresh, 300); };
     const channel = client.channel(`academic-workspace-${userId}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
-    for (const table of ['class_records', 'enrollments', 'assessment_results', 'attendance_records', 'performance_evaluations']) {
+    for (const table of ['class_records', 'enrollments', 'assessment_results', 'attendance_records', 'performance_evaluations', 'class_evaluation_criteria', 'evaluation_criteria_systems', 'evaluation_systems', 'academic_admin_class_evaluation_systems']) {
       channel.on('postgres_changes', { event: '*', schema: 'public', table }, scheduleRefresh);
     }
     channel.subscribe();
@@ -1170,7 +1170,7 @@ function AcademicAdminClassRosterDialog({ item, programs, toast, onClose, onChan
   </>;
 }
 
-function Risk({ data, refresh, toast }: Props) {
+function Risk({ data, refresh, userId, toast }: Props) {
   const [query, setQuery] = useState('');
   const [classFilter, setClassFilter] = useState('all');
   const [riskFilter, setRiskFilter] = useState('all');
@@ -1292,14 +1292,16 @@ function Risk({ data, refresh, toast }: Props) {
     let completed = 0;
     let requested = 0;
     try {
-      const gradingDefinition = selectedClass.workspace.criteria?.gradingSystemDefinition ?? selectedClass.workspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
-      const evaluationDefinition = selectedClass.workspace.evaluationSystem ?? data.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
+      // Refresh the selected class's applied schemas immediately before inference.
+      const predictionWorkspace = await loadAcademicClassWorkspace(userId, data.department!.id, selectedClass.id);
+      const gradingDefinition = predictionWorkspace.criteria?.gradingSystemDefinition ?? predictionWorkspace.defaultGradingSystem ?? IT_GLOBAL_GRADING_SYSTEM;
+      const evaluationDefinition = predictionWorkspace.evaluationSystem ?? data.evaluationSystem ?? DEFAULT_EVALUATION_SYSTEM;
       if (!validateGradingSystem(gradingDefinition).valid) throw forecastError('invalid_grading');
       if (!validateEvaluationSystem(evaluationDefinition).valid) throw forecastError('invalid_criteria');
-      const inputs = buildClassPredictionInputs(selectedClass.workspace, evaluationDefinition);
+      const inputs = buildClassPredictionInputs(predictionWorkspace, evaluationDefinition);
       requested = inputs.length;
       if (!requested) throw forecastError('no_eligible_students');
-      const assessmentInstances = buildClassAssessmentConstraints(selectedClass.workspace);
+      const assessmentInstances = buildClassAssessmentConstraints(predictionWorkspace);
       const request = { class_id: selectedClass.id, grading_system: gradingDefinition, evaluation_criteria: evaluationDefinition };
       const batches = planPredictionRequestBatches(request, inputs, {
         maxBytes: 900_000,
