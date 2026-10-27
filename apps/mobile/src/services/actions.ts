@@ -97,13 +97,25 @@ export async function saveSettings(screen: string, user: AuthUser, demoMode: boo
   return 'System settings saved.';
 }
 
-export async function changePassword(user: AuthUser, demoMode: boolean, currentPassword: string, newPassword: string) {
+export async function changePassword(demoMode: boolean, currentPassword: string, newPassword: string) {
   if (demoMode) throw new Error('Password changes are unavailable for development-only accounts.');
   if (!supabase) throw new Error('APMS is not connected. The password was not changed.');
   if (newPassword.length < 12) throw new Error('The new password must contain at least 12 characters.');
-  const { error: verifyError } = await supabase.auth.signInWithPassword({ email: user.email, password: currentPassword });
-  if (verifyError) throw new Error('The current password is incorrect.');
-  const { error } = await supabase.auth.updateUser({ password: newPassword });
-  if (error) throw new Error('The password could not be changed.');
+  const { error } = await supabase.auth.updateUser({ password: newPassword, current_password: currentPassword });
+  if (error?.code === 'insufficient_aal') throw new Error('Verify your authenticator code, then try changing your password again.');
+  if (error?.code === 'invalid_credentials') throw new Error('The current password is incorrect.');
+  if (error) throw new Error(error.message || 'The password could not be changed.');
   return 'Password updated. Other sessions should be reviewed and signed out if they are no longer trusted.';
+}
+
+export async function getPasswordChangeMfaFactor(): Promise<string | null> {
+  if (!supabase) throw new Error('APMS is not connected.');
+  const { data: assurance, error: assuranceError } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+  if (assuranceError) throw assuranceError;
+  if (assurance.currentLevel === 'aal2' || assurance.nextLevel !== 'aal2') return null;
+  const { data: factors, error: factorsError } = await supabase.auth.mfa.listFactors();
+  if (factorsError) throw factorsError;
+  const factor = factors?.totp.find((item) => item.status === 'verified');
+  if (!factor) throw new Error('A verified authenticator is required to change this password.');
+  return factor.id;
 }

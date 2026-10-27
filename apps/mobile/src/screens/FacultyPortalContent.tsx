@@ -24,7 +24,7 @@ import {
   type FacultyRecord,
   type FacultyStudent,
 } from "@/data/mockFaculty";
-import { changePassword, saveSettings } from "@/services/actions";
+import { changePassword, getPasswordChangeMfaFactor, saveSettings } from "@/services/actions";
 import { usePersistentDemoState } from "@/hooks/usePersistentDemoState";
 import { useYearLevels } from "@/hooks/useAcademicOptions";
 import { normalizeStudentId } from "@/utils/studentId";
@@ -1110,7 +1110,7 @@ function EventDialog({
 }
 
 function FacultySettings() {
-  const { user, demoMode } = useAuth();
+  const { user, demoMode, verifyMfa } = useAuth();
   const [tab, setTab] = useState("Profile");
   const [first, setFirst] = useState("Myco Angel Lou");
   const [last, setLast] = useState("Villomo");
@@ -1119,6 +1119,8 @@ function FacultySettings() {
   const [current, setCurrent] = useState("");
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [passwordMfaFactorId, setPasswordMfaFactorId] = useState<string | null>(null);
+  const [passwordMfaCode, setPasswordMfaCode] = useState("");
   const [saving, setSaving] = useState(false);
   const toast = useToast();
   const save = async () => {
@@ -1143,6 +1145,31 @@ function FacultySettings() {
           mfaRequired: true,
         }),
       );
+    } finally {
+      setSaving(false);
+    }
+  };
+  const submitPasswordUpdate = async () => {
+    if (!user) return;
+    setSaving(true);
+    try {
+      if (passwordMfaFactorId) {
+        const verification = await verifyMfa(passwordMfaCode, passwordMfaFactorId);
+        if (!verification.ok) { toast.show(verification.message); return; }
+        setPasswordMfaFactorId(null);
+        setPasswordMfaCode("");
+      } else {
+        const factorId = await getPasswordChangeMfaFactor();
+        if (factorId) {
+          setPasswordMfaFactorId(factorId);
+          toast.show("Enter the six-digit code from your authenticator app to continue.");
+          return;
+        }
+      }
+      toast.show(await changePassword(demoMode, current, next));
+      setCurrent(""); setNext(""); setConfirm("");
+    } catch (cause) {
+      toast.show(cause instanceof Error ? cause.message : "The password could not be changed.");
     } finally {
       setSaving(false);
     }
@@ -1293,17 +1320,13 @@ function FacultySettings() {
                 onChangeText={setConfirm}
                 secureTextEntry
               />
+              {passwordMfaFactorId ? <Field label="Authenticator code" value={passwordMfaCode} onChangeText={(value) => setPasswordMfaCode(value.replace(/\D/g, "").slice(0, 6))} keyboardType="number-pad" maxLength={6} accessibilityLabel="Authenticator code for password change" /> : null}
               <View style={styles.dialogActions}>
                 <Button
                   label="Update Password"
-                  disabled={next.length < 8 || next !== confirm || !current}
-                  onPress={() => {
-                    if (!user) return;
-                    setSaving(true);
-                    void changePassword(user, demoMode, current, next)
-                      .then(toast.show)
-                      .finally(() => setSaving(false));
-                  }}
+                  disabled={next.length < 12 || next !== confirm || !current || Boolean(passwordMfaFactorId && passwordMfaCode.length !== 6)}
+                  loading={saving}
+                  onPress={() => void submitPasswordUpdate()}
                 />
               </View>
             </>

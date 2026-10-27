@@ -490,7 +490,7 @@ export function Gradebook(props: GradebookProps) {
         subtitle={`Grades use ${activeGradingSystem.name}. Scores are provisional monitoring indicators; official records are kept in SWU SIS.`}
         action={
           <View style={styles.actions}>
-            {selectedClass ? <GoogleClassroomSyncPanel classId={props.selectedClassId} classLabel={`${selectedClass.code} · ${selectedClass.section}`} assessments={props.workspace.assessments} onToast={(message) => props.toast.show(message)} onRefresh={props.refresh} /> : null}
+            {/* {selectedClass ? <GoogleClassroomSyncPanel classId={props.selectedClassId} classLabel={`${selectedClass.code} · ${selectedClass.section}`} assessments={props.workspace.assessments} onToast={(message) => props.toast.show(message)} onRefresh={props.refresh} /> : null} */}
             <Button label="Edit assessment" variant="secondary" disabled={!selected} onPress={openEdit} />
             <Button label="Create assessment" onPress={openCreate} />
           </View>

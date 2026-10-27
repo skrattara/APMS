@@ -26,6 +26,7 @@ import {
   useToast,
 } from "@/components/ui";
 import { ROLE_LABELS } from "@/config/navigation";
+import { verifyCurrentPassword } from "@/services/supabase";
 import {
   ANALYTICS_SERIES,
   AUTH_PROVIDER_OPTIONS,
@@ -45,6 +46,7 @@ import {
 } from "@/data/mockDashboard";
 import {
   changePassword,
+  getPasswordChangeMfaFactor,
   loadAutosavePreference,
   performScreenAction,
   saveSettings,
@@ -900,7 +902,7 @@ export function Settings({
   screen: string;
   onMessage: (message: string) => void;
 }) {
-  const { user, demoMode } = useAuth();
+  const { user, demoMode, verifyMfa } = useAuth();
   const personal = screen === "settings";
   const notification = screen === "notifications";
   const tabs = personal
@@ -941,6 +943,8 @@ export function Settings({
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [passwordMfaFactorId, setPasswordMfaFactorId] = useState<string | null>(null);
+  const [passwordMfaCode, setPasswordMfaCode] = useState("");
   const [saving, setSaving] = useState(false);
   useEffect(() => {
     let active = true;
@@ -1001,9 +1005,23 @@ export function Settings({
     if (!user || newPassword !== confirmPassword) return;
     setSaving(true);
     try {
+      if (passwordMfaFactorId) {
+        const verification = await verifyMfa(passwordMfaCode, passwordMfaFactorId);
+        if (!verification.ok) { onMessage(verification.message); return; }
+        setPasswordMfaFactorId(null);
+        setPasswordMfaCode("");
+      } else {
+        const factorId = await getPasswordChangeMfaFactor();
+        if (factorId) {
+          setPasswordMfaFactorId(factorId);
+          onMessage("Enter the six-digit code from your authenticator app to continue.");
+          return;
+        }
+      }
       onMessage(
-        await changePassword(user, demoMode, currentPassword, newPassword),
+        await changePassword(demoMode, currentPassword, newPassword),
       );
+      setCurrentPassword(""); setNewPassword(""); setConfirmPassword("");
     } catch (cause) {
       onMessage(
         getErrorMessage(cause, "Password could not be changed."),
@@ -1078,13 +1096,15 @@ export function Settings({
               }
             />
           </View>
+          {passwordMfaFactorId ? <Field label="Authenticator code" value={passwordMfaCode} onChangeText={(value) => setPasswordMfaCode(value.replace(/\D/g, "").slice(0, 6))} keyboardType="number-pad" maxLength={6} accessibilityLabel="Authenticator code for password change" /> : null}
           <SaveButton
             label="Update password"
             saving={saving}
             disabled={
               !currentPassword ||
               newPassword.length < 12 ||
-              newPassword !== confirmPassword
+              newPassword !== confirmPassword ||
+              Boolean(passwordMfaFactorId && passwordMfaCode.length !== 6)
             }
             onPress={updatePassword}
           />
@@ -1281,35 +1301,106 @@ export function Settings({
 }
 
 function MfaSettings({ onMessage }: { onMessage: (message: string) => void }) {
-  const { demoMode, mfaEnabled, mfaRequired, enrollMfa, verifyMfa, disableMfa } = useAuth();
+  const { user, demoMode, mfaEnabled, mfaRequired, enrollMfa, beginMfaReconfiguration, removeReplacedMfaFactor, cancelMfaEnrollment, verifyMfa, disableMfa } = useAuth();
   const [enrollment, setEnrollment] = useState<{ factorId: string; uri: string; secret: string } | null>(null);
+  const [replacementFactorId, setReplacementFactorId] = useState<string | null>(null);
+  const [currentFactorToVerify, setCurrentFactorToVerify] = useState<string | null>(null);
+  const [passwordPrompt, setPasswordPrompt] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const start = async () => {
     setBusy(true); const result = await enrollMfa(); setBusy(false);
     if (!result.ok) onMessage(result.message); else setEnrollment(result.enrollment);
   };
+  const startReconfiguration = async () => {
+    setCurrentPassword("");
+    setPasswordPrompt(true);
+  };
+  const verifyPasswordAndBegin = async () => {
+    if (!user || !currentPassword) return;
+    setBusy(true);
+    let passwordIsValid = false;
+    try { passwordIsValid = await verifyCurrentPassword(user.id, user.email, currentPassword); }
+    catch (cause) { setBusy(false); onMessage(getErrorMessage(cause, "Your current password could not be verified.")); return; }
+    if (!passwordIsValid) {
+      setBusy(false);
+      if (!currentPassword) return;
+      onMessage("The current password is incorrect. Try again.");
+      return;
+    }
+    setCurrentPassword("");
+    setPasswordPrompt(false);
+    const result = await beginMfaReconfiguration(); setBusy(false);
+    if (!result.ok) {
+      if (result.verifyFactorId) { setCurrentFactorToVerify(result.verifyFactorId); setCode(""); }
+      else setPasswordPrompt(true);
+      onMessage(result.message);
+    } else {
+      setReplacementFactorId(result.oldFactorId);
+      setEnrollment(result.enrollment);
+      setCode("");
+    }
+  };
+  const verifyCurrentAndContinue = async () => {
+    if (!currentFactorToVerify) return;
+    setBusy(true);
+    const verification = await verifyMfa(code, currentFactorToVerify);
+    if (!verification.ok) { setBusy(false); onMessage(verification.message); return; }
+    const result = await beginMfaReconfiguration();
+    setBusy(false);
+    if (!result.ok) { onMessage(result.message); return; }
+    setCurrentFactorToVerify(null);
+    setReplacementFactorId(result.oldFactorId);
+    setEnrollment(result.enrollment);
+    setCode("");
+  };
   const confirm = async () => {
     if (!enrollment) return;
-    setBusy(true); const result = await verifyMfa(code, enrollment.factorId); setBusy(false);
-    if (!result.ok) onMessage(result.message); else { setEnrollment(null); setCode(""); onMessage("MFA is enabled for this account."); }
+    setBusy(true); const result = await verifyMfa(code, enrollment.factorId);
+    if (!result.ok) { setBusy(false); onMessage(result.message); return; }
+    if (replacementFactorId) {
+      const removal = await removeReplacedMfaFactor(replacementFactorId);
+      setBusy(false);
+      setEnrollment(null); setReplacementFactorId(null); setCode("");
+      onMessage(removal.ok ? "Your authenticator app has been reconfigured." : `The new authenticator is active, but the previous one could not be removed. ${removal.message}`);
+      return;
+    }
+    setBusy(false);
+    setEnrollment(null); setCode(""); onMessage("MFA is enabled for this account.");
+  };
+  const cancelEnrollment = async () => {
+    if (enrollment) { setBusy(true); await cancelMfaEnrollment(enrollment.factorId); setBusy(false); }
+    setEnrollment(null); setReplacementFactorId(null); setCode("");
   };
   const disable = async () => { setBusy(true); const result = await disableMfa(); setBusy(false); onMessage(result.message); };
   if (demoMode) return <Text style={styles.muted}>MFA setup is unavailable in development-only demo mode.</Text>;
+  if (passwordPrompt) return <View style={styles.form}>
+    <Text style={styles.sectionTitle}>Confirm your current password</Text>
+    <Text style={styles.muted}>Enter your APMS password before reconfiguring your authenticator app.</Text>
+    <Field label="Current password" value={currentPassword} onChangeText={setCurrentPassword} secureTextEntry autoCapitalize="none" autoComplete="current-password" />
+    <View style={styles.actions}><Button label="Continue" loading={busy} disabled={!currentPassword} onPress={() => void verifyPasswordAndBegin()} /><Button label="Cancel" variant="secondary" disabled={busy} onPress={() => { setPasswordPrompt(false); setCurrentPassword(""); }} /></View>
+  </View>;
+  if (currentFactorToVerify) return <View style={styles.form}>
+    <Text style={styles.sectionTitle}>Verify your current authenticator</Text>
+    <Text style={styles.muted}>Enter a code from your currently configured authenticator app before setting up its replacement.</Text>
+    <Field label="Six-digit verification code" value={code} onChangeText={(value) => setCode(value.replace(/\D/g, "").slice(0, 6))} keyboardType="number-pad" maxLength={6} />
+    <View style={styles.actions}><Button label="Continue" loading={busy} disabled={code.length !== 6} onPress={() => void verifyCurrentAndContinue()} /><Button label="Cancel" variant="secondary" disabled={busy} onPress={() => { setCurrentFactorToVerify(null); setCode(""); setPasswordPrompt(true); }} /></View>
+  </View>;
   if (enrollment) return <View style={styles.form}>
-    <Text style={styles.sectionTitle}>Scan this QR code</Text>
-    <Text style={styles.muted}>Use Google Authenticator, Microsoft Authenticator, or another TOTP app.</Text>
+    <Text style={styles.sectionTitle}>{replacementFactorId ? "Set up your replacement authenticator" : "Scan this QR code"}</Text>
+    <Text style={styles.muted}>Scan this QR code with Google Authenticator, Microsoft Authenticator, or another TOTP app. Your current authenticator stays active until the replacement is verified.</Text>
     <View style={styles.qrCode} accessibilityLabel="MFA setup QR code">
       <QRCode value={enrollment.uri} size={160} quietZone={10} backgroundColor="#FFFFFF" color="#101828" ecl="M" />
     </View>
     <Text style={styles.muted}>Can’t scan? Enter this secret manually: {enrollment.secret}</Text>
-    <Field label="Six-digit verification code" value={code} onChangeText={(value) => setCode(value.replace(/\D/g, "").slice(0, 6))} keyboardType="number-pad" />
-    <View style={styles.actions}><Button label="Enable MFA" loading={busy} disabled={code.length !== 6} onPress={() => void confirm()} /><Button label="Cancel" variant="secondary" onPress={() => setEnrollment(null)} /></View>
+    <Field label="Six-digit verification code" value={code} onChangeText={(value) => setCode(value.replace(/\D/g, "").slice(0, 6))} keyboardType="number-pad" maxLength={6} />
+    <View style={styles.actions}><Button label={replacementFactorId ? "Verify replacement" : "Enable MFA"} loading={busy} disabled={code.length !== 6} onPress={() => void confirm()} /><Button label="Cancel" variant="secondary" loading={busy} onPress={() => void cancelEnrollment()} /></View>
   </View>;
   return <View style={styles.form}>
     <Text style={styles.sectionTitle}>Authenticator-app MFA</Text>
     <Text style={styles.muted}>{mfaEnabled ? "Enabled. A six-digit code is required at sign-in." : mfaRequired ? "Your System Admin requires an authenticator app for your account." : "Add an authenticator app as a second factor."}</Text>
-    <Button label={mfaEnabled ? (mfaRequired ? "MFA required" : "Disable MFA") : "Set up MFA"} loading={busy} disabled={mfaEnabled && mfaRequired} variant={mfaEnabled ? "secondary" : "primary"} onPress={() => void (mfaEnabled ? disable() : start())} />
+    {mfaEnabled ? <View style={styles.actions}><Button label="Reconfigure authenticator app" loading={busy} onPress={() => void startReconfiguration()} /><Button label={mfaRequired ? "MFA required" : "Disable MFA"} variant="secondary" disabled={mfaRequired} onPress={() => void disable()} /></View> : <Button label="Set up MFA" loading={busy} variant="primary" onPress={() => void start()} />}
   </View>;
 }
 

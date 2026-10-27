@@ -29,6 +29,9 @@ type AuthContextValue = {
   mfaRequired: boolean;
   mfaSetupRequired: boolean;
   enrollMfa(): Promise<{ ok: true; enrollment: MfaEnrollment } | { ok: false; message: string }>;
+  beginMfaReconfiguration(): Promise<{ ok: true; enrollment: MfaEnrollment; oldFactorId: string } | { ok: false; message: string; verifyFactorId?: string }>;
+  removeReplacedMfaFactor(factorId: string): Promise<{ ok: boolean; message: string }>;
+  cancelMfaEnrollment(factorId: string): Promise<void>;
   verifyMfa(code: string, factorId?: string): Promise<{ ok: boolean; message: string }>;
   disableMfa(): Promise<{ ok: boolean; message: string }>;
   signInWithGoogle(): Promise<{ ok: boolean; message: string }>;
@@ -347,6 +350,34 @@ export function AuthProvider({ children }: PropsWithChildren) {
     return { ok: true as const, enrollment: { factorId: data.id, uri: data.totp.uri, secret: data.totp.secret } };
   }, []);
 
+  const beginMfaReconfiguration = useCallback(async () => {
+    if (demoMode) return { ok: false as const, message: 'MFA reconfiguration is unavailable for development-only accounts.' };
+    if (!supabase) return { ok: false as const, message: 'APMS is not connected.' };
+    const { data: factors, error: factorsError } = await supabase.auth.mfa.listFactors();
+    if (factorsError) return { ok: false as const, message: getErrorMessage(factorsError, 'Your authenticator could not be checked.') };
+    const oldFactor = factors?.totp.find((factor) => factor.status === 'verified');
+    if (!oldFactor) return { ok: false as const, message: 'No verified authenticator app was found for this account.' };
+    const { data: assurance, error: assuranceError } = await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+    if (assuranceError) return { ok: false as const, message: getErrorMessage(assuranceError, 'Your session could not be verified.') };
+    if (assurance.currentLevel !== 'aal2') return { ok: false as const, message: 'Verify your current authenticator app to continue.', verifyFactorId: oldFactor.id };
+    const { data, error } = await supabase.auth.mfa.enroll({ factorType: 'totp', friendlyName: `APMS authenticator replacement ${Date.now()}` });
+    if (error || !data?.id || !data.totp) return { ok: false as const, message: getErrorMessage(error, 'A replacement authenticator could not be set up.') };
+    return { ok: true as const, oldFactorId: oldFactor.id, enrollment: { factorId: data.id, uri: data.totp.uri, secret: data.totp.secret } };
+  }, []);
+
+  const removeReplacedMfaFactor = useCallback(async (factorId: string) => {
+    if (!supabase) return { ok: false, message: 'APMS is not connected.' };
+    const { error } = await supabase.auth.mfa.unenroll({ factorId });
+    if (error) return { ok: false, message: getErrorMessage(error, 'The previous authenticator could not be removed.') };
+    setMfaEnabled(true);
+    return { ok: true, message: 'The previous authenticator was removed.' };
+  }, []);
+
+  const cancelMfaEnrollment = useCallback(async (factorId: string) => {
+    if (!supabase) return;
+    await supabase.auth.mfa.unenroll({ factorId });
+  }, []);
+
   const disableMfa = useCallback(async () => {
     if (!supabase) return { ok: false, message: 'APMS is not connected.' };
     const policy = await supabase.functions.invoke('auth-mfa-policy');
@@ -447,7 +478,7 @@ export function AuthProvider({ children }: PropsWithChildren) {
       return { ok: false, message: getErrorMessage(cause, 'Google sign-in could not be completed. Check your connection and try again.') };
     }
   }, []);
-  const value = useMemo(() => ({ user, loading, configured: isSupabaseConfigured, demoMode, authError, clearAuthError, signIn, passwordRecovery, passwordRecoveryError, clearPasswordRecoveryError, updatePassword, setOnboardingPassword, completeOnboarding, mfaFactorId, mfaEnabled, mfaRequired, mfaSetupRequired, enrollMfa, verifyMfa, disableMfa, signInWithGoogle, requestPasswordReset, signOut }), [user, loading, authError, clearAuthError, signIn, passwordRecovery, passwordRecoveryError, clearPasswordRecoveryError, updatePassword, setOnboardingPassword, completeOnboarding, mfaFactorId, mfaEnabled, mfaRequired, mfaSetupRequired, enrollMfa, verifyMfa, disableMfa, signInWithGoogle, requestPasswordReset, signOut]);
+  const value = useMemo(() => ({ user, loading, configured: isSupabaseConfigured, demoMode, authError, clearAuthError, signIn, passwordRecovery, passwordRecoveryError, clearPasswordRecoveryError, updatePassword, setOnboardingPassword, completeOnboarding, mfaFactorId, mfaEnabled, mfaRequired, mfaSetupRequired, enrollMfa, beginMfaReconfiguration, removeReplacedMfaFactor, cancelMfaEnrollment, verifyMfa, disableMfa, signInWithGoogle, requestPasswordReset, signOut }), [user, loading, authError, clearAuthError, signIn, passwordRecovery, passwordRecoveryError, clearPasswordRecoveryError, updatePassword, setOnboardingPassword, completeOnboarding, mfaFactorId, mfaEnabled, mfaRequired, mfaSetupRequired, enrollMfa, beginMfaReconfiguration, removeReplacedMfaFactor, cancelMfaEnrollment, verifyMfa, disableMfa, signInWithGoogle, requestPasswordReset, signOut]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

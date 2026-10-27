@@ -32,6 +32,61 @@ enable_signup = false
 double_confirm_changes = true
 enable_confirmations = true
 
+[auth.email.template.invite]
+subject = "Your APMS account invitation"
+content_path = "./supabase/templates/invite.html"
+
+[auth.email.template.confirmation]
+subject = "Confirm your email for APMS"
+content_path = "./supabase/templates/confirmation.html"
+
+[auth.email.template.recovery]
+subject = "Reset your APMS password"
+content_path = "./supabase/templates/recovery.html"
+
+[auth.email.template.magic_link]
+subject = "Your APMS sign-in link"
+content_path = "./supabase/templates/magic_link.html"
+
+[auth.email.template.email_change]
+subject = "Confirm your new APMS email address"
+content_path = "./supabase/templates/email_change.html"
+
+[auth.email.notification.password_changed]
+enabled = false
+subject = "Your APMS password was changed"
+content_path = "./supabase/templates/password_changed_notification.html"
+
+[auth.email.notification.email_changed]
+enabled = false
+subject = "Your APMS email address was changed"
+content_path = "./supabase/templates/email_changed_notification.html"
+
+[auth.email.notification.phone_changed]
+enabled = false
+subject = "Your APMS phone number was changed"
+content_path = "./supabase/templates/phone_changed_notification.html"
+
+[auth.email.notification.mfa_factor_enrolled]
+enabled = false
+subject = "A verification method was added to your APMS account"
+content_path = "./supabase/templates/mfa_factor_enrolled_notification.html"
+
+[auth.email.notification.mfa_factor_unenrolled]
+enabled = false
+subject = "A verification method was removed from your APMS account"
+content_path = "./supabase/templates/mfa_factor_unenrolled_notification.html"
+
+[auth.email.notification.identity_linked]
+enabled = false
+subject = "A sign-in method was linked to your APMS account"
+content_path = "./supabase/templates/identity_linked_notification.html"
+
+[auth.email.notification.identity_unlinked]
+enabled = false
+subject = "A sign-in method was removed from your APMS account"
+content_path = "./supabase/templates/identity_unlinked_notification.html"
+
 [storage]
 enabled = true
 file_size_limit = "500MiB"
