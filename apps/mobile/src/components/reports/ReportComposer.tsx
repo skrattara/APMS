@@ -12,13 +12,40 @@ import { formatStudentId } from '@/utils/studentId';
 export type ReportRecord = Record<string, any>;
 export type ReportScopeOption = { label: string; value: string; loadRows: () => Promise<ReportRecord[]> };
 type ReportTemplate = 'Executive summary' | 'Detailed analysis' | 'Data table';
-type Visualization = 'Bar chart' | 'Pass rate comparison' | 'Donut chart' | 'Risk distribution' | 'Trend line' | 'Assessment score range' | 'Current standing by period' | 'Score distribution' | 'Score spread by group' | 'KPI summary' | 'Attendance watchlist' | 'Missed assessment watchlist';
-type ReportQuestion = 'Recommended overview' | 'Compare groups' | 'Assessment scores over time' | 'Current standing over time' | 'Risk distribution' | 'Attendance rates' | 'Missing assessments' | 'Score distribution';
-type AssessmentBreakdown = 'Overall' | 'Period' | 'Component' | 'Group' | 'Assessment type';
+type Visualization = 'Bar chart' | 'Pass rate comparison' | 'Donut chart' | 'Risk distribution' | 'Trend line' | 'Assessment score range' | 'Current standing by period' | 'Score distribution' | 'Score spread by group' | 'KPI summary' | 'Attendance watchlist' | 'Attendance by group' | 'Missed assessment watchlist' | 'Assessment performance by type' | 'Assessment ranking';
+type ReportQuestion = 'Recommended overview' | 'Compare groups' | 'Assessment scores over time' | 'Current standing over time' | 'Risk distribution' | 'Attendance rates' | 'Missing assessments' | 'Score distribution' | 'Assessment performance by type' | 'Highest and lowest assessment scores';
+type AssessmentBreakdown = 'Overall' | 'Period' | 'Component' | 'Group' | 'Assessment type' | `By:${string}`;
+type AssessmentInterval = 'day' | 'week' | 'group' | 'assessment instance (logical order)' | 'assessment instance (chronological order)';
 const labelize = (value: string) => value.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]/g, ' ').replace(/^./, (letter) => letter.toUpperCase());
 const filename = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'apms-report';
 const accentColors: Record<string, string> = { Burgundy: '6B2C1F', Ocean: '246899', Evergreen: '28724F' };
 const criticalWords = /high|medium|critical|elevated|failing|at.?risk|overdue|error|failed/i;
+
+function findingSegments(text: string) {
+  const spans: { start: number; end: number }[] = [];
+  const addMatches = (pattern: RegExp, capture = 0) => {
+    for (const match of text.matchAll(pattern)) {
+      const value = match[capture];
+      if (!value) continue;
+      const start = match.index! + (capture ? match[0].indexOf(value) : 0);
+      spans.push({ start, end: start + value.length });
+    }
+  };
+  addMatches(/\(?\d[\d,]*(?:\.\d+)?%\)?/g);
+  addMatches(/\b(?:highest|lowest|high|critical)\b/gi);
+  addMatches(/^\d+(?= of \d+ students)/gi);
+  addMatches(/\bfor\s+([^();]+?)(?=\s*\(|;|\.|,|\s+and\s+(?:lowest|highest)\b)/gi, 1);
+  addMatches(/\b(?:highest|lowest)\s+in\s+([^();]+?)(?=\s*\(|;|\.|,|\s+and\s+(?:lowest|highest)\b)/gi, 1);
+  addMatches(/^(.+?)(?=\s+had the (?:most missing assessments|lowest recorded attendance)\b)/gi, 1);
+  const boundaries = new Set([0, text.length]);
+  for (const span of spans) { boundaries.add(span.start); boundaries.add(span.end); }
+  const sorted = [...boundaries].sort((a, b) => a - b);
+  return sorted.slice(0, -1).map((start, index) => {
+    const end = sorted[index + 1];
+    const segment = text.slice(start, end);
+    return { text: segment, bold: spans.some((span) => start >= span.start && end <= span.end) };
+  }).filter((segment) => segment.text.length > 0);
+}
 
 function toBase64(bytes: Uint8Array) {
   const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -63,58 +90,6 @@ function recommendedField(fields: string[], rows: ReportRecord[], mode: 'group' 
   return priority.flatMap((pattern) => candidates.filter((field) => pattern.test(field))).at(0) ?? candidates[0] ?? '';
 }
 
-function semanticInsights(rows: ReportRecord[], fields: string[]) {
-  if (!rows.length) return [];
-  const studentField = fields.find((field) => /^(student|studentname|label|name)$/i.test(field));
-  const classField = fields.find((field) => /^(class|classname|section|category)$/i.test(field));
-  const riskField = fields.find((field) => /^(risklevel|risklabel|riskcategory)$/i.test(field)) ?? fields.find((field) => /^(classification|severity|risk)$/i.test(field));
-  const missingField = fields.find((field) => /missing.*assessment|assessment.*missing/i.test(field));
-  const attendanceField = fields.find((field) => /attendance(rate|percent|percentage)?$/i.test(field));
-  const standingField = fields.find((field) => /^(currentstanding|finalgrade|standing)$/i.test(field)) ?? fields.find((field) => /^score$/i.test(field));
-  const predictionField = fields.find((field) => /^predictedstanding$/i.test(field) && rows.some((row) => typeof row[field] === 'number'));
-  const nameFor = (row: ReportRecord) => String(studentField ? row[studentField] ?? 'Unknown student' : row.label ?? row.student ?? 'Unknown student');
-  const topNames = (names: string[]) => `${names.slice(0, 3).join(', ')}${names.length > 3 ? ` and ${names.length - 3} others` : ''}`;
-  const insights: string[] = [];
-  if (riskField) {
-    const counts = new Map<string, number>();
-    for (const row of rows) { const level = String(row[riskField] ?? 'Unclassified'); counts.set(level, (counts.get(level) ?? 0) + 1); }
-    insights.push(`Risk profile — ${[...counts].sort((a, b) => b[1] - a[1]).map(([level, count]) => `${level}: ${count} (${Math.round(count * 100 / rows.length)}%)`).join(' · ')}. Percentages use ${rows.length} included student records.`);
-  }
-  if (missingField) {
-    const ranked = rows.filter((row) => row[missingField] != null).map((row) => ({ name: nameFor(row), count: Number(row[missingField]) })).filter((row) => Number.isFinite(row.count)).sort((a, b) => b.count - a.count);
-    if (ranked.length && ranked[0].count > 0) {
-      const highest = ranked.filter((row) => row.count === ranked[0].count).map((row) => row.name);
-      insights.push(`Most missed assessments — ${topNames(highest)}: ${ranked[0].count}. Tied students are shown together.`);
-    }
-  }
-  if (attendanceField) {
-    const ranked = rows.filter((row) => row[attendanceField] != null).map((row) => ({ name: nameFor(row), rate: Number(row[attendanceField]) })).filter((row) => Number.isFinite(row.rate)).sort((a, b) => a.rate - b.rate);
-    if (ranked.length) {
-      const lowest = ranked.filter((row) => row.rate === ranked[0].rate).map((row) => row.name);
-      insights.push(`Attendance follow-up — ${topNames(lowest)} have the lowest recorded rate (${ranked[0].rate.toFixed(1)}%). Unrecorded sessions are excluded.`);
-    }
-  }
-  if (classField && standingField) {
-    const byClass = new Map<string, number[]>();
-    for (const row of rows) { if (row[standingField] == null || row[standingField] === '') continue; const score = Number(row[standingField]); const name = String(row[classField] ?? 'Unspecified'); if (Number.isFinite(score)) { const scores = byClass.get(name) ?? []; scores.push(score); byClass.set(name, scores); } }
-    const averages = [...byClass].map(([name, scores]) => ({ name, average: scores.reduce((sum, score) => sum + score, 0) / scores.length, count: scores.length })).sort((a, b) => b.average - a.average);
-    if (averages.length > 1) {
-      insights.push(`Class comparison — highest average current standing is ${averages[0].name} at ${averages[0].average.toFixed(1)}% (${averages[0].count} student${averages[0].count === 1 ? '' : 's'} with a recorded standing).`);
-      insights.push(`Lowest average current standing is ${averages[averages.length - 1].name} at ${averages[averages.length - 1].average.toFixed(1)}%. This comparison uses recorded standings only.`);
-    } else if (averages.length === 1) {
-      insights.push(`Current standing in ${averages[0].name} averages ${averages[0].average.toFixed(1)}% across ${averages[0].count} student${averages[0].count === 1 ? '' : 's'} with a recorded standing; there is only one class in scope.`);
-    }
-  }
-  if (predictionField) {
-    const predicted = rows.filter((row) => row[predictionField] != null).map((row) => Number(row[predictionField])).filter(Number.isFinite);
-    if (predicted.length) insights.push(`Performance outlook — predictions are available for ${predicted.length} of ${rows.length} students; mean predicted standing is ${(predicted.reduce((sum, value) => sum + value, 0) / predicted.length).toFixed(1)}%. Predictions are advisory, not official grades.`);
-  } else if (fields.includes('performancePrediction')) {
-    const predicted = rows.map((row) => row.performancePrediction?.predictedStanding).filter((item: unknown): item is number => typeof item === 'number' && Number.isFinite(item));
-    if (predicted.length) insights.push(`Performance outlook — predictions are available for ${predicted.length} of ${rows.length} students; mean predicted standing is ${(predicted.reduce((sum, value) => sum + value, 0) / predicted.length).toFixed(1)}%. Predictions are advisory, not official grades.`);
-  }
-  return insights;
-}
-
 function uniqueAppliedSchemas(rows: ReportRecord[]) {
   const schemas = new Map<string, { className: string; gradingSystem: unknown; appliedGradingSystem: unknown; evaluationCriteria: unknown }>();
   for (const row of rows) {
@@ -134,7 +109,7 @@ function median(values: number[]) {
   return sorted.length % 2 ? sorted[middle] : (sorted[middle - 1] + sorted[middle]) / 2;
 }
 
-type ChartItem = { label: string; count: number; amount: number; minimum?: number; lowerQuartile?: number; median?: number; upperQuartile?: number; maximum?: number; series?: string; dateKey?: string };
+type ChartItem = { label: string; count: number; amount: number; minimum?: number; lowerQuartile?: number; median?: number; upperQuartile?: number; maximum?: number; series?: string; dateKey?: string; dateLabel?: string; sortKey?: string; rangeSuppressed?: boolean };
 
 function quantile(sortedValues: number[], fraction: number) {
   if (!sortedValues.length) return 0;
@@ -148,7 +123,7 @@ function gradingLabel(schema: ReportRecord | null | undefined, kind: AssessmentB
   const id = kind === 'Period' ? item?.gradingPeriodId : kind === 'Group' ? item?.gradingGroupId : item?.gradingTypeId;
   if (kind === 'Assessment type') return String(item?.assessmentTypeName ?? item?.typeName ?? item?.type ?? (id ? findSchemaName(schema?.assessmentTypes, id) : '') ?? 'Unclassified type');
   if (kind === 'Period') return String((id ? findSchemaName(schema?.periods, id) : '') || 'Unspecified period');
-  if (kind === 'Group') return String((id ? findSchemaName(schema?.groups, id) : '') || 'Unspecified group');
+  if (kind === 'Group') return String((id ? findSchemaName(schema?.groups, id) : '') || (item?.moduleNumber != null ? `Group ${item.moduleNumber}` : 'Unspecified group'));
   const component = (Array.isArray(schema?.components) ? schema.components : []).find((entry: ReportRecord) => String(entry?.assessmentDefinition?.typeId ?? entry?.assessmentTypeId ?? entry?.typeId ?? '') === String(id ?? ''));
   return String(component?.name ?? component?.label ?? (id ? findSchemaName(schema?.assessmentTypes, id) : '') ?? 'Unmapped component');
 }
@@ -159,18 +134,73 @@ function findSchemaName(collection: unknown, id: unknown): string {
   return String(entry?.name ?? entry?.label ?? '');
 }
 
-function assessmentScoreSeries(rows: ReportRecord[], breakdown: AssessmentBreakdown): ChartItem[] {
-  const byPeriod = new Map<string, { series: string; date: string; scores: number[] }>();
+function assessmentScoreSeries(rows: ReportRecord[], breakdown: AssessmentBreakdown, interval: AssessmentInterval): ChartItem[] {
+  const rawValuesByInstance = new Map<string, Set<string>>();
+  for (const row of rows) for (const item of Array.isArray(row.assessmentResults) ? row.assessmentResults : []) {
+    const instanceId = String(item?.assessmentId ?? item?.assessmentInstanceId ?? item?.id ?? item?.name ?? 'Assessment');
+    if (item?.rawScore == null) continue;
+    const values = rawValuesByInstance.get(instanceId) ?? new Set<string>();
+    values.add(String(item.rawScore));
+    rawValuesByInstance.set(instanceId, values);
+  }
+  const byPeriod = new Map<string, { series: string; dateKey: string; label: string; dateLabel: string; sortKey: string; rangeSuppressed: boolean; scores: number[] }>();
   for (const row of rows) {
     const assessments = Array.isArray(row.assessmentResults) ? row.assessmentResults : [];
     for (const item of assessments) {
-      const score = Number(item?.mappedPercentage);
+      if (item?.mappedPercentage == null) continue;
+      const score = Number(item.mappedPercentage);
       const date = String(item?.date ?? '');
       if (!date || !Number.isFinite(new Date(date).getTime()) || !Number.isFinite(score)) continue;
-      const dateKey = new Date(date).toISOString().slice(0, 10);
-      const series = gradingLabel(row.gradingSystemSchema, breakdown, item);
-      const key = `${dateKey}:${series}`;
-      const values = byPeriod.get(key) ?? { series, date: dateKey, scores: [] };
+      const day = new Date(date).toISOString().slice(0, 10);
+      const instanceId = String(item?.assessmentId ?? item?.assessmentInstanceId ?? item?.id ?? item?.name ?? 'Assessment');
+      const typeId = item?.gradingTypeId ?? item?.typeId ?? item?.component;
+      const component = (Array.isArray(row.gradingSystemSchema?.components) ? row.gradingSystemSchema.components : []).find((entry: ReportRecord) => String(entry?.assessmentDefinition?.typeId ?? entry?.assessmentTypeId ?? entry?.typeId ?? '') === String(typeId ?? ''));
+      const scoring = component?.assessmentDefinition?.scoring;
+      const categoryCount = rawValuesByInstance.get(instanceId)?.size ?? 0;
+      const rangeSuppressed = Number(item?.maximumScore) === 1
+        || (scoring?.mode === 'value_mapping' && Array.isArray(scoring.mapping) && scoring.mapping.length <= 2)
+        || (typeof item?.rawScore === 'string' && categoryCount > 0 && categoryCount <= 2);
+      const series = breakdown.startsWith('By:')
+        ? String(row[breakdown.slice(3)] ?? 'Unspecified')
+        : gradingLabel(row.gradingSystemSchema, breakdown, item);
+      const assessmentName = String(item?.name ?? item?.title ?? 'Assessment');
+      let dateKey = day;
+      let label = new Date(`${day}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' });
+      let dateLabel = label;
+      let bucketIdentity = day;
+      let sortKey = day;
+      if (interval === 'week') {
+        const monday = new Date(`${day}T00:00:00Z`);
+        monday.setUTCDate(monday.getUTCDate() - (monday.getUTCDay() + 6) % 7);
+        dateKey = monday.toISOString().slice(0, 10);
+        label = `Week of ${new Date(`${dateKey}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' })}`;
+        dateLabel = label;
+        bucketIdentity = dateKey;
+      } else if (interval === 'group') {
+        const groupName = gradingLabel(row.gradingSystemSchema, 'Group', item);
+        const groupKey = groupName.toLowerCase();
+        dateKey = `group:${groupKey}`;
+        label = groupName;
+        dateLabel = label;
+        sortKey = groupName;
+        bucketIdentity = dateKey;
+      } else if (interval.startsWith('assessment instance')) {
+        const instanceId = String(item?.assessmentId ?? item?.assessmentInstanceId ?? item?.id ?? assessmentName);
+        dateKey = `${day}:assessment:${instanceId}`;
+        label = `${assessmentName} · ${dateLabel}`;
+        dateLabel = label;
+        const periodName = gradingLabel(row.gradingSystemSchema, 'Period', item);
+        const groupName = gradingLabel(row.gradingSystemSchema, 'Group', item);
+        const periodOrder = periodName.match(/\d+/)?.[0] ?? assessmentName.match(/\bP\s*(\d+)\b/i)?.[1] ?? '99';
+        const instanceOrder = String(item?.instanceNumber ?? item?.sequenceNumber ?? item?.assessmentNumber ?? assessmentName.match(/\b(?:instance|assessment|quiz|test|exam)\s*#?\s*(\d+)\b/i)?.[1] ?? assessmentName.match(/(?:^|[\s#-])(\d+)\s*$/)?.[1] ?? '99');
+        const dimensions = `P${periodOrder}:Group ${groupName}:Instance ${instanceOrder}`;
+        sortKey = interval === 'assessment instance (logical order)' ? `${dimensions}:${day}:${assessmentName}` : `${day}:${dimensions}:${assessmentName}`;
+        bucketIdentity = dateKey;
+      }
+      const key = `${bucketIdentity}:${series}`;
+      const values = byPeriod.get(key) ?? { series, dateKey, label, dateLabel, sortKey, rangeSuppressed, scores: [] };
+      if ((interval === 'day' || interval === 'week') && day.localeCompare(values.sortKey) < 0) values.sortKey = day;
+      values.rangeSuppressed = values.rangeSuppressed && rangeSuppressed;
       values.scores.push(score);
       byPeriod.set(key, values);
     }
@@ -178,22 +208,170 @@ function assessmentScoreSeries(rows: ReportRecord[], breakdown: AssessmentBreakd
   const seriesCounts = new Map<string, number>();
   for (const point of byPeriod.values()) seriesCounts.set(point.series, (seriesCounts.get(point.series) ?? 0) + point.scores.length);
   const retainedSeries = new Set([...seriesCounts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 6).map(([series]) => series));
-  const grouped = new Map<string, { series: string; date: string; scores: number[] }>();
+  const grouped = new Map<string, { series: string; dateKey: string; label: string; dateLabel: string; sortKey: string; rangeSuppressed: boolean; scores: number[] }>();
   for (const point of byPeriod.values()) {
     const series = retainedSeries.has(point.series) ? point.series : 'Other categories';
-    const key = `${point.date}:${series}`;
-    const values = grouped.get(key) ?? { series, date: point.date, scores: [] };
+    const key = `${point.dateKey}:${series}`;
+    const values = grouped.get(key) ?? { series, dateKey: point.dateKey, label: point.label, dateLabel: point.dateLabel, sortKey: point.sortKey, rangeSuppressed: point.rangeSuppressed, scores: [] };
+    if (point.sortKey.localeCompare(values.sortKey) < 0) values.sortKey = point.sortKey;
+    values.rangeSuppressed = values.rangeSuppressed && point.rangeSuppressed;
     values.scores.push(...point.scores);
     grouped.set(key, values);
   }
-  return [...grouped.values()].sort((left, right) => left.series.localeCompare(right.series) || left.date.localeCompare(right.date)).map(({ series, date, scores }) => ({
-    label: new Date(`${date}T00:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }),
-    dateKey: date,
-    series,
+  return [...grouped.values()].sort((left, right) => left.sortKey.localeCompare(right.sortKey, undefined, { numeric: true, sensitivity: 'base' }) || left.label.localeCompare(right.label, undefined, { numeric: true, sensitivity: 'base' }) || left.series.localeCompare(right.series)).map(({ series, dateKey, label, dateLabel, sortKey, rangeSuppressed, scores }) => {
+    const sortedScores = [...scores].sort((left, right) => left - right);
+    return {
+      label,
+      dateLabel,
+      dateKey,
+      series,
+      count: scores.length,
+      sortKey,
+      rangeSuppressed,
+      amount: scores.reduce((sum, score) => sum + score, 0) / scores.length,
+      minimum: sortedScores[0],
+      lowerQuartile: quantile(sortedScores, 0.25),
+      median: quantile(sortedScores, 0.5),
+      upperQuartile: quantile(sortedScores, 0.75),
+      maximum: sortedScores[sortedScores.length - 1],
+    };
+  });
+}
+
+function renderAssessmentSeriesPanels({ pdf, items, seriesNames, pageWidth, pageHeight, startY, interval, showMinMax, showIqr }: { pdf: any; items: ChartItem[]; seriesNames: string[]; pageWidth: number; pageHeight: number; startY: number; interval: AssessmentInterval; showMinMax: boolean; showIqr: boolean }) {
+  const left = 28; const right = pageWidth - 14; const plotWidth = right - left;
+  const dates = [...new Set(items.map((item) => item.dateKey ?? item.label))].sort((a, b) => {
+    const aOrder = items.find((item) => (item.dateKey ?? item.label) === a)?.sortKey ?? a;
+    const bOrder = items.find((item) => (item.dateKey ?? item.label) === b)?.sortKey ?? b;
+    return aOrder.localeCompare(bOrder, undefined, { numeric: true, sensitivity: 'base' }) || a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+  });
+  const palette: [number, number, number][] = [[107, 44, 31], [46, 134, 171], [83, 145, 103], [230, 162, 60], [139, 115, 181], [214, 107, 107], [100, 116, 139]];
+  const observed = items.flatMap((item) => [item.minimum ?? item.amount, item.maximum ?? item.amount, item.amount]);
+  const dataMin = Math.min(...observed); const dataMax = Math.max(...observed); const padding = Math.max(2, (dataMax - dataMin) * 0.12);
+  const domainMin = Math.floor(Math.max(0, dataMin - padding) / 5) * 5; const domainMax = Math.max(domainMin + 5, Math.ceil(Math.min(100, dataMax + padding) / 5) * 5);
+  const instanceAxis = interval.startsWith('assessment instance');
+  const labelFontSize = Math.max(4, Math.min(5.5, 70 / Math.max(1, dates.length))); const labelSlotWidth = Math.max(4, plotWidth / Math.max(1, dates.length) - 1);
+  let maxLabelLines = 1;
+  if (instanceAxis) {
+    pdf.setFontSize(labelFontSize);
+    maxLabelLines = Math.max(1, ...items.map((item) => {
+      return pdf.splitTextToSize(item.dateLabel ?? item.dateKey ?? item.label, labelSlotWidth).length;
+    }));
+  }
+  const axisHeight = instanceAxis ? 8 + maxLabelLines * 2 : 12;
+  let y = startY;
+  seriesNames.forEach((series, seriesIndex) => {
+    const panelHeight = 38 + axisHeight + 8;
+    if (y + panelHeight > pageHeight - 16) { pdf.addPage(); y = 16; }
+    const panelY = y; const top = panelY + 6; const bottom = top + 22; const plotHeight = bottom - top;
+    const color = palette[seriesIndex % palette.length];
+    pdf.setTextColor(color[0], color[1], color[2]); pdf.setFontSize(8); pdf.text(series, 14, panelY + 3, { maxWidth: pageWidth - 28 });
+    const pointX = (index: number) => dates.length <= 1 ? left + plotWidth / 2 : left + index * plotWidth / (dates.length - 1);
+    const pointY = (score: number) => bottom - plotHeight * (score - domainMin) / (domainMax - domainMin);
+    for (let tick = 0; tick <= 2; tick += 1) {
+      const score = domainMin + (domainMax - domainMin) * tick / 2; const tickY = pointY(score);
+      pdf.setDrawColor(229, 234, 239); pdf.line(left, tickY, right, tickY); pdf.setFontSize(6); pdf.setTextColor(100, 116, 139); pdf.text(`${score.toFixed(0)}%`, left - 2, tickY + 2, { align: 'right' });
+    }
+    const points = items.filter((item) => (item.series ?? 'Overall') === series).sort((a, b) => (a.sortKey ?? a.dateKey ?? a.label).localeCompare(b.sortKey ?? b.dateKey ?? b.label, undefined, { numeric: true, sensitivity: 'base' }) || (a.dateKey ?? a.label).localeCompare(b.dateKey ?? b.label, undefined, { numeric: true, sensitivity: 'base' }));
+    const relevantIndexes = [...new Set(points.map((item) => dates.indexOf(item.dateKey ?? item.label)).filter((index) => index >= 0))].sort((a, b) => a - b);
+    const labelStep = Math.max(1, Math.ceil(relevantIndexes.length / 8));
+    const visibleIndexes = relevantIndexes.filter((index, relevantIndex) => instanceAxis || relevantIndex % labelStep === 0 || relevantIndex === relevantIndexes.length - 1);
+    points.forEach((item, index) => {
+      const x = pointX(dates.indexOf(item.dateKey ?? item.label)); const meanY = pointY(item.amount); const suppressed = item.rangeSuppressed === true;
+      if (index) { const previous = points[index - 1]; pdf.setDrawColor(color[0], color[1], color[2]); pdf.line(pointX(dates.indexOf(previous.dateKey ?? previous.label)), pointY(previous.amount), x, meanY); }
+      if (!suppressed && showMinMax) { const minY = pointY(item.minimum ?? item.amount); const maxY = pointY(item.maximum ?? item.amount); pdf.setDrawColor(color[0], color[1], color[2]); pdf.line(x, maxY, x, minY); pdf.line(x - 1.2, maxY, x + 1.2, maxY); pdf.line(x - 1.2, minY, x + 1.2, minY); }
+      if (!suppressed && showIqr) { const q1Y = pointY(item.lowerQuartile ?? item.amount); const medianY = pointY(item.median ?? item.amount); const q3Y = pointY(item.upperQuartile ?? item.amount); const boxWidth = Math.max(2.4, Math.min(4, plotWidth / Math.max(1, dates.length) * 0.55)); const lightColor = color.map((channel) => Math.round(channel * 0.28 + 255 * 0.72)); pdf.setFillColor(lightColor[0], lightColor[1], lightColor[2]); pdf.setDrawColor(color[0], color[1], color[2]); pdf.rect(x - boxWidth / 2, q3Y, boxWidth, Math.max(0.8, q1Y - q3Y), 'FD'); pdf.line(x - boxWidth / 2, medianY, x + boxWidth / 2, medianY); }
+      if (suppressed) { const medianY = pointY(item.median ?? item.amount); pdf.setDrawColor(color[0], color[1], color[2]); pdf.line(x - 1.8, medianY, x + 1.8, medianY); }
+      pdf.setFillColor(color[0], color[1], color[2]); pdf.circle(x, meanY, 1, 'F');
+    });
+    let usedLabelLines = 0;
+    visibleIndexes.forEach((index) => {
+      const dateKey = dates[index]; const point = points.find((item) => (item.dateKey ?? item.label) === dateKey); const label = point?.dateLabel ?? dateKey;
+      pdf.setTextColor(71, 85, 105);
+      if (instanceAxis) { pdf.setFontSize(labelFontSize); const lines = pdf.splitTextToSize(label, labelSlotWidth); usedLabelLines = Math.max(usedLabelLines, lines.length); pdf.text(lines, pointX(index), bottom + 5, { align: 'center', maxWidth: labelSlotWidth }); }
+      else { const shortLabel = label.length > 18 ? `${label.slice(0, 17)}…` : label; pdf.setFontSize(6); pdf.text(shortLabel, pointX(index), bottom + 5, { align: 'center', maxWidth: Math.max(16, plotWidth / visibleIndexes.length - 2) }); }
+    });
+    const binaryNote = items.some((item) => item.rangeSuppressed) ? 'Binary assessments show median only' : ''; const note = [binaryNote].filter(Boolean).join(' · ');
+    pdf.setTextColor(100, 116, 139); pdf.setFontSize(6); pdf.text(`${note ? `${note} · ` : ''}Data scale ${domainMin}–${domainMax}%`, left, bottom + 8 + (instanceAxis ? usedLabelLines * 2 : 12));
+    y = bottom + 12 + (instanceAxis ? usedLabelLines * 2 : 12);
+  });
+  return y;
+}
+
+function assessmentTrendSvg(items: ChartItem[], series: string, interval: AssessmentInterval, color: string, domainMin: number, domainMax: number, showMinMax: boolean, showIqr: boolean) {
+  const points = items.filter((item) => (item.series ?? 'Overall') === series).sort((a, b) => (a.sortKey ?? a.dateKey ?? a.label).localeCompare(b.sortKey ?? b.dateKey ?? b.label, undefined, { numeric: true, sensitivity: 'base' }));
+  const width = 900; const height = interval.startsWith('assessment instance') ? 360 : 300;
+  const left = 58; const right = width - 18; const top = 16; const bottom = 238; const plotWidth = right - left; const plotHeight = bottom - top;
+  const x = (index: number) => points.length <= 1 ? left + plotWidth / 2 : left + index * plotWidth / (points.length - 1);
+  const y = (value: number) => bottom - (value - domainMin) * plotHeight / Math.max(1, domainMax - domainMin);
+  const escape = (value: string) => value.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  const instanceAxis = interval.startsWith('assessment instance');
+  const labelIndexes = instanceAxis ? points.map((_, index) => index) : points.map((_, index) => index).filter((index) => points.length <= 10 || index % Math.ceil(points.length / 10) === 0 || index === points.length - 1);
+  const labels = labelIndexes.map((index) => {
+    const label = points[index].dateLabel ?? points[index].label;
+    const chunks = label.split(' · ').flatMap((part) => {
+      const words = part.split(/\s+/); const lines: string[] = []; let line = '';
+      for (const word of words) { const next = line ? `${line} ${word}` : word; if (next.length > 17 && line) { lines.push(line); line = word; } else line = next; }
+      if (line) lines.push(line);
+      return lines;
+    }).slice(0, 4);
+    return `<text x="${x(index)}" y="${bottom + 17}" text-anchor="middle" font-size="${instanceAxis ? 9 : 10}" fill="#475569">${chunks.map((line, lineIndex) => `<tspan x="${x(index)}" dy="${lineIndex ? 11 : 0}">${escape(line)}</tspan>`).join('')}</text>`;
+  }).join('');
+  const grid = Array.from({ length: 5 }, (_, index) => {
+    const value = domainMin + (domainMax - domainMin) * index / 4; const yy = y(value);
+    return `<line x1="${left}" y1="${yy}" x2="${right}" y2="${yy}" stroke="#E5EAF0"/><text x="${left - 8}" y="${yy + 4}" text-anchor="end" font-size="11" fill="#64748B">${Math.round(value)}%</text>`;
+  }).join('');
+  const paths = points.slice(1).map((point, index) => `<line x1="${x(index)}" y1="${y(points[index].amount)}" x2="${x(index + 1)}" y2="${y(point.amount)}" stroke="#${color}" stroke-width="2"/>`).join('');
+  const marks = points.map((point, index) => {
+    const xx = x(index); const suppressed = point.rangeSuppressed === true; const parts: string[] = [];
+    if (!suppressed && showMinMax) { const low = y(point.minimum ?? point.amount); const high = y(point.maximum ?? point.amount); parts.push(`<line x1="${xx}" y1="${high}" x2="${xx}" y2="${low}" stroke="#${color}"/><line x1="${xx - 4}" y1="${high}" x2="${xx + 4}" y2="${high}" stroke="#${color}"/><line x1="${xx - 4}" y1="${low}" x2="${xx + 4}" y2="${low}" stroke="#${color}"/>`); }
+    if (!suppressed && showIqr) { const q1 = y(point.lowerQuartile ?? point.amount); const median = y(point.median ?? point.amount); const q3 = y(point.upperQuartile ?? point.amount); parts.push(`<rect x="${xx - 5}" y="${q3}" width="10" height="${Math.max(1, q1 - q3)}" fill="#${color}" fill-opacity=".18" stroke="#${color}"/><line x1="${xx - 5}" y1="${median}" x2="${xx + 5}" y2="${median}" stroke="#${color}" stroke-width="2"/>`); }
+    if (suppressed) { const median = y(point.median ?? point.amount); parts.push(`<line x1="${xx - 4}" y1="${median}" x2="${xx + 4}" y2="${median}" stroke="#${color}" stroke-width="2"/>`); }
+    parts.push(`<circle cx="${xx}" cy="${y(point.amount)}" r="3" fill="#${color}"/>`);
+    return parts.join('');
+  }).join('');
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}"><rect width="100%" height="100%" fill="#FFFFFF"/>${grid}${paths}${marks}${labels}</svg>`;
+}
+
+async function rasterizeChart(svg: string, width: number, height: number): Promise<Uint8Array> {
+  if (Platform.OS !== 'web' || typeof document === 'undefined') throw new Error('Chart image conversion is unavailable on this device.');
+  const canvas = document.createElement('canvas'); canvas.width = width; canvas.height = height;
+  const context = canvas.getContext('2d');
+  if (!context) throw new Error('Chart image conversion is unavailable in this browser.');
+  const objectUrl = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml;charset=utf-8' }));
+  try {
+    const image = new Image();
+    await new Promise<void>((resolve, reject) => { image.onload = () => resolve(); image.onerror = () => reject(new Error('The assessment chart could not be prepared for DOCX.')); image.src = objectUrl; });
+    context.drawImage(image, 0, 0, width, height);
+    const base64 = canvas.toDataURL('image/png').split(',')[1] ?? '';
+    const alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'; const bytes = new Uint8Array(Math.floor(base64.length * 3 / 4)); let outputIndex = 0;
+    for (let index = 0; index < base64.length; index += 4) { const a = alphabet.indexOf(base64[index]); const b = alphabet.indexOf(base64[index + 1]); const c = base64[index + 2] === '=' ? 0 : alphabet.indexOf(base64[index + 2]); const d = base64[index + 3] === '=' ? 0 : alphabet.indexOf(base64[index + 3]); bytes[outputIndex++] = (a << 2) | (b >> 4); if (base64[index + 2] !== '=') bytes[outputIndex++] = ((b & 15) << 4) | (c >> 2); if (base64[index + 3] !== '=') bytes[outputIndex++] = ((c & 3) << 6) | d; }
+    return bytes.slice(0, outputIndex);
+  } finally { URL.revokeObjectURL(objectUrl); }
+}
+
+function summarizeAssessmentResults(rows: ReportRecord[], by: 'type' | 'assessment'): ChartItem[] {
+  const groups = new Map<string, { scores: number[]; series: string }>();
+  for (const row of rows) {
+    const results = Array.isArray(row.assessmentResults) ? row.assessmentResults : [];
+    for (const assessment of results) {
+      if (assessment?.mappedPercentage == null || !Number.isFinite(Number(assessment.mappedPercentage))) continue;
+      const type = gradingLabel(row.gradingSystemSchema, 'Assessment type', assessment);
+      const assessmentName = String(assessment.name ?? assessment.id ?? 'Assessment');
+      const className = String(row.class ?? row.category ?? row.subject ?? 'Class');
+      const label = by === 'type' ? type : `${assessmentName} · ${className}`;
+      const key = by === 'type' ? label : `${className}:${assessment.id ?? assessmentName}`;
+      const entry = groups.get(key) ?? { scores: [], series: label };
+      entry.scores.push(Number(assessment.mappedPercentage));
+      groups.set(key, entry);
+    }
+  }
+  return [...groups.values()].map(({ scores, series }) => ({
+    label: series,
     count: scores.length,
     amount: scores.reduce((sum, score) => sum + score, 0) / scores.length,
-    minimum: scores.reduce((minimum, score) => Math.min(minimum, score), Infinity),
-    maximum: scores.reduce((maximum, score) => Math.max(maximum, score), -Infinity),
+    minimum: Math.min(...scores),
+    maximum: Math.max(...scores),
   }));
 }
 
@@ -207,10 +385,10 @@ function standingPeriodSeries(rows: ReportRecord[], fields: string[]): ChartItem
   return periodFields.map((field, index) => {
     const values = rows.map((row) => row[field]).filter((value): value is number => typeof value === 'number' && Number.isFinite(value));
     return { label: labels.get(field) ?? labelize(field.replace(/^gradingPeriod_/i, 'Period ')), dateKey: String(index).padStart(4, '0'), count: values.length, amount: values.length ? values.reduce((sum, value) => sum + value, 0) / values.length : 0, minimum: values.length ? Math.min(...values) : 0, maximum: values.length ? Math.max(...values) : 0 };
-  }).filter((item) => item.count > 0);
+  });
 }
 
-export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLabel, description, scopeOptions = [] }: { title: string; rows: ReportRecord[]; scopeLabel: string; description: string; scopeOptions?: ReportScopeOption[] }) {
+export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLabel, description, scopeOptions = [], insightScope = 'other' }: { title: string; rows: ReportRecord[]; scopeLabel: string; description: string; scopeOptions?: ReportScopeOption[]; insightScope?: 'department' | 'class' | 'faculty' | 'other' }) {
   const [reportScope, setReportScope] = useState('current');
   const [loadedScopeRows, setLoadedScopeRows] = useState<Record<string, ReportRecord[]>>({});
   const [loadingScope, setLoadingScope] = useState('');
@@ -219,6 +397,7 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
   const activeScopeOption = scopeOptions.find((option) => option.value === reportScope);
   const rawRows = reportScope === 'current' ? initialRows : loadedScopeRows[reportScope] ?? [];
   const activeScopeLabel = activeScopeOption?.label ?? scopeLabel;
+  const reportInsightScope = insightScope === 'class' && /all classes/i.test(activeScopeLabel) ? 'faculty' : insightScope;
   const chooseReportScope = async (value: string) => {
     const requestId = ++scopeRequestId.current;
     setReportScope(value);
@@ -247,6 +426,10 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
   const [pivotField, setPivotField] = useState('');
   const [questions, setQuestions] = useState<ReportQuestion[]>(['Recommended overview']);
   const [assessmentBreakdown, setAssessmentBreakdown] = useState<AssessmentBreakdown>(() => initialRows.some((row) => Array.isArray(row.assessmentResults) && row.assessmentResults.some((item: ReportRecord) => item?.gradingTypeId)) ? 'Assessment type' : 'Overall');
+  const [assessmentInterval, setAssessmentInterval] = useState<AssessmentInterval>('day');
+  const [showAssessmentIqr, setShowAssessmentIqr] = useState(false);
+  const [showAssessmentMinMax, setShowAssessmentMinMax] = useState(true);
+  const [separateAssessmentTrends, setSeparateAssessmentTrends] = useState(false);
   const [reportFilters, setReportFilters] = useState<Array<{ field: string; value: string }>>([]);
   const [thresholdMode, setThresholdMode] = useState('');
   const [standingThreshold, setStandingThreshold] = useState('70');
@@ -304,6 +487,7 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
   const currentStandingField = fields.find((field) => /^(currentstanding|finalgrade|standing)$/i.test(field)) ?? fields.find((field) => /^score$/i.test(field));
   const riskGroupField = fields.find((field) => /^(risklevel|risklabel|riskcategory)$/i.test(field)) ?? fields.find((field) => /^(risk|classification|severity)$/i.test(field));
   const hasAssessmentResults = rows.some((row) => Array.isArray(row.assessmentResults) && row.assessmentResults.some((result: ReportRecord) => result?.date && typeof result?.mappedPercentage === 'number'));
+  const hasAssessmentScores = rows.some((row) => Array.isArray(row.assessmentResults) && row.assessmentResults.some((result: ReportRecord) => result?.mappedPercentage != null && Number.isFinite(Number(result.mappedPercentage))));
   const hasStandingPeriods = fields.some((field) => /^gradingPeriod_/i.test(field) && rows.some((row) => typeof row[field] === 'number' && Number.isFinite(row[field])));
   const assessmentBreakdownOptions = useMemo<AssessmentBreakdown[]>(() => {
     const options: AssessmentBreakdown[] = ['Overall'];
@@ -316,8 +500,11 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
       }
       if (labels.size) options.push(dimension);
     }
+    for (const field of categoricalFields.filter((candidate) => /department|program|subject|year.?level|grade.?level|section|class|course/i.test(candidate))) {
+      if (new Set(rows.map((row) => String(row[field] ?? '')).filter(Boolean)).size > 1) options.push(`By:${field}`);
+    }
     return options;
-  }, [rows]);
+  }, [categoricalFields, rows]);
   const availableVisualizations = useMemo<Visualization[]>(() => {
     const options: Visualization[] = ['KPI summary'];
     if (groupBy && visualizationCardinality > 1) options.push('Bar chart');
@@ -328,16 +515,19 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
     if (riskGroupField && rows.length) options.push('Risk distribution');
     if (dateField && value) options.push('Trend line');
     if (hasAssessmentResults) options.push('Assessment score range');
+    if (hasAssessmentScores) options.push('Assessment performance by type', 'Assessment ranking');
     if (hasStandingPeriods) options.push('Current standing by period');
     if (value && /score|grade|mark|rating|percent/i.test(value)) options.push('Score distribution');
     if (studentNameField && attendanceField && rows.some((row) => typeof row[attendanceField] === 'number')) options.push('Attendance watchlist');
+    if (groupBy && visualizationCardinality > 1 && attendanceField) options.push('Attendance by group');
     if (studentNameField && missedField && rows.some((row) => typeof row[missedField] === 'number')) options.push('Missed assessment watchlist');
     return options;
-  }, [attendanceField, dateField, fields, groupBy, hasAssessmentResults, hasStandingPeriods, missedField, riskGroupField, rows, studentNameField, value, visualizationCardinality]);
+  }, [attendanceField, dateField, fields, groupBy, hasAssessmentResults, hasAssessmentScores, hasStandingPeriods, missedField, riskGroupField, rows, studentNameField, value, visualizationCardinality]);
   const questionOptions: ReportQuestion[] = [
     'Recommended overview',
     ...(groupFieldOptions.some((field) => new Set(rows.map((row) => String(row[field] ?? '')).filter(Boolean)).size > 1) ? ['Compare groups' as const] : []),
     ...(hasAssessmentResults ? ['Assessment scores over time' as const] : []),
+    ...(hasAssessmentScores ? ['Assessment performance by type' as const, 'Highest and lowest assessment scores' as const] : []),
     ...(hasStandingPeriods ? ['Current standing over time' as const] : []),
     ...(riskGroupField ? ['Risk distribution' as const] : []),
     ...(attendanceField && studentNameField ? ['Attendance rates' as const] : []),
@@ -360,35 +550,45 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
     if (attendanceField && studentNameField && defaults.length < (template === 'Detailed analysis' ? 6 : 4)) defaults.push('Attendance watchlist');
     if (missedField && studentNameField && defaults.length < (template === 'Detailed analysis' ? 6 : 4)) defaults.push('Missed assessment watchlist');
     if (template === 'Detailed analysis' && hasAssessmentResults) defaults.push('Assessment score range');
+    if (template === 'Detailed analysis' && hasAssessmentScores) defaults.push('Assessment performance by type', 'Assessment ranking');
     else if (template === 'Detailed analysis' && dateField && value) defaults.push('Trend line');
     if (template === 'Detailed analysis' && value && /score|grade|mark|percent|standing/i.test(value)) defaults.push('Score distribution');
     return defaults.filter((item) => availableVisualizations.includes(item));
-  }, [attendanceField, availableVisualizations, dateField, groupBy, hasAssessmentResults, missedField, riskGroupField, studentNameField, template, value, visualizationCardinality]);
+  }, [attendanceField, availableVisualizations, dateField, groupBy, hasAssessmentResults, hasAssessmentScores, missedField, riskGroupField, studentNameField, template, value, visualizationCardinality]);
   const visualizationGroupField = activeQuestions.includes('Risk distribution') && riskGroupField ? riskGroupField : groupBy;
+  const assessmentBreakdownLabel = assessmentBreakdown.startsWith('By:') ? `by ${labelize(assessmentBreakdown.slice(3))}` : assessmentBreakdown.toLowerCase();
   const activeVisualizations = useMemo<Visualization[]>(() => {
     if (activeQuestions.includes('Recommended overview')) return defaultVisualizations.filter((item) => availableVisualizations.includes(item));
     const selected: Visualization[] = ['KPI summary'];
     if (activeQuestions.includes('Compare groups')) selected.push('Bar chart', ...(availableVisualizations.includes('Pass rate comparison') ? ['Pass rate comparison' as const] : []), ...(availableVisualizations.includes('Score spread by group') ? ['Score spread by group' as const] : []));
     if (activeQuestions.includes('Assessment scores over time')) selected.push('Assessment score range');
+    if (activeQuestions.includes('Assessment performance by type')) selected.push('Assessment performance by type');
+    if (activeQuestions.includes('Highest and lowest assessment scores')) selected.push('Assessment ranking');
     if (activeQuestions.includes('Current standing over time')) selected.push('Current standing by period');
     if (activeQuestions.includes('Risk distribution')) selected.push('Risk distribution');
-    if (activeQuestions.includes('Attendance rates')) selected.push('Attendance watchlist');
+    if (activeQuestions.includes('Attendance rates')) {
+      if (compareSelected && groupBy && availableVisualizations.includes('Attendance by group')) selected.push('Attendance by group');
+      else selected.push('Attendance watchlist');
+    }
     if (activeQuestions.includes('Missing assessments')) selected.push('Missed assessment watchlist');
     if (activeQuestions.includes('Score distribution')) selected.push('Score distribution');
     return [...new Set(selected)].filter((item) => availableVisualizations.includes(item));
-  }, [activeQuestionKey, attendanceField, availableVisualizations, defaultVisualizations, missedField]);
-  const visualizationTitle = (kind: Visualization) => kind === 'Donut chart' ? `${labelize(visualizationGroupField)} distribution` : kind === 'Risk distribution' ? 'Students by risk level' : kind === 'Pass rate comparison' ? `Passing rate by ${labelize(groupBy)}` : kind === 'Bar chart' ? `Average ${labelize(value || 'records')} by ${labelize(groupBy)}` : kind === 'Score spread by group' ? `Score range by ${labelize(groupBy)}` : kind === 'Assessment score range' ? 'Assessment scores over time' : kind === 'Current standing by period' ? 'Current standing by grading period' : kind === 'Score distribution' ? `${labelize(value)} distribution` : kind === 'Attendance watchlist' ? 'Lowest attendance' : kind === 'Missed assessment watchlist' ? 'Most missed assessments' : kind;
+  }, [activeQuestionKey, attendanceField, availableVisualizations, compareSelected, defaultVisualizations, groupBy, missedField]);
+  const visualizationTitle = (kind: Visualization) => kind === 'Donut chart' ? `${labelize(visualizationGroupField)} distribution` : kind === 'Risk distribution' ? 'Students by risk level' : kind === 'Pass rate comparison' ? `Passing rate by ${labelize(groupBy)}` : kind === 'Bar chart' ? `Average ${labelize(value || 'records')} by ${labelize(groupBy)}` : kind === 'Score spread by group' ? `Score range by ${labelize(groupBy)}` : kind === 'Assessment score range' ? 'Assessment scores over time' : kind === 'Current standing by period' ? 'Current standing by grading period' : kind === 'Score distribution' ? `${labelize(value)} distribution` : kind === 'Attendance watchlist' ? 'Lowest student attendance' : kind === 'Attendance by group' ? `Average attendance by ${labelize(groupBy)}` : kind === 'Missed assessment watchlist' ? 'Most missed assessments' : kind === 'Assessment performance by type' ? 'Average score by assessment type' : kind === 'Assessment ranking' ? 'Highest and lowest scoring assessments' : kind;
   const visualizationDescription = (kind: Visualization) => {
     if (kind === 'Donut chart') return `Each segment shows the share of included records in a ${labelize(visualizationGroupField).toLowerCase()} category. The legend reports count and percentage.`;
     if (kind === 'Risk distribution') return 'Counts and percentages of students in each applied risk level, based on the selected report scope.';
-    if (kind === 'Pass rate comparison') return `Share of recorded students meeting the applied passing rule in each ${labelize(groupBy).toLowerCase()} group. Groups with no recorded status are excluded.`;
+    if (kind === 'Pass rate comparison') return `Share of students meeting the applied passing rule in each ${labelize(groupBy).toLowerCase()} group. Groups with no recorded status are excluded.`;
     if (kind === 'Score spread by group') return `Each range shows the middle half of recorded ${labelize(currentStandingField ?? 'standing').toLowerCase()} values, with whiskers for the minimum and maximum. The center mark is the median.`;
     if (kind === 'Bar chart') return `Top ${Math.min(8, selectedGroups.length)} ${labelize(groupBy).toLowerCase()} groups are ranked by ${effectiveAggregation} ${labelize(value || 'record count')}.`;
-    if (kind === 'Assessment score range') return `Scores are mapped through each assessment's applied grading rule. The line shows average mapped percentage over time; whiskers show the lowest and highest recorded percentages. Series are grouped by ${assessmentBreakdown.toLowerCase()}.`;
+    if (kind === 'Assessment score range') return `Scores are mapped through each assessment's applied grading rule. The line shows average mapped percentage by ${assessmentInterval}.${showAssessmentMinMax ? ' Whiskers show the lowest and highest recorded percentages where applicable.' : ''}${showAssessmentIqr ? ' Boxes span the middle 50% (Q1–Q3), with the median marked inside.' : ''} Series are grouped ${assessmentBreakdownLabel}${separateAssessmentTrends && assessmentBreakdown !== 'Overall' ? '; each group has a separate graph' : ''}.`;
+    if (kind === 'Assessment performance by type') return 'Average mapped assessment scores grouped by the assessment types in the applied grading system. Only submitted, mappable scores are included.';
+    if (kind === 'Assessment ranking') return 'Assessments are ranked by average mapped score. The report shows the lowest and highest assessment averages so both support needs and strengths are visible.';
     if (kind === 'Current standing by period') return 'Each point is the average calculated period result for included students, using the applied grading system. Whiskers show the lowest and highest recorded period results; students without that period result are excluded.';
     if (kind === 'Score distribution') return currentStandingField === value ? `Current standing is calculated using the class grading rules and mapped to percentages before placing students in these bands.` : `Scores use equal-width bands based on the observed range of ${labelize(value)}; records without a numeric value are excluded.`;
     if (kind === 'Trend line') return `${labelize(value)} is averaged by ${labelize(dateField || 'date')} to show change over time. This is descriptive, not a forecast.`;
     if (kind === 'Attendance watchlist') return 'Students with the lowest recorded attendance are shown first. Missing attendance records are excluded.';
+    if (kind === 'Attendance by group') return `Groups are ranked from lowest to highest average attendance by ${labelize(groupBy).toLowerCase()}. Students without recorded attendance are excluded from each average.`;
     if (kind === 'Missed assessment watchlist') return 'Students with the most missing assessment results are shown first; this counts missing results, not excused absences.';
     return 'A quick view of included records and available academic indicators.';
   };
@@ -415,30 +615,157 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
       : sortRows(summaries, groupSort === 'most students' ? 'count' : 'amount', groupSort === 'lowest average' ? 'ascending' : 'descending');
     return sorted.map(({ key }) => [key, grouped.find(([candidate]) => candidate === key)?.[1] ?? []] as [string, ReportRecord[]]);
   }, [groupBy, groupSort, reportRows, value]);
+  const comparisonGroups = useMemo(() => {
+    if (!showAdvancedBreakdown || !groupBy || !pivotBy) return selectedGroups;
+    const counts = new Map<string, number>();
+    for (const row of reportRows) {
+      const label = String(row[pivotBy] ?? 'Unspecified');
+      counts.set(label, (counts.get(label) ?? 0) + 1);
+    }
+    const secondaryValues = [...counts.entries()].sort((left, right) => right[1] - left[1]).slice(0, 12).map(([label]) => label);
+    return selectedGroups.slice(0, 12).flatMap(([group, items]) => secondaryValues.flatMap((secondary) => {
+      const matching = items.filter((row) => String(row[pivotBy] ?? 'Unspecified') === secondary);
+      return matching.length ? [[`${group} · ${secondary}`, matching] as [string, ReportRecord[]]] : [];
+    }));
+  }, [groupBy, pivotBy, reportRows, selectedGroups, showAdvancedBreakdown]);
+  const comparisonTable = useMemo(() => {
+    if (!comparisonGroups.length) return [] as string[][];
+    const statusField = fields.find((field) => /^(classification|remarks|passstatus)$/i.test(field));
+    const riskField = fields.find((field) => /^(risk|risklevel|risklabel|riskcategory|riskseverity)$/i.test(field));
+    const metricRows = comparisonGroups.map(([group, items]) => {
+      const uniqueStudents = new Set(items.map((row) => String(row.studentId ?? row.student ?? row.id ?? '')).filter(Boolean));
+      const scores = currentStandingField ? items.map((row) => row[currentStandingField]).filter((score): score is number => typeof score === 'number' && Number.isFinite(score)).sort((a, b) => a - b) : [];
+      const attendance = attendanceField ? items.map((row) => row[attendanceField]).filter((rate): rate is number => typeof rate === 'number' && Number.isFinite(rate)) : [];
+      const assessments = items.flatMap((row) => Array.isArray(row.assessmentResults) ? row.assessmentResults : []);
+      const submitted = assessments.filter((assessment) => (assessment?.rawScore != null && String(assessment.rawScore).trim() !== '') || (assessment?.mappedPercentage != null && Number.isFinite(Number(assessment.mappedPercentage)))).length;
+      const statuses = statusField ? items.map((row) => String(row[statusField] ?? '').trim()).filter(Boolean) : [];
+      const passing = statuses.filter((status) => /pass|met/i.test(status) && !/fail|not met/i.test(status)).length;
+      const atRisk = riskField ? items.filter((row) => /high|medium|moderate|critical|elevated|at.?risk/i.test(String(row[riskField] ?? ''))).length : 0;
+      return {
+        group,
+        studentCount: uniqueStudents.size || items.length,
+        averageScore: scores.length ? scores.reduce((sum, score) => sum + score, 0) / scores.length : null,
+        medianScore: scores.length ? median(scores) : null,
+        averageAttendance: attendance.length ? attendance.reduce((sum, rate) => sum + rate, 0) / attendance.length : null,
+        submissionRate: assessments.length ? submitted * 100 / assessments.length : null,
+        passingCount: statusField ? passing : null,
+        atRiskCount: riskField ? atRisk : null,
+      };
+    });
+    const comparisonDimension = showAdvancedBreakdown && pivotBy ? `${labelize(groupBy || 'Group')} / ${labelize(pivotBy)}` : labelize(groupBy || 'Group');
+    const headers = [comparisonDimension, 'Students'];
+    if (currentStandingField) headers.push('Average standing', 'Median standing');
+    if (attendanceField) headers.push('Average attendance');
+    if (reportRows.some((row) => Array.isArray(row.assessmentResults) && row.assessmentResults.length > 0)) headers.push('Submission rate');
+    if (statusField) headers.push('Passing count');
+    if (riskField) headers.push('At-risk count');
+    const body = metricRows.map((row) => {
+      const values = [row.group, String(row.studentCount)];
+      if (currentStandingField) values.push(row.averageScore == null ? '—' : `${row.averageScore.toFixed(1)}%`, row.medianScore == null ? '—' : `${row.medianScore.toFixed(1)}%`);
+      if (attendanceField) values.push(row.averageAttendance == null ? '—' : `${row.averageAttendance.toFixed(1)}%`);
+      if (headers.includes('Submission rate')) values.push(row.submissionRate == null ? '—' : `${row.submissionRate.toFixed(1)}%`);
+      if (statusField) values.push(String(row.passingCount ?? 0));
+      if (riskField) values.push(String(row.atRiskCount ?? 0));
+      return values;
+    });
+    return [headers, ...body];
+  }, [attendanceField, comparisonGroups, currentStandingField, fields, groupBy, pivotBy, reportRows, showAdvancedBreakdown]);
   const pivot = useMemo(() => showAdvancedBreakdown && groupBy && pivotBy ? pivotRows(reportRows, groupBy, pivotBy, effectiveAggregation, value, { maxRows: 12, maxColumns: 12 }) : [], [effectiveAggregation, groupBy, pivotBy, reportRows, showAdvancedBreakdown, value]);
   const numericValues = useMemo(() => reportRows.map((row) => row[value]).filter((item): item is number => typeof item === 'number' && Number.isFinite(item)), [reportRows, value]);
-  const assessmentSeries = useMemo(() => assessmentScoreSeries(reportRows, assessmentBreakdown), [assessmentBreakdown, reportRows]);
+  const assessmentSeries = useMemo(() => assessmentScoreSeries(reportRows, assessmentBreakdown, assessmentInterval), [assessmentBreakdown, assessmentInterval, reportRows]);
+  const assessmentTypePerformance = useMemo(() => summarizeAssessmentResults(reportRows, 'type').sort((left, right) => right.amount - left.amount), [reportRows]);
+  const assessmentRankings = useMemo(() => {
+    const ranked = summarizeAssessmentResults(reportRows, 'assessment').sort((left, right) => left.amount - right.amount);
+    if (ranked.length <= 8) return ranked;
+    return [...ranked.slice(0, 4), ...ranked.slice(-4)];
+  }, [reportRows]);
   const standingSeries = useMemo(() => standingPeriodSeries(reportRows, fields), [fields, reportRows]);
   const criticalField = riskGroupField ?? fields.find((field) => /risk|classification|status|severity/i.test(field));
   const criticalRows = useMemo(() => criticalField ? reportRows.filter((row) => criticalWords.test(String(row[criticalField] ?? ''))) : [], [criticalField, reportRows]);
   const completeness = useMemo(() => reportRows.length && fields.length ? Math.round(reportRows.reduce((count, row) => count + fields.filter((field) => row[field] !== null && row[field] !== undefined && row[field] !== '').length, 0) * 100 / (reportRows.length * fields.length)) : 0, [fields, reportRows]);
   const insightItems = useMemo(() => {
     if (!autoInsights || !reportRows.length) return [];
-    const actionableInsights = semanticInsights(reportRows, fields);
-    const result = [...actionableInsights, `${reportRows.length.toLocaleString()} ${activeScopeLabel.toLowerCase()} records are in this report.`];
+    const typeScores = summarizeAssessmentResults(reportRows, 'type').sort((left, right) => right.amount - left.amount);
+    const assessmentScores = summarizeAssessmentResults(reportRows, 'assessment').sort((left, right) => left.amount - right.amount);
+    const result: string[] = [];
+    if (typeScores.length > 1) result.push(`Average scores were highest for ${typeScores[0].label} (${typeScores[0].amount.toFixed(1)}%) and lowest for ${typeScores[typeScores.length - 1].label} (${typeScores[typeScores.length - 1].amount.toFixed(1)}%).`);
+    if (assessmentScores.length > 1) result.push(`Among the assessments shown, the lowest average was ${assessmentScores[0].amount.toFixed(1)}% for ${assessmentScores[0].label}; the highest was ${assessmentScores[assessmentScores.length - 1].amount.toFixed(1)}% for ${assessmentScores[assessmentScores.length - 1].label}.`);
+    const riskField = riskGroupField ?? fields.find((field) => /^(risk|risklevel|risklabel|riskcategory|riskseverity)$/i.test(field));
+    if (riskField) {
+      const riskGroups = [...groupRows(reportRows, riskField)].sort((a, b) => b[1].length - a[1].length);
+      const highRisk = riskGroups.filter(([label]) => /high|critical|elevated/i.test(label)).reduce((sum, [, items]) => sum + items.length, 0);
+      const hasHigh = riskGroups.some(([label]) => /high/i.test(label));
+      const hasCritical = riskGroups.some(([label]) => /critical|elevated/i.test(label));
+      if (highRisk) {
+        const riskDescription = hasHigh && hasCritical ? 'high or critical risk' : hasCritical ? 'critical risk' : 'high risk';
+        result.push(`${highRisk} of ${reportRows.length} students (${Math.round(highRisk * 100 / reportRows.length)}%) are classified as having a ${riskDescription} of failure.`);
+      } else if (riskGroups.length) result.push(`The largest recorded risk group is ${riskGroups[0][0]} (${riskGroups[0][1].length} of ${reportRows.length} students).`);
+    }
+    const programField = fields.find((field) => /^program(name)?$/i.test(field));
+    const yearLevelField = fields.find((field) => /^year.?level(label|name)$/i.test(field)) ?? fields.find((field) => /^year.?level$/i.test(field));
+    if ((reportInsightScope === 'department' || reportInsightScope === 'faculty') && currentStandingField && (programField || yearLevelField)) {
+      const departmentStandings = reportInsightScope === 'department' ? reportRows.map((row) => row[currentStandingField]).filter((score): score is number => typeof score === 'number' && Number.isFinite(score)) : [];
+      if (departmentStandings.length) {
+        const average = departmentStandings.reduce((sum, score) => sum + score, 0) / departmentStandings.length;
+        result.push(`Across the department, current standing averaged ${average.toFixed(1)}% across ${departmentStandings.length} class results.`);
+      }
+      const summarizeByDimension = (field: string | undefined, dimension: string) => {
+        if (!field) return;
+        const ranked = [...groupRows(reportRows, field)].map(([rawName, items]) => {
+          const name = dimension === 'year level' && /^\d+$/.test(rawName) ? `Year ${rawName}` : rawName;
+          const values = items.map((row) => row[currentStandingField]).filter((score): score is number => typeof score === 'number' && Number.isFinite(score));
+          return { name, count: values.length, average: values.length ? values.reduce((sum, score) => sum + score, 0) / values.length : null };
+        }).filter((item): item is { name: string; count: number; average: number } => item.average !== null).sort((a, b) => b.average - a.average);
+        if (ranked.length > 1) {
+          const highest = ranked[0]; const lowest = ranked[ranked.length - 1];
+          result.push(`By ${dimension}, current standing averaged highest in ${highest.name} (${highest.average.toFixed(1)}%, ${highest.count} results) and lowest in ${lowest.name} (${lowest.average.toFixed(1)}%, ${lowest.count} results).`);
+        } else if (ranked.length === 1) {
+          result.push(`In ${ranked[0].name}, average current standing was ${ranked[0].average.toFixed(1)}% across ${ranked[0].count} recorded results.`);
+        }
+      };
+      summarizeByDimension(programField, 'program');
+      summarizeByDimension(yearLevelField, 'year level');
+    }
+    if (missedField && studentNameField) {
+      const missed = reportRows.filter((row) => typeof row[missedField] === 'number' && Number.isFinite(row[missedField])).sort((a, b) => Number(b[missedField]) - Number(a[missedField]));
+      if (missed.length && Number(missed[0][missedField]) > 0) {
+        const highest = Number(missed[0][missedField]);
+        const names = missed.filter((row) => Number(row[missedField]) === highest).map((row) => String(row[studentNameField] ?? 'Student'));
+        result.push(`${names.slice(0, 3).join(', ')}${names.length > 3 ? ` and ${names.length - 3} others` : ''} had the most missing assessments (${highest}).`);
+      }
+    }
+    if (attendanceField) {
+      const rates = reportRows.map((row) => row[attendanceField]).filter((rate): rate is number => typeof rate === 'number' && Number.isFinite(rate));
+      if (rates.length) {
+        const lowest = Math.min(...rates);
+        if (lowest < 99.95 && studentNameField) {
+          const names = reportRows.filter((row) => row[attendanceField] === lowest).map((row) => String(row[studentNameField] ?? 'Student'));
+          result.push(`${names.slice(0, 3).join(', ')}${names.length > 3 ? ` and ${names.length - 3} others` : ''} had the lowest recorded attendance (${lowest.toFixed(1)}%).`);
+        } else if (lowest >= 99.95) result.push(`All ${rates.length} recorded attendance rates are 100%.`);
+      }
+    }
     if (numericValues.length) {
       const avg = aggregateRows(reportRows, 'average', value); const mid = median(numericValues);
-      result.push(`${labelize(value)} averages ${avg.toFixed(1)}; the median is ${mid.toFixed(1)} across ${numericValues.length.toLocaleString()} numeric values.`);
+      result.push(`The average ${labelize(value)} is ${avg.toFixed(1)}%, while the median is ${mid.toFixed(1)}%.`);
       const range = Math.max(...numericValues) - Math.min(...numericValues);
-      if (range > 0) result.push(`${labelize(value)} ranges from ${Math.min(...numericValues).toFixed(1)} to ${Math.max(...numericValues).toFixed(1)} (spread ${range.toFixed(1)}).`);
+      // if (range > 0) result.push(`${labelize(value)} ranges from ${Math.min(...numericValues).toFixed(1)} to ${Math.max(...numericValues).toFixed(1)} (spread ${range.toFixed(1)}).`);
     }
     if (selectedGroups.length) {
       const bySize = [...selectedGroups].sort((a, b) => b[1].length - a[1].length);
-      if (bySize.length > 1) result.push(`Largest ${labelize(groupBy).toLowerCase()} group — ${bySize[0][0]} has ${bySize[0][1].length.toLocaleString()} records (${Math.round(bySize[0][1].length * 100 / reportRows.length)}% of this report).`);
+      if (bySize.length > 1 && !/classification/i.test(groupBy)) result.push(`Largest ${labelize(groupBy).toLowerCase()} group — ${bySize[0][0]} has ${bySize[0][1].length.toLocaleString()} records (${Math.round(bySize[0][1].length * 100 / reportRows.length)}% of this report).`);
       if (value && /standing|grade|score|mark|percent|attendance/i.test(value) && selectedGroups.length > 1) {
         const ranked = selectedGroups.map(([key, items]) => ({ key, amount: aggregateRows(items, 'average', value), count: items.filter((row) => typeof row[value] === 'number' && Number.isFinite(row[value])).length })).filter((row) => row.count).sort((a, b) => b.amount - a.amount);
-        if (ranked.length > 1) result.push(`Highest average ${labelize(value).toLowerCase()} — ${ranked[0].key}: ${ranked[0].amount.toFixed(1)} (${ranked[0].count} recorded values).`);
-        if (ranked.length > 1) result.push(`Lowest average ${labelize(value).toLowerCase()} — ${ranked[ranked.length - 1].key}: ${ranked[ranked.length - 1].amount.toFixed(1)} (${ranked[ranked.length - 1].count} recorded values).`);
+        if (ranked.length > 1) result.push(`Highest average ${labelize(value).toLowerCase()} is ${ranked[0].key}: ${ranked[0].amount.toFixed(1)} (${ranked[0].count} recorded values).`);
+        if (ranked.length > 1) result.push(`Lowest average ${labelize(value).toLowerCase()} is ${ranked[ranked.length - 1].key}: ${ranked[ranked.length - 1].amount.toFixed(1)} (${ranked[ranked.length - 1].count} recorded values).`);
+      }
+      if (selectedGroups.length > 1 && attendanceField) {
+        const rankedAttendance = selectedGroups.map(([key, items]) => ({ key, values: items.map((row) => row[attendanceField]).filter((rate): rate is number => typeof rate === 'number' && Number.isFinite(rate)) })).filter((item) => item.values.length).map((item) => ({ key: item.key, average: item.values.reduce((sum, rate) => sum + rate, 0) / item.values.length, count: item.values.length })).sort((a, b) => b.average - a.average);
+        if (rankedAttendance.length > 1) result.push(`Attendance ranges from ${rankedAttendance[rankedAttendance.length - 1].key} (${rankedAttendance[rankedAttendance.length - 1].average.toFixed(1)}%) to ${rankedAttendance[0].key} (${rankedAttendance[0].average.toFixed(1)}%) across the compared ${labelize(groupBy).toLowerCase()} groups.`);
+      }
+      const statusField = fields.find((field) => /^(classification|remarks|passstatus)$/i.test(field));
+      if (selectedGroups.length > 1 && statusField) {
+        const passedGroups = selectedGroups.map(([key, items]) => ({ key, count: items.filter((row) => /pass|met/i.test(String(row[statusField] ?? '')) && !/fail|not met/i.test(String(row[statusField] ?? ''))).length })).sort((a, b) => b.count - a.count);
+        if (passedGroups.some((group) => group.count > 0)) result.push(`Most students meeting the recorded passing rule — ${passedGroups[0].key}: ${passedGroups[0].count}.`);
       }
     }
     if (criticalField) result.push(`${criticalRows.length.toLocaleString()} records (${reportRows.length ? Math.round(criticalRows.length * 100 / reportRows.length) : 0}%) match the configured ${labelize(criticalField).toLowerCase()} concern indicators.`);
@@ -453,11 +780,16 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
     }
     if (pivot.length) result.push(`The ${labelize(groupBy).toLowerCase()} comparison spans ${pivot.length} groups and ${new Set(reportRows.map((row) => String(row[pivotBy] ?? 'Unspecified'))).size} ${labelize(pivotBy).toLowerCase()} categories.`);
     const prioritized = result;
-    return concise ? prioritized.slice(0, Math.max(3, actionableInsights.length)) : prioritized;
-  }, [effectiveAggregation, activeScopeLabel, autoInsights, completeness, concise, criticalField, criticalRows.length, dateField, fields, groupBy, pivot.length, pivotBy, reportRows, selectedGroups, template, value, numericValues]);
+    if (!concise) return prioritized;
+    const scopeInsights = prioritized.filter((line) => /Across the department|By program|By year level/.test(line));
+    const otherInsights = prioritized.filter((line) => !scopeInsights.includes(line));
+    return [...scopeInsights, ...otherInsights.slice(0, Math.max(0, 7 - scopeInsights.length))];
+  }, [effectiveAggregation, activeScopeLabel, attendanceField, autoInsights, completeness, concise, criticalField, criticalRows.length, dateField, fields, groupBy, reportInsightScope, pivot.length, pivotBy, reportRows, selectedGroups, template, value, numericValues]);
   const chartData = useMemo(() => {
     const result: Partial<Record<Visualization, ChartItem[]>> = {};
     if (activeVisualizations.includes('Assessment score range')) result['Assessment score range'] = assessmentSeries;
+    if (activeVisualizations.includes('Assessment performance by type')) result['Assessment performance by type'] = assessmentTypePerformance;
+    if (activeVisualizations.includes('Assessment ranking')) result['Assessment ranking'] = assessmentRankings;
     if (activeVisualizations.includes('Current standing by period')) result['Current standing by period'] = standingSeries;
     if (activeVisualizations.includes('Risk distribution') && riskGroupField) {
       result['Risk distribution'] = [...groupRows(reportRows, riskGroupField)].map(([label, items]) => ({ label, count: items.length, amount: items.length })).sort((a, b) => b.count - a.count);
@@ -489,6 +821,12 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
     if (activeVisualizations.includes('Attendance watchlist') && attendanceField && studentNameField) {
       result['Attendance watchlist'] = reportRows.filter((row) => typeof row[attendanceField] === 'number' && Number.isFinite(row[attendanceField])).map((row) => ({ label: watchlistLabel(row), count: 1, amount: Number(row[attendanceField]) })).sort((a, b) => a.amount - b.amount).slice(0, 8);
     }
+    if (activeVisualizations.includes('Attendance by group') && attendanceField && groupBy) {
+      result['Attendance by group'] = selectedGroups.map(([label, items]) => {
+        const rates = items.map((row) => row[attendanceField]).filter((rate): rate is number => typeof rate === 'number' && Number.isFinite(rate));
+        return rates.length ? { label, count: rates.length, amount: rates.reduce((sum, rate) => sum + rate, 0) / rates.length } : null;
+      }).filter((item): item is ChartItem => item !== null).sort((left, right) => left.amount - right.amount).slice(0, 12);
+    }
     if (activeVisualizations.includes('Missed assessment watchlist') && missedField && studentNameField) {
       result['Missed assessment watchlist'] = reportRows.filter((row) => typeof row[missedField] === 'number' && Number.isFinite(row[missedField]) && row[missedField] > 0).map((row) => ({ label: watchlistLabel(row), count: 1, amount: Number(row[missedField]) })).sort((a, b) => b.amount - a.amount).slice(0, 8);
     }
@@ -504,10 +842,10 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
       result['Donut chart'] = categories.length <= 8 ? categories : [...categories.slice(0, 7), { label: 'Other groups', count: categories.slice(7).reduce((sum, item) => sum + item.count, 0), amount: categories.slice(7).reduce((sum, item) => sum + item.amount, 0) }];
     }
     return result;
-  }, [activeVisualizations, assessmentSeries, attendanceField, classLabelField, currentStandingField, dateField, effectiveAggregation, fields, groupBy, missedField, riskGroupField, selectedGroups, numericValues, reportRows, standingSeries, studentNameField, value]);
+  }, [activeVisualizations, assessmentRankings, assessmentSeries, assessmentTypePerformance, attendanceField, classLabelField, currentStandingField, dateField, effectiveAggregation, fields, groupBy, missedField, riskGroupField, selectedGroups, numericValues, reportRows, standingSeries, studentNameField, value]);
   const rawTable = template === 'Data table';
   const summaryTable = (includeSummaryTable || compareSelected) && !rawTable && selectedGroups.length > 0
-    ? [['Group', 'Records', `${labelize(effectiveAggregation)} ${labelize(value)}`], ...selectedGroups.map(([key, items]) => [key, String(items.length), `${aggregateRows(items, effectiveAggregation, value).toFixed(1)}${/rate|percent|percentage|standing|grade|score/i.test(value) ? '%' : ''}`])]
+    ? comparisonTable
     : [];
   const tableData = rawTable ? [fields.map(labelize), ...reportRows.map((row) => fields.map((field) => { const value = row[field]; if (value == null) return '—'; if (/^(student.?id|institutional.?id)$/i.test(field) && typeof value === 'string') return formatStudentId(value); return typeof value === 'object' ? JSON.stringify(value) : String(value); }))] : summaryTable;
   const accessedDataText = useMemo(() => showSourceData ? JSON.stringify({
@@ -527,14 +865,22 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
     if (!previewOnly) setBusy(true);
     setError('');
     try {
-      const analysisContext = [
-        `Analysis: ${activeQuestions.map(labelize).join(', ')}.`,
-        ...activeFilters.map(({ field, value: filterValue }) => `Filter: ${labelize(field)} is ${filterValue}.`),
-        ...(thresholdActive ? [`Class average current standing is ${thresholdMode === 'below' ? 'below' : 'at or above'} ${thresholdNumber}%.`] : []),
-        ...(drilldownValue ? [`Drilldown: ${labelize(groupBy)} is ${drilldownValue}.`] : []),
-        ...(!reportRows.length ? ['No records matched these report settings. Adjust the filter or threshold and regenerate the report.'] : []),
+      const studentCount = new Set(reportRows.map((row) => String(row.studentId ?? row.enrollmentId ?? row.student ?? row.label ?? '')).filter(Boolean)).size;
+      const departmentRow = reportRows.find((row) => row.departmentName || row.department);
+      const departmentValue = departmentRow?.departmentName ?? departmentRow?.department;
+      const departmentFromRows = departmentValue && typeof departmentValue === 'object' ? departmentValue.name ?? departmentValue.label ?? departmentValue.code : departmentValue;
+      const reportScopeName = /authorized department/i.test(activeScopeLabel) ? String(departmentFromRows || 'your academic department') : activeScopeLabel;
+      const terms = [...new Set(reportRows.map((row) => String(row.academicTerm ?? row.term ?? row.academicYear ?? '').trim()).filter((term) => term && term !== 'undefined' && term !== 'null'))];
+      const termPhrase = terms.length === 1 ? ` during ${terms[0]}` : terms.length > 1 ? ` across ${terms.length} academic terms` : '';
+      const subjectPhrase = studentCount ? `${studentCount.toLocaleString()} students` : `${reportRows.length.toLocaleString()} records`;
+      const reportOverview = [
+        reportRows.length
+          ? `This report presents performance trends, class comparisons, and key insights into the academic performance of ${subjectPhrase} in ${reportScopeName}${termPhrase}.`
+          : `No student records matched the selected filters for ${reportScopeName}. Widen the filters and generate the report again.`,
+        ...(activeFilters.length ? [`Included: ${activeFilters.map(({ field, value: filterValue }) => `${labelize(field)} is ${filterValue}`).join('; ')}.`] : []),
+        ...(thresholdActive ? [`Class standing filter: ${thresholdMode === 'below' ? 'below' : 'at or above'} ${thresholdNumber}%.`] : []),
+        ...(drilldownValue ? [`Showing ${labelize(groupBy).toLowerCase()}: ${drilldownValue}.`] : []),
       ];
-      const narrative = [...analysisContext, ...(includeInterpretations ? [description] : []), ...insightItems];
       const schemaByLabel = new Map<string, { label: string; schema: unknown }>();
       for (const row of reportRows) {
         const className = String(row.class ?? row.category ?? 'Class');
@@ -564,11 +910,14 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
       }
       const assessmentOutcomeRows = [...assessmentOutcomes.values()];
       const assessmentRowsForOutput = concise
-        ? [...assessmentOutcomeRows].sort((left, right) => {
+        ? (() => {
+          const ranked = [...assessmentOutcomeRows].sort((left, right) => {
           const leftMean = left.mapped.length ? left.mapped.reduce((sum, item) => sum + item, 0) / left.mapped.length : Infinity;
           const rightMean = right.mapped.length ? right.mapped.reduce((sum, item) => sum + item, 0) / right.mapped.length : Infinity;
           return leftMean - rightMean;
-        }).slice(0, 8)
+          });
+          return ranked.length <= 8 ? ranked : [...ranked.slice(0, 4), ...ranked.slice(-4)];
+        })()
         : assessmentOutcomeRows;
       const schemaSummaryByClass = new Map<string, { grading: string[]; criteria: string[] }>();
       const describeSchema = (schema: unknown) => {
@@ -618,7 +967,7 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
       const standingValues = currentStandingField ? reportRows.map((row) => row[currentStandingField]).filter((item): item is number => typeof item === 'number' && Number.isFinite(item)) : [];
       const attendanceValues = attendanceField ? reportRows.map((row) => row[attendanceField]).filter((item): item is number => typeof item === 'number' && Number.isFinite(item)) : [];
       if (format === 'docx') {
-        const { AlignmentType, Document, HeadingLevel, Packer, Paragraph, Table, TableCell, TableRow, TextRun, WidthType } = await import('docx');
+        const { AlignmentType, Document, HeadingLevel, ImageRun, Packer, Paragraph, Table, TableCell, TableRow, TextRun, WidthType } = await import('docx');
         const makeDocxTable = (matrix: string[][]) => new Table({
           width: { size: 100, type: WidthType.PERCENTAGE },
           rows: matrix.map((row, rowIndex) => new TableRow({
@@ -631,43 +980,92 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
             })),
           })),
         });
-        const docxVisualizations: (Paragraph | Table)[] = activeVisualizations.flatMap((kind) => {
+        const makeFindingCard = (text: string) => new Table({
+          width: { size: 100, type: WidthType.PERCENTAGE },
+          rows: [new TableRow({ children: [new TableCell({
+            shading: { fill: 'F8F5F3' },
+            margins: { top: 110, bottom: 45, left: 150, right: 150 },
+            children: [new Paragraph({ children: findingSegments(text).map((segment) => new TextRun({ text: segment.text, bold: segment.bold, color: segment.bold ? accentColors[accent] : '263238' })) })],
+          })] })],
+        });
+        const docxVisualizationSections = activeVisualizations.map(async (kind) => {
           const items = chartData[kind] ?? [];
-          const heading = new Paragraph({ text: visualizationTitle(kind), heading: HeadingLevel.HEADING_1 });
+          const heading = new Paragraph({ text: kind === 'KPI summary' ? 'At a glance' : visualizationTitle(kind), heading: HeadingLevel.HEADING_2, spacing: { before: 180, after: 80 } });
           const explanation = includeInterpretations ? [new Paragraph({ text: visualizationDescription(kind) })] : [];
-          if (kind === 'KPI summary') return [heading, ...explanation, new Paragraph({ text: `Students / records ${reportRows.length} · Average current standing ${standingValues.length ? `${(standingValues.reduce((sum, item) => sum + item, 0) / standingValues.length).toFixed(1)}%` : '—'} · Flagged for follow-up ${criticalRows.length} · Average attendance ${attendanceValues.length ? `${(attendanceValues.reduce((sum, item) => sum + item, 0) / attendanceValues.length).toFixed(1)}%` : '—'}` })];
+          if (kind === 'KPI summary') return [heading, ...explanation, makeDocxTable([
+            ['Measure', 'Result'],
+            ['Students or records included', reportRows.length.toLocaleString()],
+            ['Average current standing', standingValues.length ? `${(standingValues.reduce((sum, item) => sum + item, 0) / standingValues.length).toFixed(1)}%` : 'Not available'],
+            ['Students flagged for follow-up', criticalRows.length.toLocaleString()],
+            ['Average recorded attendance', attendanceValues.length ? `${(attendanceValues.reduce((sum, item) => sum + item, 0) / attendanceValues.length).toFixed(1)}%` : 'Not available'],
+          ])];
           if (!items.length) {
             const message = kind === 'Missed assessment watchlist' ? 'No students with missing assessment results were found in this scope.' : kind === 'Attendance watchlist' ? 'No attendance values are available in this scope.' : 'No records are available for this visualization in the selected scope.';
             return [heading, ...explanation, new Paragraph({ text: message })];
           }
           const maximum = Math.max(1, ...items.map((item) => item.amount));
           const rowsForTable = kind === 'Assessment score range'
-            ? [['Date', 'Series', 'Lowest mapped %', 'Average mapped %', 'Highest mapped %', 'Scored students'], ...items.map((item) => [item.label, item.series ?? 'Overall', `${(item.minimum ?? item.amount).toFixed(1)}%`, `${item.amount.toFixed(1)}%`, `${(item.maximum ?? item.amount).toFixed(1)}%`, String(item.count)])]
+            ? (() => {
+              const header = ['Interval / assessment', 'Series', ...(showAssessmentMinMax ? ['Lowest mapped %'] : []), ...(showAssessmentIqr ? ['Q1 %'] : []), 'Median %', 'Average mapped %', ...(showAssessmentIqr ? ['Q3 %'] : []), ...(showAssessmentMinMax ? ['Highest mapped %'] : []), 'Scored students'];
+              const percent = (value: number | undefined) => value == null ? '—' : `${value.toFixed(1)}%`;
+              return [header, ...items.map((item) => [item.label, item.series ?? 'Overall', ...(showAssessmentMinMax ? [item.rangeSuppressed ? '—' : percent(item.minimum)] : []), ...(showAssessmentIqr ? [item.rangeSuppressed ? '—' : percent(item.lowerQuartile)] : []), percent(item.median), `${item.amount.toFixed(1)}%`, ...(showAssessmentIqr ? [item.rangeSuppressed ? '—' : percent(item.upperQuartile)] : []), ...(showAssessmentMinMax ? [item.rangeSuppressed ? '—' : percent(item.maximum)] : []), String(item.count)])];
+            })()
             : kind === 'Current standing by period'
               ? [['Grading period', 'Lowest standing %', 'Average standing %', 'Highest standing %', 'Students with results'], ...items.map((item) => [item.label, `${(item.minimum ?? item.amount).toFixed(1)}%`, `${item.amount.toFixed(1)}%`, `${(item.maximum ?? item.amount).toFixed(1)}%`, String(item.count)])]
             : kind === 'Score spread by group'
               ? [['Group', 'Students', 'Minimum', '25th percentile', 'Median', '75th percentile', 'Maximum'], ...items.map((item) => [item.label, String(item.count), item.minimum?.toFixed(1) ?? '—', item.lowerQuartile?.toFixed(1) ?? '—', item.median?.toFixed(1) ?? '—', item.upperQuartile?.toFixed(1) ?? '—', item.maximum?.toFixed(1) ?? '—'])]
+            : kind === 'Attendance by group'
+              ? [[labelize(groupBy || 'Group'), 'Students with attendance records', 'Average attendance'], ...items.map((item) => [item.label, String(item.count), `${item.amount.toFixed(1)}%`])]
+            : kind === 'Assessment performance by type' || kind === 'Assessment ranking'
+              ? [[kind === 'Assessment performance by type' ? 'Assessment type' : 'Assessment', 'Scored results', 'Average mapped %', 'Lowest mapped %', 'Highest mapped %'], ...items.map((item) => [item.label, String(item.count), `${item.amount.toFixed(1)}%`, `${(item.minimum ?? item.amount).toFixed(1)}%`, `${(item.maximum ?? item.amount).toFixed(1)}%`])]
             : [
             ['Category', 'Relative value', 'Count / value'],
             ...items.map((item) => {
               const bar = '█'.repeat(Math.max(1, Math.round(item.amount / maximum * 18)));
-              const valueLabel = kind === 'Donut chart' || kind === 'Risk distribution' ? `${item.count} (${reportRows.length ? Math.round(item.count * 100 / reportRows.length) : 0}%)` : kind === 'Pass rate comparison' ? `${item.amount.toFixed(1)}% (${item.count} classified)` : kind === 'Attendance watchlist' ? `${item.amount.toFixed(1)}%` : kind === 'Missed assessment watchlist' ? `${item.amount} missing` : kind === 'Score distribution' ? `${item.count} students` : item.amount.toFixed(1);
+              const valueLabel = kind === 'Donut chart' || kind === 'Risk distribution' ? `${item.count} (${reportRows.length ? Math.round(item.count * 100 / reportRows.length) : 0}%)` : kind === 'Pass rate comparison' ? `${item.amount.toFixed(1)}% (${item.count} classified)` : kind === 'Attendance watchlist' ? `${item.amount.toFixed(1)}%` : kind === 'Missed assessment watchlist' ? `${Math.round(item.amount).toLocaleString()} missing` : kind === 'Score distribution' ? `${item.count} students` : item.amount.toFixed(1);
               return [item.label, bar, valueLabel];
             }),
           ];
+          if (kind === 'Assessment score range' && separateAssessmentTrends && items.length) {
+            const overall = assessmentScoreSeries(reportRows, 'Overall', assessmentInterval).map((item) => ({ ...item, series: 'Overall' }));
+            const separatedItems = [...overall, ...items];
+            const seriesNames = [...new Set(separatedItems.map((item) => item.series ?? 'Overall'))];
+            const observed = separatedItems.flatMap((item) => [item.minimum ?? item.amount, item.maximum ?? item.amount, item.amount]);
+            const minimum = Math.min(...observed); const maximum = Math.max(...observed); const padding = Math.max(2, (maximum - minimum) * 0.12);
+            const domainMin = Math.floor(Math.max(0, minimum - padding) / 5) * 5; const domainMax = Math.max(domainMin + 5, Math.ceil(Math.min(100, maximum + padding) / 5) * 5);
+            const baseColor = accentColors[accent];
+            const colorsBySeries = [baseColor, '2E86AB', '539167', 'E6A23C', '8B73B5', 'D66B6B', '64748B'];
+            const chartWidth = layout === 'Landscape' ? 800 : 600;
+            const chartImages = await Promise.all(seriesNames.map(async (series, index) => {
+              const svg = assessmentTrendSvg(separatedItems, series, assessmentInterval, colorsBySeries[index % colorsBySeries.length], domainMin, domainMax, showAssessmentMinMax, showAssessmentIqr);
+              const chartHeight = assessmentInterval.startsWith('assessment instance') ? 360 : 300;
+              const transformation = { width: chartWidth, height: Math.round(chartHeight * chartWidth / 900) };
+              let chartImage;
+              if (Platform.OS === 'web') {
+                chartImage = new ImageRun({ data: await rasterizeChart(svg, 900, chartHeight), type: 'png', transformation });
+              } else {
+                chartImage = new ImageRun({ data: `data:image/svg+xml;base64,${toBase64(new TextEncoder().encode(svg))}`, type: 'svg', fallback: { data: 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+nm5kAAAAASUVORK5CYII=', type: 'png' }, transformation });
+              }
+              return [new Paragraph({ text: series, heading: HeadingLevel.HEADING_3, spacing: { before: 120, after: 60 } }), new Paragraph({ children: [chartImage], spacing: { after: 120 } })];
+            }));
+            return [heading, ...explanation, ...chartImages.flat()];
+          }
           return [heading, ...explanation, makeDocxTable(rowsForTable)];
         });
+        const docxVisualizations = (await Promise.all(docxVisualizationSections)).flat();
         const children: (Paragraph | Table)[] = [
           new Paragraph({ children: [new TextRun({ text: title || initialTitle, bold: true, size: 36, color: accentColors[accent] })], heading: HeadingLevel.TITLE, alignment: AlignmentType.LEFT }),
-          new Paragraph({ text: `${activeScopeLabel} · ${new Date().toLocaleDateString()} · ${template}`, style: 'Subtitle' }),
-          ...(narrative.length ? [new Paragraph({ text: template === 'Detailed analysis' ? 'Analysis and findings' : 'Overview', heading: HeadingLevel.HEADING_1 }), ...narrative.map((line) => new Paragraph({ text: line, bullet: { level: 0 } }))] : []),
-          ...docxVisualizations,
+          new Paragraph({ text: `${reportScopeName} · Prepared ${new Date().toLocaleDateString()}`, style: 'Subtitle' }),
+          new Paragraph({ text: 'Executive summary', heading: HeadingLevel.HEADING_1, spacing: { before: 180, after: 100 } }),
+          ...reportOverview.map((line) => new Paragraph({ text: line })),
+          ...(insightItems.length ? [new Paragraph({ text: 'Key findings', heading: HeadingLevel.HEADING_1, spacing: { before: 200, after: 100 } }), ...insightItems.flatMap((line) => [makeFindingCard(line), new Paragraph({ text: '', spacing: { after: 100 } })])] : []),
+          ...(docxVisualizations.length ? [new Paragraph({ text: 'Analysis and visualizations', heading: HeadingLevel.HEADING_1, spacing: { before: 220, after: 100 } }), ...docxVisualizations] : []),
           ...(includeGradingContext && schemaSummaryRows.length ? [new Paragraph({ text: 'Applied grading context', heading: HeadingLevel.HEADING_1 }), makeDocxTable([['Class context', 'Grading system / configuration', 'Evaluation criteria'], ...schemaSummaryRows])] : []),
           ...(includeGradingContext && includeFullSchemaDefinitions && appliedSchemas.length ? [new Paragraph({ text: 'Full grading schema definitions', heading: HeadingLevel.HEADING_1 }), ...appliedSchemas.flatMap(({ label, schema }) => [new Paragraph({ text: label, heading: HeadingLevel.HEADING_2 }), new Paragraph({ text: JSON.stringify(schema, null, 2) })])] : []),
-          ...(includeGradingContext && assessmentRowsForOutput.length ? [new Paragraph({ text: 'Assessment results by instance', heading: HeadingLevel.HEADING_1 }), ...(concise && assessmentOutcomeRows.length > assessmentRowsForOutput.length ? [new Paragraph({ text: `Showing ${assessmentRowsForOutput.length} assessment instances with the lowest mapped averages, from ${assessmentOutcomeRows.length} total.` })] : []), makeDocxTable([['Class', 'Assessment', 'Scored records', 'Mean raw score', 'Mean mapped %'], ...assessmentRowsForOutput.map((row) => [row.className, row.name, String(row.records), row.scores.length ? (row.scores.reduce((a, b) => a + b, 0) / row.scores.length).toFixed(1) : '—', row.mapped.length ? `${(row.mapped.reduce((a, b) => a + b, 0) / row.mapped.length).toFixed(1)}%` : '—'])])] : []),
-          ...(includeGradingContext && calculatedFieldsForOutput.length ? [new Paragraph({ text: 'Calculated grading fields', heading: HeadingLevel.HEADING_1 }), ...(concise && calculatedFieldRows.length > calculatedFieldsForOutput.length ? [new Paragraph({ text: `Showing key period and semester fields (${calculatedFieldsForOutput.length} of ${calculatedFieldRows.length}); turn off concise mode for all calculated fields.` })] : []), makeDocxTable([['Field', 'Level', 'Records', 'Mean'], ...calculatedFieldsForOutput.map((row) => [row.field, row.type, String(row.count), row.mean == null ? '—' : row.mean.toFixed(1)])])] : []),
-          ...(pivot.length ? [new Paragraph({ text: `${labelize(groupBy)} × ${labelize(pivotBy)} pivot`, heading: HeadingLevel.HEADING_1 }), new Paragraph({ text: pivot.map((row) => `${row.label}: ${Object.entries(row.values).map(([key, amount]) => `${key} ${Number(amount).toFixed(1)}`).join(', ')}`).join('\n') })] : []),
-          ...(tableData.length ? [new Paragraph({ text: rawTable ? 'Full data table' : 'Summary table', heading: HeadingLevel.HEADING_1 }), makeDocxTable(tableData)] : []),
+          ...(includeGradingContext && assessmentRowsForOutput.length ? [new Paragraph({ text: 'Assessment results by instance', heading: HeadingLevel.HEADING_1 }), ...(concise && assessmentOutcomeRows.length > assessmentRowsForOutput.length ? [new Paragraph({ text: `Showing the four lowest and four highest assessment averages (${assessmentRowsForOutput.length} of ${assessmentOutcomeRows.length} total).` })] : []), makeDocxTable([['Class', 'Assessment', 'Scored records', 'Mean raw score', 'Mean mapped %'], ...assessmentRowsForOutput.map((row) => [row.className, row.name, String(row.records), row.scores.length ? (row.scores.reduce((a, b) => a + b, 0) / row.scores.length).toFixed(1) : '—', row.mapped.length ? `${(row.mapped.reduce((a, b) => a + b, 0) / row.mapped.length).toFixed(1)}%` : '—'])])] : []),
+          ...(includeGradingContext && calculatedFieldsForOutput.length ? [new Paragraph({ text: 'Calculated grading components', heading: HeadingLevel.HEADING_1 }), ...(concise && calculatedFieldRows.length > calculatedFieldsForOutput.length ? [new Paragraph({ text: `Showing key period and semester components (${calculatedFieldsForOutput.length} of ${calculatedFieldRows.length})` })] : []), makeDocxTable([['Field', 'Level', 'Records', 'Mean'], ...calculatedFieldsForOutput.map((row) => [row.field, row.type, String(row.count), row.mean == null ? '—' : row.mean.toFixed(1)])])] : []),
+          ...(pivot.length && !includeSummaryTable && !compareSelected ? [new Paragraph({ text: `${labelize(groupBy)} × ${labelize(pivotBy)} pivot`, heading: HeadingLevel.HEADING_1 }), new Paragraph({ text: pivot.map((row) => `${row.label}: ${Object.entries(row.values).map(([key, amount]) => `${key} ${Number(amount).toFixed(1)}`).join(', ')}`).join('\n') })] : []),
+          ...(tableData.length ? [new Paragraph({ text: rawTable ? 'Full data table' : compareSelected ? 'Group comparison by available measures' : 'Summary table', heading: HeadingLevel.HEADING_1 }), makeDocxTable(tableData)] : []),
         ];
         const blob = await Packer.toBlob(new Document({ sections: [{ properties: { page: { size: layout === 'Landscape' ? { orientation: 'landscape' } : undefined } }, children }] }));
         await download(blob, `${filename(title)}.docx`);
@@ -676,19 +1074,56 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
         const pdf = new jsPDF({ orientation: layout.toLowerCase() as 'portrait' | 'landscape' }); const pageWidth = pdf.internal.pageSize.getWidth(); const pageHeight = pdf.internal.pageSize.getHeight();
         const hex = accentColors[accent]; pdf.setTextColor(parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)); pdf.setFontSize(20);
         const titleLines = pdf.splitTextToSize(title || initialTitle, pageWidth - 28); pdf.text(titleLines, 14, 20); pdf.setTextColor(30, 41, 59);
-        pdf.setFontSize(9); const metadata = pdf.splitTextToSize(`${activeScopeLabel} · ${new Date().toLocaleDateString()} · ${template}`, pageWidth - 28); const metadataY = 22 + titleLines.length * 8; pdf.text(metadata, 14, metadataY);
+        pdf.setFontSize(9); const metadata = pdf.splitTextToSize(`${reportScopeName} · Prepared ${new Date().toLocaleDateString()}`, pageWidth - 28); const metadataY = 22 + titleLines.length * 8; pdf.text(metadata, 14, metadataY);
         let y = metadataY + metadata.length * 4 + 2;
         const ensureSpace = (height: number) => { if (y + height > pageHeight - 14) { pdf.addPage(); y = 18; } };
-        const narrative = includeInterpretations ? [description, ...insightItems] : insightItems;
-        for (const line of narrative) { const wrapped = pdf.splitTextToSize(line, pageWidth - 28); const linesPerPage = Math.max(1, Math.floor((pageHeight - 36) / 5)); for (let start = 0; start < wrapped.length; start += linesPerPage) { const chunk = wrapped.slice(start, start + linesPerPage); const blockHeight = chunk.length * 5 + 2; ensureSpace(blockHeight); pdf.text(chunk, 14, y); y += blockHeight; } }
-        if (pivot.length) { ensureSpace(14); pdf.setFontSize(12); pdf.text(`${labelize(groupBy)} × ${labelize(pivotBy)} pivot`, 14, y); y += 8; pdf.setFontSize(8); for (const row of pivot) { ensureSpace(6); pdf.text(`${row.label}: ${Object.entries(row.values).map(([key, amount]) => `${key} ${Number(amount).toFixed(1)}`).join(' | ')}`.slice(0, 180), 14, y); y += 5; } }
+        const writeSectionHeading = (label: string) => { y += 4; ensureSpace(15); pdf.setFontSize(12); pdf.setTextColor(parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)); pdf.text(label, 14, y); y += 8; pdf.setTextColor(30, 41, 59); };
+        const writeParagraph = (line: string, bullet = false) => { const wrapped = pdf.splitTextToSize(`${bullet ? '• ' : ''}${line}`, pageWidth - 28); const linesPerPage = Math.max(1, Math.floor((pageHeight - 36) / 5)); for (let start = 0; start < wrapped.length; start += linesPerPage) { const chunk = wrapped.slice(start, start + linesPerPage); const blockHeight = chunk.length * 5 + 2; ensureSpace(blockHeight); pdf.setFontSize(9); pdf.text(chunk, 14, y); y += blockHeight; } };
+        const writeFindingCard = (text: string) => {
+          const lineWidth = pageWidth - 42;
+          const lines: { text: string; bold: boolean; x: number }[][] = [[]];
+          let used = 0;
+          pdf.setFontSize(9);
+          for (const segment of findingSegments(text)) {
+            pdf.setFont('helvetica', segment.bold ? 'bold' : 'normal');
+            const tokens = segment.text.match(/\s+|\S+/g) ?? [segment.text];
+            for (const token of tokens) {
+              if (/^\s+$/.test(token)) {
+                if (used > 0) used += pdf.getTextWidth(' ') * token.length;
+                continue;
+              }
+              let width = pdf.getTextWidth(token);
+              if (used > 0 && used + width > lineWidth) { lines.push([]); used = 0; }
+              lines[lines.length - 1].push({ text: token, bold: segment.bold, x: used });
+              used += width;
+            }
+          }
+          const cardHeight = lines.length * 5 + 5;
+          ensureSpace(cardHeight + 3);
+          const cardY = y - 3;
+          pdf.setFillColor(249, 247, 245); pdf.roundedRect(14, cardY, pageWidth - 28, cardHeight, 1.5, 1.5, 'F');
+          pdf.setFillColor(parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)); pdf.rect(14, cardY, 1.5, cardHeight, 'F');
+          lines.forEach((line, lineIndex) => {
+            for (const part of line) {
+              pdf.setFont('helvetica', part.bold ? 'bold' : 'normal'); pdf.setFontSize(9); pdf.setTextColor(38, 50, 56);
+              pdf.text(part.text, 19 + part.x, cardY + 5 + lineIndex * 5);
+            }
+          });
+          y = cardY + cardHeight + 7;
+          pdf.setTextColor(30, 41, 59); pdf.setFont('helvetica', 'normal');
+        };
+        writeSectionHeading('Executive summary');
+        for (const line of reportOverview) writeParagraph(line);
+        if (insightItems.length) { writeSectionHeading('Key findings'); for (const line of insightItems) writeFindingCard(line); }
+        if (activeVisualizations.length) writeSectionHeading('Analysis and visualizations');
+        if (pivot.length && !includeSummaryTable && !compareSelected) { writeSectionHeading(`${labelize(groupBy)} × ${labelize(pivotBy)} breakdown`); pdf.setFontSize(8); for (const row of pivot) { ensureSpace(6); pdf.text(`${row.label}: ${Object.entries(row.values).map(([key, amount]) => `${key} ${Number(amount).toFixed(1)}`).join(' | ')}`.slice(0, 180), 14, y); y += 5; } }
         for (const visualization of activeVisualizations) {
           const chartGroups = chartData[visualization] ?? [];
           const maxChartValue = Math.max(1, ...chartGroups.map((item) => item.amount));
           const explanationLines = includeInterpretations ? pdf.splitTextToSize(visualizationDescription(visualization), pageWidth - 28).length : 0;
-          const visualHeight = (chartGroups.length === 0 ? 20 : visualization === 'Donut chart' || visualization === 'Risk distribution' ? 96 + chartGroups.length * 7 : visualization === 'KPI summary' ? 42 : visualization === 'Assessment score range' ? 111 + new Set(chartGroups.map((item) => item.series ?? 'Overall')).size * 4 : visualization === 'Current standing by period' || visualization === 'Score distribution' ? 88 : visualization === 'Score spread by group' ? 34 + chartGroups.length * 14 : 18 + chartGroups.length * 14) + explanationLines * 4 + 12;
+          const visualHeight = (chartGroups.length === 0 ? 20 : visualization === 'Donut chart' || visualization === 'Risk distribution' ? 96 + chartGroups.length * 7 : visualization === 'KPI summary' ? 42 : visualization === 'Assessment score range' ? (assessmentInterval.startsWith('assessment instance') ? 155 : 111) + new Set(chartGroups.map((item) => item.series ?? 'Overall')).size * 4 : visualization === 'Current standing by period' || visualization === 'Score distribution' ? 88 : visualization === 'Score spread by group' ? 34 + chartGroups.length * 14 : 18 + chartGroups.length * 14) + explanationLines * 4 + 12;
           const minimumSpace = visualHeight;
-          ensureSpace(minimumSpace); y += 4; pdf.setFontSize(14); pdf.text(visualizationTitle(visualization), 14, y); y += 7;
+          ensureSpace(minimumSpace); y += 4; pdf.setFontSize(14); pdf.text(visualization === 'KPI summary' ? 'At a glance' : visualizationTitle(visualization), 14, y); y += 7;
           if (includeInterpretations) { pdf.setFontSize(8); pdf.setTextColor(71, 85, 105); const explanation = pdf.splitTextToSize(visualizationDescription(visualization), pageWidth - 28); pdf.text(explanation, 14, y); y += explanation.length * 4 + 2; pdf.setTextColor(30, 41, 59); }
           if (!chartGroups.length && visualization !== 'KPI summary') {
             const message = visualization === 'Missed assessment watchlist' ? 'No students with missing assessment results were found in this scope.' : visualization === 'Attendance watchlist' ? 'No attendance values are available in this scope.' : 'No records are available for this visualization in the selected scope.';
@@ -734,8 +1169,20 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
             });
             y += 34;
           } else if ((visualization === 'Assessment score range' || visualization === 'Current standing by period') && chartGroups.length) {
+            const separateSeries = visualization === 'Assessment score range' && separateAssessmentTrends
+              ? [...new Set(chartGroups.map((item) => item.series ?? 'Overall'))]
+              : [];
+            if (separateSeries.length > 0) {
+              const overall = assessmentScoreSeries(reportRows, 'Overall', assessmentInterval).map((item) => ({ ...item, series: 'Overall' }));
+              const separatedItems = [...overall, ...chartGroups];
+              y = renderAssessmentSeriesPanels({ pdf, items: separatedItems, seriesNames: ['Overall', ...separateSeries], pageWidth, pageHeight, startY: y, interval: assessmentInterval, showMinMax: showAssessmentMinMax, showIqr: showAssessmentIqr });
+            } else {
             const left = 28; const right = pageWidth - 14; const top = y + 8; const bottom = y + 56; const plotHeight = bottom - top; const plotWidth = right - left;
-            const dates = [...new Set(chartGroups.map((item) => item.dateKey ?? item.label))].sort((a, b) => a.localeCompare(b));
+            const dates = [...new Set(chartGroups.map((item) => item.dateKey ?? item.label))].sort((a, b) => {
+              const aOrder = chartGroups.find((item) => (item.dateKey ?? item.label) === a)?.sortKey ?? a;
+              const bOrder = chartGroups.find((item) => (item.dateKey ?? item.label) === b)?.sortKey ?? b;
+              return aOrder.localeCompare(bOrder, undefined, { numeric: true, sensitivity: 'base' }) || a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' });
+            });
             const seriesNames = [...new Set(chartGroups.map((item) => item.series ?? 'Overall'))];
             const palette: [number, number, number][] = [rgb as [number, number, number], [46, 134, 171], [83, 145, 103], [230, 162, 60], [139, 115, 181], [214, 107, 107], [100, 116, 139]];
             const observed = chartGroups.flatMap((item) => [item.minimum ?? item.amount, item.maximum ?? item.amount, item.amount]);
@@ -745,18 +1192,35 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
             const pointY = (score: number) => bottom - plotHeight * (score - domainMin) / (domainMax - domainMin);
             for (let tick = 0; tick <= 4; tick++) { const score = domainMin + (domainMax - domainMin) * tick / 4; const tickY = pointY(score); pdf.setDrawColor(229, 234, 239); pdf.line(left, tickY, right, tickY); pdf.setFontSize(6); pdf.setTextColor(100, 116, 139); pdf.text(`${score.toFixed(0)}%`, left - 2, tickY + 2, { align: 'right' }); }
             seriesNames.forEach((series, seriesIndex) => {
-              const color = palette[seriesIndex % palette.length]; const seriesPoints = chartGroups.filter((item) => (item.series ?? 'Overall') === series).sort((a, b) => (a.dateKey ?? a.label).localeCompare(b.dateKey ?? b.label));
+              const color = palette[seriesIndex % palette.length]; const seriesPoints = chartGroups.filter((item) => (item.series ?? 'Overall') === series).sort((a, b) => (a.sortKey ?? a.dateKey ?? a.label).localeCompare(b.sortKey ?? b.dateKey ?? b.label, undefined, { numeric: true, sensitivity: 'base' }) || (a.dateKey ?? a.label).localeCompare(b.dateKey ?? b.label, undefined, { numeric: true, sensitivity: 'base' }));
               seriesPoints.forEach((item, index) => {
                 const x = pointX(dates.indexOf(item.dateKey ?? item.label)); const averageY = pointY(item.amount); const lowY = pointY(item.minimum ?? item.amount); const highY = pointY(item.maximum ?? item.amount);
-                pdf.setDrawColor(color[0], color[1], color[2]); pdf.line(x, highY, x, lowY); pdf.line(x - 1.2, highY, x + 1.2, highY); pdf.line(x - 1.2, lowY, x + 1.2, lowY);
+                pdf.setDrawColor(color[0], color[1], color[2]);
+                const suppressRange = visualization === 'Assessment score range' && item.rangeSuppressed === true;
+                if (!suppressRange && (visualization !== 'Assessment score range' || showAssessmentMinMax)) { pdf.line(x, highY, x, lowY); pdf.line(x - 1.2, highY, x + 1.2, highY); pdf.line(x - 1.2, lowY, x + 1.2, lowY); }
+                if (showAssessmentIqr && visualization === 'Assessment score range' && !suppressRange) {
+                  const q1Y = pointY(item.lowerQuartile ?? item.amount); const medianY = pointY(item.median ?? item.amount); const q3Y = pointY(item.upperQuartile ?? item.amount);
+                  const boxWidth = Math.max(2.4, Math.min(4, plotWidth / Math.max(1, dates.length) * 0.55));
+                  const lightColor = color.map((channel) => Math.round(channel * 0.28 + 255 * 0.72));
+                  pdf.setFillColor(lightColor[0], lightColor[1], lightColor[2]); pdf.setDrawColor(color[0], color[1], color[2]);
+                  pdf.rect(x - boxWidth / 2, q3Y, boxWidth, Math.max(0.8, q1Y - q3Y), 'FD');
+                  pdf.setDrawColor(color[0], color[1], color[2]); pdf.line(x - boxWidth / 2, medianY, x + boxWidth / 2, medianY);
+                }
+                if (suppressRange) { const medianY = pointY(item.median ?? item.amount); pdf.setDrawColor(color[0], color[1], color[2]); pdf.line(x - 1.8, medianY, x + 1.8, medianY); }
                 if (index) { const previous = seriesPoints[index - 1]; pdf.line(pointX(dates.indexOf(previous.dateKey ?? previous.label)), pointY(previous.amount), x, averageY); }
-                pdf.setFillColor(color[0], color[1], color[2]); pdf.circle(x, averageY, 1.5, 'F');
+                pdf.setFillColor(color[0], color[1], color[2]); pdf.circle(x, averageY, 1, 'F');
               });
             });
-            dates.forEach((dateKey, index) => { if (dates.length <= 8 || index % 2 === 0) { const label = visualization === 'Current standing by period' ? chartGroups.find((item) => item.dateKey === dateKey)?.label ?? dateKey : new Date(`${dateKey}T00:00:00`).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }); pdf.setFontSize(6); pdf.setTextColor(71, 85, 105); pdf.text(label.slice(0, 18), pointX(index), bottom + 5, { align: 'center', maxWidth: Math.max(16, plotWidth / Math.min(dates.length, 6)) }); } });
-            let legendX = left; let legendY = bottom + 13; pdf.setFontSize(6);
+            const instanceAxis = visualization === 'Assessment score range' && assessmentInterval.startsWith('assessment instance');
+            const labelStep = Math.max(1, Math.ceil(dates.length / 8));
+            let instanceLabelLines = 0;
+            dates.forEach((dateKey, index) => { if (instanceAxis || index % labelStep === 0 || index === dates.length - 1) { const point = chartGroups.find((item) => item.dateKey === dateKey); const rawLabel = visualization === 'Current standing by period' ? point?.label ?? dateKey : point?.dateLabel ?? new Date(`${dateKey.slice(0, 10)}T00:00:00Z`).toLocaleDateString(undefined, { month: 'short', day: 'numeric', timeZone: 'UTC' }); pdf.setTextColor(71, 85, 105); if (instanceAxis) { const fontSize = Math.max(4, Math.min(5.5, 70 / dates.length)); const slotWidth = Math.max(4, plotWidth / dates.length - 1); pdf.setFontSize(fontSize); const lines = pdf.splitTextToSize(rawLabel, slotWidth); instanceLabelLines = Math.max(instanceLabelLines, lines.length); pdf.text(lines, pointX(index), bottom + 5, { align: 'center', maxWidth: slotWidth }); } else { const label = rawLabel.length > 18 ? `${rawLabel.slice(0, 17)}…` : rawLabel; const visibleLabels = Math.ceil(dates.length / labelStep); pdf.setFontSize(6); pdf.text(label, pointX(index), bottom + 5, { align: 'center', maxWidth: Math.max(16, plotWidth / visibleLabels - 2) }); } } });
+            let legendX = left; let legendY = instanceAxis ? bottom + 8 + instanceLabelLines * 2 : bottom + 13; pdf.setFontSize(6);
             seriesNames.forEach((series, index) => { const color = palette[index % palette.length]; pdf.setFillColor(color[0], color[1], color[2]); pdf.circle(legendX + 1, legendY - 1, 1.2, 'F'); pdf.setTextColor(71, 85, 105); pdf.text(series.slice(0, 28), legendX + 4, legendY, { maxWidth: 54 }); legendX += 58; if (legendX > right - 45) { legendX = left; legendY += 4; } });
-            pdf.setTextColor(100, 116, 139); pdf.text(`Whiskers: min–max · Data scale ${domainMin}–${domainMax}%`, left, legendY + 4); y = legendY + 10;
+            const binaryNote = visualization === 'Assessment score range' && chartGroups.some((item) => item.rangeSuppressed) ? 'Binary assessments show median only' : '';
+            const statNote = [binaryNote].filter(Boolean).join(' · ');
+            pdf.setTextColor(100, 116, 139); pdf.text(`${statNote ? `${statNote} · ` : ''}Data scale ${domainMin}–${domainMax}%`, left, legendY + 4); y = legendY + 10;
+            }
           } else if (visualization === 'Score distribution' && chartGroups.length) {
             const left = 28; const right = pageWidth - 14; const top = y + 6; const bottom = y + 58; const plotWidth = right - left; const plotHeight = bottom - top;
             const maxCount = Math.max(1, ...chartGroups.map((item) => item.count));
@@ -784,12 +1248,13 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
           } else for (const item of chartGroups) {
             ensureSpace(10);
             pdf.setTextColor(30, 41, 59); pdf.setFontSize(9);
-            const valueLabel = `${item.label}: ${item.amount.toFixed(1)}${visualization === 'Attendance watchlist' || visualization === 'Pass rate comparison' ? '%' : ''}${visualization === 'Pass rate comparison' ? ` (${item.count} classified)` : ''}`;
-            const labelLines = pdf.splitTextToSize(valueLabel, 82); pdf.text(labelLines, 14, y);
+            const valueLabel = visualization === 'Missed assessment watchlist' ? `${Math.round(item.amount).toLocaleString()} missing` : `${item.amount.toFixed(1)}${visualization === 'Attendance watchlist' || visualization === 'Attendance by group' || visualization === 'Pass rate comparison' || visualization === 'Assessment performance by type' || visualization === 'Assessment ranking' ? '%' : ''}${visualization === 'Pass rate comparison' ? ` · ${item.count} classified` : visualization === 'Attendance by group' ? ` · ${item.count} recorded` : visualization === 'Assessment performance by type' || visualization === 'Assessment ranking' ? ` · ${item.count} scored` : ''}`;
+            const categoryLabel = visualization === 'Trend line' ? `${item.label}: ${valueLabel}` : item.label;
+            const labelLines = pdf.splitTextToSize(categoryLabel, 82); pdf.text(labelLines, 14, y);
             const barY = y + Math.max(0, labelLines.length - 1) * 4;
-            const width = Math.max(2, 90 * item.amount / maxChartValue); pdf.setFillColor(rgb[0], rgb[1], rgb[2]);
+            const barStart = 100; const valueColumnWidth = 34; const maxBarWidth = Math.max(18, pageWidth - barStart - valueColumnWidth - 18); const width = Math.max(2, maxBarWidth * item.amount / maxChartValue); pdf.setFillColor(rgb[0], rgb[1], rgb[2]);
             if (visualization === 'Trend line' && chartGroups.length > 1) { const index = chartGroups.indexOf(item); const graphStart = 100; const graphWidth = Math.max(20, pageWidth - graphStart - 14); const graphX = (pointIndex: number) => graphStart + pointIndex * graphWidth / (chartGroups.length - 1); if (index > 0) { const previous = chartGroups[index - 1]; pdf.line(graphX(index - 1), barY - 2 - 20 * previous.amount / maxChartValue, graphX(index), barY - 2 - 20 * item.amount / maxChartValue); } pdf.circle(graphX(index), barY - 2 - 20 * item.amount / maxChartValue, 1.5, 'F'); }
-            else pdf.rect(100, barY - 4, Math.max(2, Math.min(pageWidth - 114, width)), 4, 'F');
+            else { pdf.rect(barStart, barY - 4, Math.max(2, Math.min(maxBarWidth, width)), 4, 'F'); pdf.setTextColor(51, 65, 85); pdf.setFontSize(8); pdf.text(valueLabel, barStart + Math.min(maxBarWidth, width) + 3, barY, { maxWidth: valueColumnWidth }); }
             y += Math.max(9, labelLines.length * 4 + 3);
           }
         }
@@ -804,17 +1269,17 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
         }
         if (includeGradingContext && assessmentRowsForOutput.length) {
           ensureSpace(20); pdf.setFontSize(12); pdf.text('Assessment results by instance', 14, y); y += 5;
-          if (concise && assessmentOutcomeRows.length > assessmentRowsForOutput.length) { pdf.setFontSize(8); pdf.text(`Showing ${assessmentRowsForOutput.length} instances with the lowest mapped averages, from ${assessmentOutcomeRows.length} total.`, 14, y); y += 5; }
+          if (concise && assessmentOutcomeRows.length > assessmentRowsForOutput.length) { pdf.setFontSize(8); pdf.text(`Showing four lowest and four highest mapped averages (${assessmentRowsForOutput.length} of ${assessmentOutcomeRows.length} instances).`, 14, y); y += 5; }
           autoTable(pdf, { startY: y, head: [['Class', 'Assessment', 'Scored', 'Mean raw', 'Mean mapped %']], body: assessmentRowsForOutput.map((row) => [row.className, row.name, String(row.records), row.scores.length ? (row.scores.reduce((a, b) => a + b, 0) / row.scores.length).toFixed(1) : '—', row.mapped.length ? `${(row.mapped.reduce((a, b) => a + b, 0) / row.mapped.length).toFixed(1)}%` : '—']), styles: { fontSize: 7, cellPadding: 2 }, margin: { left: 14, right: 14 } });
           y = (pdf as any).lastAutoTable.finalY + 5;
         }
         if (includeGradingContext && calculatedFieldsForOutput.length) {
-          ensureSpace(18); pdf.setFontSize(12); pdf.text('Calculated grading fields', 14, y); y += 5;
-          if (concise && calculatedFieldRows.length > calculatedFieldsForOutput.length) { pdf.setFontSize(8); pdf.text(`Showing key period and semester fields (${calculatedFieldsForOutput.length} of ${calculatedFieldRows.length}); turn off concise mode for all fields.`, 14, y); y += 5; }
+          ensureSpace(18); pdf.setFontSize(12); pdf.text('Calculated grading components', 14, y); y += 5;
+          if (concise && calculatedFieldRows.length > calculatedFieldsForOutput.length) { pdf.setFontSize(8); pdf.text(`Showing key period and semester components (${calculatedFieldsForOutput.length} of ${calculatedFieldRows.length})`, 14, y); y += 5; }
           autoTable(pdf, { startY: y, head: [['Field', 'Level', 'Records', 'Mean']], body: calculatedFieldsForOutput.map((row) => [row.field, row.type, String(row.count), row.mean == null ? '—' : row.mean.toFixed(1)]), styles: { fontSize: 7, cellPadding: 2 }, margin: { left: 14, right: 14 } });
           y = (pdf as any).lastAutoTable.finalY + 5;
         }
-        if (tableData.length) { ensureSpace(16); pdf.setFontSize(14); pdf.text(rawTable ? 'Full data table' : 'Summary table', 14, y); autoTable(pdf, { head: [tableData[0]], body: tableData.slice(1), startY: y + 6, styles: { fontSize: rawTable ? 7 : 8 }, headStyles: { fillColor: [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)] }, theme: template === 'Executive summary' ? 'striped' : 'grid' }); }
+        if (tableData.length) { ensureSpace(16); pdf.setFontSize(14); pdf.text(rawTable ? 'Full data table' : compareSelected ? 'Group comparison by available measures' : 'Summary table', 14, y); autoTable(pdf, { head: [tableData[0]], body: tableData.slice(1), startY: y + 6, styles: { fontSize: rawTable ? 7 : 8 }, headStyles: { fillColor: [parseInt(hex.slice(0, 2), 16), parseInt(hex.slice(2, 4), 16), parseInt(hex.slice(4, 6), 16)] }, theme: template === 'Executive summary' ? 'striped' : 'grid' }); }
         const totalPages = pdf.getNumberOfPages();
         for (let page = 1; page <= totalPages; page += 1) {
           pdf.setPage(page); pdf.setDrawColor(220, 226, 232); pdf.line(14, pageHeight - 12, pageWidth - 14, pageHeight - 12);
@@ -842,23 +1307,25 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
   return <View style={styles.container}>
       <Card style={styles.card}>
       <Text accessibilityRole="header" style={styles.heading}>Report builder</Text>
-      <Text style={styles.copy}>Create a formatted report from {activeScopeLabel.toUpperCase()} data. Select several questions to combine useful insights in one report. Only the Data table template includes every matching record.</Text>
+      <Text style={styles.copy}>Create a formatted report from {activeScopeLabel.toUpperCase()} data. Select several questions to combine useful insights. Exports are organized into an overview, key findings, visual analysis, and supporting detail. Only the Data table template includes every matching record.</Text>
       <Text style={styles.label}>Report title</Text><TextInput accessibilityLabel="Report title" value={title} onChangeText={setTitle} style={styles.input} />
-      <Text style={styles.sectionHeading}>Report format</Text>
+      <Text style={styles.sectionHeading}>1. Set up the report</Text>
       <View style={styles.options}>
         {scopeOptions.length ? <Option label="Report scope" value={reportScope} options={['current', ...scopeOptions.map((option) => option.value)]} displayOptions={['This class', ...scopeOptions.map((option) => option.label)]} onChange={(next) => { void chooseReportScope(next); }} /> : null}
         <Option label="Template" value={template} options={['Executive summary', 'Detailed analysis', 'Data table']} onChange={(next) => setTemplate(next as ReportTemplate)} />
         <Option label="Page size" value={layout} options={['Portrait', 'Landscape']} displayOptions={['Standard page', 'Wide page']} onChange={(next) => setLayout(next as typeof layout)} />
         <Option label="Accent style" value={accent} options={Object.keys(accentColors)} onChange={setAccent} />
       </View>
-      <Text style={styles.sectionHeading}>What should this report cover?</Text>
+      <Text style={styles.sectionHeading}>2. Choose what to analyze</Text>
       <Text style={styles.copy}>Choose any combination. Templates control report structure; these choices control the analysis and can add several matching visuals.</Text>
       <View style={styles.options}>
         <MultiOption label="Analysis questions" values={activeQuestions} options={questionOptions} onChange={(next) => { setQuestions(next); setDrilldownValue(''); }} />
-        {activeQuestions.includes('Assessment scores over time') && assessmentBreakdownOptions.length > 1 ? <Option label="Assessment trend grouped by" value={assessmentBreakdown} options={assessmentBreakdownOptions} onChange={(next) => setAssessmentBreakdown(next as AssessmentBreakdown)} /> : null}
+        {activeQuestions.includes('Assessment scores over time') ? <Option label="Assessment time interval" value={assessmentInterval} options={['day', 'week', 'group', 'assessment instance (logical order)', 'assessment instance (chronological order)']} displayOptions={['Day', 'Week', 'Grading group', 'Assessment instance (logical order)', 'Assessment instance (chronological order)']} onChange={(next) => setAssessmentInterval(next as AssessmentInterval)} /> : null}
+        {activeQuestions.includes('Assessment scores over time') && assessmentBreakdownOptions.length > 1 ? <Option label="Assessment trend grouped by" value={assessmentBreakdown} options={assessmentBreakdownOptions} displayOptions={assessmentBreakdownOptions.map((option) => option.startsWith('By:') ? `By ${labelize(option.slice(3))}` : option)} onChange={(next) => setAssessmentBreakdown(next as AssessmentBreakdown)} /> : null}
+        {activeQuestions.includes('Assessment scores over time') && assessmentBreakdown !== 'Overall' ? <Toggle label={`Separate one graph per ${assessmentBreakdownLabel}`} value={separateAssessmentTrends} onChange={setSeparateAssessmentTrends} /> : null}
       </View>
-      <Text style={styles.sectionHeading}>Refine the results</Text>
-      <Text style={styles.copy}>Filters combine together. Available dimensions reflect the records in this report scope; choose an all-classes scope to compare classes.</Text>
+      <Text style={styles.sectionHeading}>3. Filter and compare</Text>
+      <Text style={styles.copy}>Filters combine together. Available dimensions come from this report’s data. Compare by program, year level, subject, section, or class when available; add a second breakdown or use filters to narrow further.</Text>
       <View style={styles.options}>
         {reportFilters.map((filter, index) => <View key={`filter-${index}`} style={styles.filterRow}>
           <Option label="Filter field" value={filter.field} options={['', ...filterOptionsByIndex[index].fields]} emptyLabel="Choose a field" searchable onChange={(next) => { setReportFilters((current) => current.map((item, itemIndex) => itemIndex === index ? { field: next, value: '' } : item)); setDrilldownValue(''); }} />
@@ -879,14 +1346,17 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
         {showAdvancedBreakdown && pivotBy ? <Text style={styles.copy}>The pivot keeps the 12 largest groups and 12 most common categories so the report stays readable.</Text> : null}
       </View> : null}
       {compareSelected && groupBy ? <View style={styles.options}><Option label="Order groups by" value={groupSort} options={['highest average', 'lowest average', 'most students', 'name']} onChange={(next) => setGroupSort(next as typeof groupSort)} /></View> : null}
+      {compareSelected ? <Text style={styles.copy}>When included, the comparison table reports each available measure: student count, average and median standing, attendance, submission rate, passing count, and at-risk count.</Text> : null}
       {thresholdActive ? <Text style={styles.copy}>Only groups whose average current standing is {thresholdMode === 'below' ? 'below' : 'at or above'} {thresholdNumber}% are included. Students with no recorded standing are excluded from each class average.</Text> : null}
       {loadingScope ? <Text style={styles.copy}>Loading {activeScopeLabel.toLowerCase()}…</Text> : null}
       {scopeError ? <Text accessibilityRole="alert" style={styles.error}>{scopeError}</Text> : null}
-      <Text style={styles.sectionHeading}>Included content</Text>
+      <Text style={styles.sectionHeading}>4. Choose report content</Text>
       <View style={styles.toggles}>
-        {!rawTable ? <Toggle label="Include grouped summary table" value={includeSummaryTable} onChange={setIncludeSummaryTable} /> : <Text style={styles.dumpNote}>Data table template includes all {reportRows.length.toLocaleString()} matching records.</Text>}
+        {!rawTable ? compareSelected ? <Text style={styles.copy}>The multi-measure comparison table is included for this analysis.</Text> : <Toggle label="Include grouped summary table" value={includeSummaryTable} onChange={setIncludeSummaryTable} /> : <Text style={styles.dumpNote}>Data table template includes all {reportRows.length.toLocaleString()} matching records.</Text>}
         <Toggle label="Include grading summary and assessment results" value={includeGradingContext} onChange={setIncludeGradingContext} />
         {includeGradingContext ? <Toggle label="Include full schema definitions (technical appendix)" value={includeFullSchemaDefinitions} onChange={setIncludeFullSchemaDefinitions} /> : null}
+        {activeQuestions.includes('Assessment scores over time') ? <Toggle label="Show minimum and maximum score range" value={showAssessmentMinMax} onChange={setShowAssessmentMinMax} /> : null}
+        {activeQuestions.includes('Assessment scores over time') ? <Toggle label="Show interquartile range box (middle 50% of scores)" value={showAssessmentIqr} onChange={setShowAssessmentIqr} /> : null}
         <Toggle label="Identify key information and insights" value={autoInsights} onChange={setAutoInsights} />
         <Toggle label="Add descriptions and interpretations" value={includeInterpretations} onChange={setIncludeInterpretations} />
         <Toggle label="Keep it concise" value={concise} onChange={setConcise} />
@@ -905,12 +1375,12 @@ export function ReportComposer({ title: initialTitle, rows: initialRows, scopeLa
       {!previewRequested ? <><Text style={styles.copy}>Generate the PDF preview when you’re ready. It will update when report settings change.</Text><Button label="Generate PDF preview" onPress={() => setPreviewRequested(true)} /></> : pdfUrl ? <ReportPdfPreview uri={pdfUrl} style={styles.pdfFrame} /> : <Text style={styles.copy}>Preparing PDF preview…</Text>}
     </Card>
 
-    <Card style={styles.sourceDataCard}>
+    {/* <Card style={styles.sourceDataCard}>
       <Text style={styles.heading}>Source data used (temporary)</Text>
       <Text style={styles.copy}>View the source records, applied schemas, analysis settings, and insights used for this report. This temporary data is not added to the PDF or DOCX.</Text>
       <Button label={showSourceData ? 'Hide source data' : 'Show source data'} variant="secondary" onPress={() => setShowSourceData((visible) => !visible)} />
       {showSourceData ? <TextInput accessibilityLabel="Source data used for this report" multiline editable={false} selectTextOnFocus scrollEnabled value={accessedDataText} style={styles.sourceDataBox} /> : null}
-    </Card>
+    </Card> */}
   </View>;
 }
 
