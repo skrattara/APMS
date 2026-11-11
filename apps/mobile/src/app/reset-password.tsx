@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { Platform, Pressable, StyleSheet, Text, TextInput, View } from 'react-native';
 
 import { useAuth } from '@/auth/AuthProvider';
+import { AppIcon } from '@/components/Icon';
 import { colors } from '@/theme/tokens';
 
 export default function ResetPasswordPage() {
@@ -10,6 +11,8 @@ export default function ResetPasswordPage() {
   const { loading, passwordRecovery, passwordRecoveryError, clearPasswordRecoveryError, requestPasswordReset, updatePassword } = useAuth();
   const [password, setPassword] = useState('');
   const [confirmation, setConfirmation] = useState('');
+  const [passwordVisible, setPasswordVisible] = useState(false);
+  const [confirmationVisible, setConfirmationVisible] = useState(false);
   const [email, setEmail] = useState('');
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
@@ -70,9 +73,9 @@ export default function ResetPasswordPage() {
         </> : passwordRecovery ? <>
           <Text style={styles.copy}>Choose a new password for your account. It must contain at least 12 characters.</Text>
           <Text style={styles.label}>New password</Text>
-          <TextInput value={password} onChangeText={setPassword} autoCapitalize="none" autoComplete="new-password" secureTextEntry style={styles.input} accessibilityLabel="New password" />
+          <View style={styles.passwordInputWrap}><TextInput value={password} onChangeText={setPassword} autoCapitalize="none" autoComplete="new-password" secureTextEntry={!passwordVisible} style={[styles.input, styles.passwordInput]} accessibilityLabel="New password" /><Pressable accessibilityRole="button" accessibilityLabel={passwordVisible ? 'Hide new password' : 'Show new password'} onPress={() => setPasswordVisible((value) => !value)} style={styles.passwordVisibilityToggle}><AppIcon name={passwordVisible ? 'visibilityOff' : 'visibility'} size={18} color={colors.textMuted} /></Pressable></View>
           <Text style={styles.label}>Confirm new password</Text>
-          <TextInput value={confirmation} onChangeText={setConfirmation} autoCapitalize="none" autoComplete="new-password" secureTextEntry style={styles.input} accessibilityLabel="Confirm new password" />
+          <View style={styles.passwordInputWrap}><TextInput value={confirmation} onChangeText={setConfirmation} autoCapitalize="none" autoComplete="new-password" secureTextEntry={!confirmationVisible} style={[styles.input, styles.passwordInput]} accessibilityLabel="Confirm new password" /><Pressable accessibilityRole="button" accessibilityLabel={confirmationVisible ? 'Hide confirmation password' : 'Show confirmation password'} onPress={() => setConfirmationVisible((value) => !value)} style={styles.passwordVisibilityToggle}><AppIcon name={confirmationVisible ? 'visibilityOff' : 'visibility'} size={18} color={colors.textMuted} /></Pressable></View>
           {error ? <Text accessibilityRole="alert" style={styles.error}>{error}</Text> : null}
           <Pressable accessibilityRole="button" disabled={saving} onPress={() => void submit()} style={[styles.button, saving && styles.disabled]}><Text style={styles.buttonText}>{saving ? 'Updating…' : 'Update password'}</Text></Pressable>
         </> : <>
@@ -97,6 +100,9 @@ const styles = StyleSheet.create({
   copy: { color: colors.textMuted, fontSize: 13, lineHeight: 19 },
   label: { color: colors.text, fontSize: 12, fontWeight: '600', marginTop: 4 },
   input: { height: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: colors.border, borderRadius: 8, backgroundColor: colors.surfaceMuted, color: colors.text, fontSize: 14 },
+  passwordInputWrap: { position: 'relative', justifyContent: 'center' },
+  passwordInput: { paddingRight: 48 },
+  passwordVisibilityToggle: { position: 'absolute', right: 4, width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
   error: { color: colors.danger, fontSize: 12, lineHeight: 18 },
   success: { color: colors.success, fontSize: 12, lineHeight: 18 },
   button: { minHeight: 44, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 16, borderRadius: 8, backgroundColor: colors.brand },

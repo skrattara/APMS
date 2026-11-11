@@ -4,6 +4,7 @@ import { ActivityIndicator, Platform, Pressable, ScrollView, StyleSheet, Text, T
 import QRCode from 'react-native-qrcode-svg';
 
 import { useAuth, type MfaEnrollment } from '@/auth/AuthProvider';
+import { AppIcon } from '@/components/Icon';
 import { colors } from '@/theme/tokens';
 
 const steps = ['Confirm email', 'Set password', 'Two-step verification', 'Takeover email'];
@@ -14,6 +15,8 @@ export default function OnboardingPage() {
   const [step, setStep] = useState(0);
   const [password, setPassword] = useState('');
   const [confirmation, setConfirmation] = useState('');
+  const [passwordVisible, setPasswordVisible] = useState(false);
+  const [confirmationVisible, setConfirmationVisible] = useState(false);
   const [enrollment, setEnrollment] = useState<MfaEnrollment | null>(null);
   const [code, setCode] = useState('');
   const [takeoverEmail, setTakeoverEmail] = useState('');
@@ -94,8 +97,8 @@ export default function OnboardingPage() {
 
       {step === 1 ? <View style={styles.stepContent}>
         <Text style={styles.stepTitle}>Set your password</Text><Text style={styles.copy}>Choose a password with at least 12 characters.</Text>
-        <Text style={styles.label}>New password</Text><TextInput value={password} onChangeText={setPassword} autoCapitalize="none" autoComplete="new-password" secureTextEntry style={styles.input} accessibilityLabel="New password" />
-        <Text style={styles.label}>Confirm password</Text><TextInput value={confirmation} onChangeText={setConfirmation} autoCapitalize="none" autoComplete="new-password" secureTextEntry style={styles.input} accessibilityLabel="Confirm password" />
+        <Text style={styles.label}>New password</Text><View style={styles.passwordInputWrap}><TextInput value={password} onChangeText={setPassword} autoCapitalize="none" autoComplete="new-password" secureTextEntry={!passwordVisible} style={[styles.input, styles.passwordInput]} accessibilityLabel="New password" /><Pressable accessibilityRole="button" accessibilityLabel={passwordVisible ? 'Hide new password' : 'Show new password'} onPress={() => setPasswordVisible((value) => !value)} style={styles.passwordVisibilityToggle}><AppIcon name={passwordVisible ? 'visibilityOff' : 'visibility'} size={18} color={colors.textMuted} /></Pressable></View>
+        <Text style={styles.label}>Confirm password</Text><View style={styles.passwordInputWrap}><TextInput value={confirmation} onChangeText={setConfirmation} autoCapitalize="none" autoComplete="new-password" secureTextEntry={!confirmationVisible} style={[styles.input, styles.passwordInput]} accessibilityLabel="Confirm password" /><Pressable accessibilityRole="button" accessibilityLabel={confirmationVisible ? 'Hide confirmation password' : 'Show confirmation password'} onPress={() => setConfirmationVisible((value) => !value)} style={styles.passwordVisibilityToggle}><AppIcon name={confirmationVisible ? 'visibilityOff' : 'visibility'} size={18} color={colors.textMuted} /></Pressable></View>
         <View style={styles.passwordStrength} accessibilityLabel={`Password strength: ${passwordStrength}`}>
           <View style={styles.passwordStrengthHeader}><Text style={styles.passwordStrengthTitle}>Password strength</Text><Text style={[styles.passwordStrengthValue, { color: passwordStrengthColor }]}>{passwordStrength}</Text></View>
           <View style={styles.passwordStrengthMeter}>{passwordRules.map((rule, index) => <View key={rule.label} style={[styles.passwordStrengthSegment, index < passwordStrengthScore && { backgroundColor: passwordStrengthColor }]} />)}</View>
@@ -144,7 +147,7 @@ const styles = StyleSheet.create({
   stepContent: { gap: 8, padding: 14, borderRadius: 10, backgroundColor: colors.surfaceMuted }, stepTitle: { color: colors.text, fontSize: 17, fontWeight: '700' },
   passwordStrength: { gap: 6, marginTop: 2 }, passwordStrengthHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }, passwordStrengthTitle: { color: colors.textMuted, fontSize: 11, fontWeight: '600' }, passwordStrengthValue: { fontSize: 11, fontWeight: '700' }, passwordStrengthMeter: { flexDirection: 'row', gap: 5 }, passwordStrengthSegment: { flex: 1, height: 4, borderRadius: 2, backgroundColor: colors.border }, passwordRules: { flexDirection: 'row', flexWrap: 'wrap', columnGap: 14, rowGap: 4 }, passwordRule: { flexDirection: 'row', alignItems: 'center', gap: 4 }, passwordRuleMark: { color: colors.textMuted, fontSize: 11, fontWeight: '700' }, passwordRuleMarkMet: { color: colors.success }, passwordRuleText: { color: colors.textMuted, fontSize: 10 },
   confirmed: { flexDirection: 'row', alignItems: 'center', gap: 12, padding: 14, borderRadius: 9, borderWidth: 1, borderColor: '#B7E4D3', backgroundColor: '#EFFAF5' }, confirmedIcon: { color: colors.success, fontSize: 22, fontWeight: '800' }, confirmedTitle: { color: colors.text, fontWeight: '700', marginBottom: 3 },
-  label: { color: colors.text, fontSize: 12, fontWeight: '600', marginTop: 4 }, input: { minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: colors.border, borderRadius: 8, backgroundColor: colors.surface, color: colors.text, fontSize: 14 }, codeInput: { width: 180, alignSelf: 'center', textAlign: 'center', letterSpacing: 5, fontSize: 20 },
+  label: { color: colors.text, fontSize: 12, fontWeight: '600', marginTop: 4 }, input: { minHeight: 44, paddingHorizontal: 12, borderWidth: 1, borderColor: colors.border, borderRadius: 8, backgroundColor: colors.surface, color: colors.text, fontSize: 14 }, passwordInputWrap: { position: 'relative', justifyContent: 'center' }, passwordInput: { paddingRight: 48 }, passwordVisibilityToggle: { position: 'absolute', right: 4, width: 40, height: 40, alignItems: 'center', justifyContent: 'center' }, codeInput: { width: 180, alignSelf: 'center', textAlign: 'center', letterSpacing: 5, fontSize: 20 },
   qrCode: { width: 200, height: 200, alignSelf: 'center', justifyContent: 'center', alignItems: 'center', backgroundColor: '#FFF', borderRadius: 8 }, secret: { color: colors.text, fontSize: 14, fontWeight: '700', letterSpacing: 1, textAlign: 'center' },
   error: { color: colors.danger, fontSize: 12, lineHeight: 18 }, notice: { color: colors.success, fontSize: 12 }, actions: { flexDirection: 'row', gap: 10 },
   button: { flex: 1, minHeight: 44, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 16, borderRadius: 8, backgroundColor: colors.brand }, buttonText: { color: '#FFF', fontSize: 13, fontWeight: '700' }, disabled: { opacity: 0.5 },
