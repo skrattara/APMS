@@ -263,11 +263,32 @@ export function fullViewColumns(assessments: FacultyAssessment[], system: any, c
     current.children.push({ key: assessment.id, label: assessment.title, kind: 'assessment', children: [], periodId: period.periodId, groupId, groupLabel: assignedGroup.label, componentPath: path, assessment });
   }
 
+  // Period-scoped component results are calculated by the grading engine. Add
+  // the calculation root's direct component inputs to each period so Full View
+  // can show those summaries alongside the overall period grade.
+  const rootComponent = system.components?.find((component: any) => component.id === system.calculationRootComponentId);
+  const periodSummaryComponents = (rootComponent?.calculation?.components ?? [])
+    .map((reference: any) => system.components?.find((component: any) => component.id === reference.componentId))
+    .filter((component: any) => component);
+  if (periodSummaryComponents.length) {
+    for (const period of roots.filter((item) => item.periodId)) {
+      const summary = ensureNode(period.children, 'period-components', 'Period components', 'group', { periodId: period.periodId });
+      for (const component of periodSummaryComponents) {
+        ensureNode(summary.children, `period-component:${component.id}`, component.name, 'component', {
+          periodId: period.periodId,
+          groupLabel: summary.label,
+          componentId: component.id,
+          componentPath: [{ id: component.id, name: component.name }],
+        });
+      }
+    }
+  }
+
   const columns: FullViewColumn[] = [];
   const addComputed = (node: TreeNode, kind: FullViewColumn['kind'], id: string, label: string, width: number, extra: Partial<FullViewColumn> = {}) => {
     const periodKey = node.periodId ?? 'no-period';
     const periodLabel = roots.find((item) => item.key === periodKey)?.label ?? 'No period';
-    const groupKey = node.groupId ?? 'no-group';
+    const groupKey = node.kind === 'group' ? node.key : node.groupId ?? 'no-group';
     const groupLabel = node.kind === 'group' ? node.label : node.groupLabel ?? 'No group';
     columns.push({ id, kind, width, period: { key: periodKey, label: periodLabel }, group: { key: groupKey, label: groupLabel }, componentPath: node.componentPath, leafLabel: label, periodId: node.periodId, groupId: node.groupId, ...extra });
   };
