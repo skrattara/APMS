@@ -8,7 +8,7 @@ const corsHeaders = {
 const json = (body: unknown, status = 200) => new Response(JSON.stringify(body), { status, headers: { ...corsHeaders, 'Content-Type': 'application/json' } })
 const tables = [
   'roles','permissions','departments','academic_terms','programs','subjects','year_levels','profiles','role_permissions','user_roles',
-  'faculty_profiles','program_sections','students','class_record_templates','class_records','class_record_versions','invitations','faculty_assignments',
+  'faculty_profiles','program_sections','students','class_record_templates','class_records','class_schedule_slots','class_record_versions','invitations','faculty_assignments',
   'enrollments','criteria_sets','criteria_nodes','grading_systems','evaluation_systems','evaluation_criteria_systems','class_evaluation_criteria',
   'faculty_class_evaluation_systems','academic_admin_class_evaluation_systems','user_evaluation_systems','academic_guidelines','assessments',
   'assessment_results','attendance_sessions','attendance_records','grader_assignments','grader_submissions','grader_reviews','model_versions',
@@ -150,7 +150,9 @@ async function restoreSnapshot(client: any, snapshot: { tables: Record<string, u
     const applyBatch = async () => {
       if (!batch.length) return
       const payload = { format: 'apms-json-backup', tables: { [table]: batch } }
-      const { data, error } = await client.rpc('restore_apms_json_backup', { p_data: payload })
+      const { data, error } = table === 'class_schedule_slots'
+        ? await client.rpc('restore_apms_class_schedule_slots', { p_rows: batch })
+        : await client.rpc('restore_apms_json_backup', { p_data: payload })
       if (error) throw new Error(`Could not restore ${table}: ${error.message}`)
       restoredRows += Number(data?.restored_rows ?? 0)
       batch = []

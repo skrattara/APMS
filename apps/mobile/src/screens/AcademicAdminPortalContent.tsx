@@ -15,9 +15,9 @@ import { useAnalyticsFilters } from '@/components/charts/AnalyticsFilters';
 import { ReportComposer, type ReportRecord } from '@/components/reports/ReportComposer';
 import { VisualizationPanel } from '@/components/charts/VisualizationPanel';
 import {
-  academicReportCsv, createAcademicAdminClass, updateAcademicAdminClassFaculty, loadAcademicWorkspace, loadAcademicClassWorkspace, loadClassCreationReferences, loadDepartmentClassRequests, loadDepartmentSubjects, loadSubjectRequests,
+  academicReportCsv, createAcademicAdminClass, updateAcademicAdminClassFaculty, loadAcademicAdminClassSchedule, saveAcademicAdminClassSchedule, loadAcademicWorkspace, loadAcademicClassWorkspace, loadClassCreationReferences, loadDepartmentClassRequests, loadDepartmentSubjects, loadSubjectRequests,
   applyDepartmentEvaluationCriteriaToClasses, applyPersonalEvaluationCriteriaToClasses, deleteDepartmentEvaluationCriteria, deletePersonalEvaluationCriteria, manageSubject, reviewSubjectRequest, saveDepartmentEvaluationCriteria, savePersonalEvaluationSystem, type AcademicSubject, type AcademicSubjectRequest, type AcademicWorkspace, type SavedEvaluationSystem,
-  rejectAcademicAdminClassRequest, type ClassRequestReview, type DepartmentFacultyMember,
+  rejectAcademicAdminClassRequest, type ClassRequestReview, type ClassScheduleSlot, type DepartmentFacultyMember,
 } from '@/services/academic';
 import { addStudentToClass, applyGradingSystemToClasses, calculateEnrollmentGrade, deleteGradingSystem, encodePredictionInput, importRosterCsv, importRosterExcel, loadGradebookScoreHistory, previewRosterCsv, previewRosterExcel, removeStudentsFromClass, runAiPredictions, saveGradingSystem, summarizeEnrollmentStanding, updateStudentDetails, type ClassWorkspace, type GradebookHistoryCursor, type RosterStudent } from '@/services/faculty';
 import { calculateGradingSystem, calculateTrend, extractValidatedSavedAiFactorValues, IT_GLOBAL_GRADING_SYSTEM, validateGradingSystem, type GradingDefinition } from '@apms/domain';
@@ -249,15 +249,14 @@ function GradeDeadlineRequests({ data, userId, toast }: Props) {
     if (rationale.trim().length < 10) return toast.show('Explain why the deadline change is needed (at least 10 characters).');
     setBusy(true);
     try {
-      const { error } = await supabase.from('grade_encoding_deadline_requests').insert({
-        department_id: data.department.id,
-        requested_by: userId,
-        scope_type: scopeType,
-        program_id: scopeType === 'program' ? programId : null,
-        year_level: scopeType === 'year_level' ? Number(yearLevel) : null,
-        class_record_id: scopeType === 'class' ? classId : null,
-        requested_deadlines: requested,
-        rationale: rationale.trim(),
+      const { error } = await supabase.rpc('submit_academic_admin_grade_deadline_request', {
+        p_department_id: data.department.id,
+        p_scope_type: scopeType,
+        p_program_id: scopeType === 'program' ? programId : null,
+        p_year_level: scopeType === 'year_level' ? Number(yearLevel) : null,
+        p_class_record_id: scopeType === 'class' ? classId : null,
+        p_requested_deadlines: requested,
+        p_rationale: rationale.trim(),
       });
       if (error) throw error;
       toast.show('Grade deadline request sent for System Admin review.');
@@ -710,6 +709,11 @@ function Classes({ data, refresh, toast, initialTab = 'Department classes' }: Pr
   const [termId, setTermId] = useState('');
   const [section, setSection] = useState('');
   const [facultyIds, setFacultyIds] = useState<string[]>([]);
+  const [weeklySchedule, setWeeklySchedule] = useState<ClassScheduleSlot[]>([]);
+  const [scheduleClass, setScheduleClass] = useState<AcademicWorkspace['classes'][number] | null>(null);
+  const [scheduleSlots, setScheduleSlots] = useState<ClassScheduleSlot[]>([]);
+  const [loadingSchedule, setLoadingSchedule] = useState(false);
+  const [savingSchedule, setSavingSchedule] = useState(false);
   const [reviewNote, setReviewNote] = useState('');
   const [confirmRejectRequest, setConfirmRejectRequest] = useState(false);
   const [requestReviewTab, setRequestReviewTab] = useState('Assign');
@@ -746,6 +750,7 @@ function Classes({ data, refresh, toast, initialTab = 'Department classes' }: Pr
     const draft = { code: newSubjectCode.trim().toUpperCase(), title: newSubjectTitle.trim(), lectureUnits: newSubjectLectureUnits, laboratoryUnits: newSubjectLaboratoryUnits };
     setPendingSubject(draft);
     setSubjectId(DRAFT_SUBJECT_OPTION_ID);
+    setWeeklySchedule([]);
     setShowAddSubject(false);
     setNewSubjectCode('');
     setNewSubjectTitle('');
@@ -775,12 +780,13 @@ function Classes({ data, refresh, toast, initialTab = 'Department classes' }: Pr
         newlyCreatedSubjectId = await manageSubject({ departmentId: data.department!.id, code: pendingSubject.code, title: pendingSubject.title, units: Math.max(1, pendingSubject.lectureUnits + pendingSubject.laboratoryUnits), lectureUnits: pendingSubject.lectureUnits, laboratoryUnits: pendingSubject.laboratoryUnits, status: 'active' });
         targetSubject = newlyCreatedSubjectId;
       }
-      await createAcademicAdminClass({ subjectId: targetSubject, termId: targetTerm, section: targetSection, facultyUserIds: facultyIds, requestId: request?.id });
+      await createAcademicAdminClass({ subjectId: targetSubject, termId: targetTerm, section: targetSection, facultyUserIds: facultyIds, requestId: request?.id, weeklySchedule });
       toast.show(request ? 'Class request approved. The class is created and assigned.' : 'Class created and assigned.');
       setShowCreate(false);
       setSelectedRequest(null);
       setFacultyIds([]);
       setSection('');
+      setWeeklySchedule([]);
       if (newlyCreatedSubjectId) {
         setSubjectId(newlyCreatedSubjectId);
         setPendingSubject(null);
@@ -825,20 +831,54 @@ function Classes({ data, refresh, toast, initialTab = 'Department classes' }: Pr
       setSavingFaculty(false);
     }
   };
+  const openClassSchedule = useCallback(async (item: AcademicWorkspace['classes'][number]) => {
+    setScheduleClass(item);
+    setScheduleSlots([]);
+    setLoadingSchedule(true);
+    try {
+      setScheduleSlots(await loadAcademicAdminClassSchedule(item.id));
+    } catch (cause) {
+      setScheduleClass(null);
+      toast.show(getErrorMessage(cause, 'Could not load the class schedule.'));
+    } finally {
+      setLoadingSchedule(false);
+    }
+  }, [toast]);
+  const saveClassSchedule = async () => {
+    if (!scheduleClass) return;
+    setSavingSchedule(true);
+    try {
+      await saveAcademicAdminClassSchedule(scheduleClass.id, scheduleSlots);
+      toast.show('Class schedule saved.');
+      setScheduleClass(null);
+      await refresh();
+    } catch (cause) {
+      toast.show(getErrorMessage(cause, 'Class schedule could not be saved.'));
+    } finally {
+      setSavingSchedule(false);
+    }
+  };
   const beginReview = (request: ClassRequestReview) => {
     setSelectedRequest(request);
     setReviewNote('');
     setRequestReviewTab('Assign');
     setFacultyIds(references.faculty.some((member) => member.userId === request.requestedBy) ? [request.requestedBy] : []);
+    setWeeklySchedule([]);
   };
   const requestRows = requests.filter((request) => request.status === 'pending');
   const reviewedRows = requests.filter((request) => request.status !== 'pending');
   const departmentClassRows = useMemo(() => data.classes.map((item) => {
     const rows = item.workspace.students;
     const values = rows.flatMap((student) => { const value = standing(item.workspace, student.enrollmentId); return value == null ? [] : [value]; });
-    return [`${item.code} · ${item.title}`, displaySection(item.section), item.term, item.assignedFaculty.map((member) => member.name).join(', ') || 'Unassigned', String(item.lectureUnits), String(item.laboratoryUnits), String(rows.length), values.length ? `${(values.reduce((a, b) => a + b, 0) / values.length).toFixed(1)}%` : '—', String(rows.filter((student) => risk(item.workspace, student.enrollmentId) !== 'low').length), <ClassActionsMenu key={`class-actions-${item.id}`} classLabel={`${item.code} · ${displaySection(item.section)}`} onManageRoster={() => setRosterClassId(item.id)} onViewGradebook={() => setViewGradebookClass(item)} onManageOptions={() => { setManageFacultyClass(item); setManageFacultyIds(item.assignedFaculty.map((member) => member.userId)); }} />];
-  }), [data.classes, references.sections, references.institutionCode]);
+    return [`${item.code} · ${item.title}`, displaySection(item.section), item.term, item.assignedFaculty.map((member) => member.name).join(', ') || 'Unassigned', String(item.lectureUnits), String(item.laboratoryUnits), String(rows.length), values.length ? `${(values.reduce((a, b) => a + b, 0) / values.length).toFixed(1)}%` : '—', String(rows.filter((student) => risk(item.workspace, student.enrollmentId) !== 'low').length), <ClassActionsMenu key={`class-actions-${item.id}`} classLabel={`${item.code} · ${displaySection(item.section)}`} onManageRoster={() => setRosterClassId(item.id)} onViewGradebook={() => setViewGradebookClass(item)} onManageOptions={() => { setManageFacultyClass(item); setManageFacultyIds(item.assignedFaculty.map((member) => member.userId)); }} onManageSchedule={() => void openClassSchedule(item)} />];
+  }), [data.classes, references.sections, references.institutionCode, openClassSchedule]);
   const rosterClass = rosterClassId ? data.classes.find((item) => item.id === rosterClassId) ?? null : null;
+  const scheduleSubjectId = selectedRequest?.subjectId ?? subjectId;
+  const scheduleSubject = scheduleSubjectId === DRAFT_SUBJECT_OPTION_ID
+    ? pendingSubject
+    : references.subjects.find((item) => item.id === scheduleSubjectId) ?? null;
+  const scheduleHasLecture = (scheduleSubject?.lectureUnits ?? 3) > 0;
+  const scheduleHasLaboratory = (scheduleSubject?.laboratoryUnits ?? 0) > 0;
   const facultyPicker = (selected: string[], update: (value: string[]) => void) => (
     <View style={{ gap: 6 }}>
       <Text style={styles.cardTitle}>Assign Faculty (at least one)</Text>
@@ -849,7 +889,7 @@ function Classes({ data, refresh, toast, initialTab = 'Department classes' }: Pr
   );
 
   return <>
-    <Heading title="Classes" subtitle="Create department classes, assign at least one Faculty member, and review Faculty class requests." action={<Button label="Create class" disabled={!references.terms.length || !references.faculty.length || !references.sections.length} onPress={() => { setFacultyIds([]); setShowCreate(true); }} />} />
+    <Heading title="Classes" subtitle="Create department classes, assign at least one Faculty member, and review Faculty class requests." action={<Button label="Create class" disabled={!references.terms.length || !references.faculty.length || !references.sections.length} onPress={() => { setFacultyIds([]); setWeeklySchedule([]); setShowCreate(true); }} />} />
     <Tabs values={['Department classes', 'Class requests']} selected={classesTab} onSelect={setClassesTab} />
     {classesTab === 'Class requests' ? <>
       <Card style={styles.form}>
@@ -866,8 +906,8 @@ function Classes({ data, refresh, toast, initialTab = 'Department classes' }: Pr
     </> : <>
       {data.classes.length ? <DataTable columns={['Subject', 'Section', 'Term', 'Assigned faculty', 'Lecture units', 'Laboratory units', 'Students', 'Average', 'At risk', 'Actions']} columnWidths={[230, 100, 110, 210, 90, 110, 75, 90, 75, 72]} columnFlex={[2, 0, 0, 2, 0, 0, 0, 0, 0, 0]} widthMode="container" rows={departmentClassRows} /> : <PageState kind="empty" title="No active classes" message="Create a class or approve a Faculty request to get started." />}
     </>}
-    <Dialog visible={showCreate} title="Create Department Class" onClose={() => { if (!busy) setShowCreate(false); }}>
-      <SelectField label="Subject" value={showAddSubject ? ADD_SUBJECT_OPTION_ID : subjectId} options={[...references.subjects.map((item) => ({ label: item.label, value: item.id })), ...(pendingSubject ? [{ label: `${pendingSubject.code} · ${pendingSubject.title} (new)`, value: DRAFT_SUBJECT_OPTION_ID }] : []), { label: '+ Add subject…', value: ADD_SUBJECT_OPTION_ID }]} onChange={(value) => { if (value === ADD_SUBJECT_OPTION_ID) setShowAddSubject(true); else { setShowAddSubject(false); setSubjectId(value); } }} />
+    <Dialog visible={showCreate} title="Create Department Class" wide onClose={() => { if (!busy) setShowCreate(false); }}>
+      <SelectField label="Subject" value={showAddSubject ? ADD_SUBJECT_OPTION_ID : subjectId} options={[...references.subjects.map((item) => ({ label: item.label, value: item.id })), ...(pendingSubject ? [{ label: `${pendingSubject.code} · ${pendingSubject.title} (new)`, value: DRAFT_SUBJECT_OPTION_ID }] : []), { label: '+ Add subject…', value: ADD_SUBJECT_OPTION_ID }]} onChange={(value) => { if (value === ADD_SUBJECT_OPTION_ID) setShowAddSubject(true); else { setShowAddSubject(false); if (value !== subjectId) setWeeklySchedule([]); setSubjectId(value); } }} />
       {showAddSubject ? <View style={styles.inlineSubjectForm}>
         <Text style={styles.cardTitle}>New subject</Text>
         <View style={styles.formGrid}>
@@ -887,6 +927,7 @@ function Classes({ data, refresh, toast, initialTab = 'Department classes' }: Pr
       <SelectField label="Academic term" value={termId} options={references.terms.map((item) => ({ label: item.label, value: item.id }))} onChange={setTermId} />
       <SelectField label="Section" value={section} options={references.sections} onChange={setSection} placeholder={references.sections.length ? 'Select a section' : 'No sections configured'} />
       {facultyPicker(facultyIds, setFacultyIds)}
+      <ScheduleEditor slots={weeklySchedule} onChange={setWeeklySchedule} hasLecture={scheduleHasLecture} hasLaboratory={scheduleHasLaboratory} />
       <Button label="Create and assign class" loading={busy} disabled={showAddSubject || !subjectId || !termId || !section.trim() || !facultyIds.length} onPress={() => void createClass()} />
     </Dialog>
     <Dialog visible={selectedRequest !== null} title="Review Class Request" onClose={() => { if (!busy) setSelectedRequest(null); }}>
@@ -897,6 +938,7 @@ function Classes({ data, refresh, toast, initialTab = 'Department classes' }: Pr
         <Tabs values={['Assign', 'Reject request']} selected={requestReviewTab} onSelect={setRequestReviewTab} />
         {requestReviewTab === 'Assign' ? <>
           {facultyPicker(facultyIds, setFacultyIds)}
+          <ScheduleEditor slots={weeklySchedule} onChange={setWeeklySchedule} hasLecture={scheduleHasLecture} hasLaboratory={scheduleHasLaboratory} />
           <Button label="Approve, create, and assign" loading={busy} disabled={!facultyIds.length} onPress={() => void createClass(selectedRequest)} />
         </> : <View style={styles.rejectRequestSection}>
           <Field label="Rejection note (optional)" value={reviewNote} onChangeText={setReviewNote} multiline numberOfLines={3} placeholder="Add context for the Faculty member, if helpful." style={styles.rejectionReasonInput} />
@@ -912,6 +954,17 @@ function Classes({ data, refresh, toast, initialTab = 'Department classes' }: Pr
         <View style={styles.subjectFormActions}>
           <Button label="Save assignments" loading={savingFaculty} disabled={!manageFacultyIds.length} onPress={() => void saveClassFaculty()} />
           <Button label="Cancel" variant="secondary" disabled={savingFaculty} onPress={() => setManageFacultyClass(null)} />
+        </View>
+      </View> : null}
+    </Dialog>
+    <Dialog visible={scheduleClass !== null} title="Edit weekly class schedule" wide onClose={() => { if (!savingSchedule) setScheduleClass(null); }}>
+      {scheduleClass ? <View style={{ gap: 12 }}>
+        <Text style={styles.bulkClassName}>{scheduleClass.code} · {scheduleClass.title} · {scheduleClass.section}</Text>
+        <Text style={styles.help}>{scheduleClass.term}</Text>
+        {loadingSchedule ? <Text style={styles.help}>Loading saved schedule…</Text> : <ScheduleEditor slots={scheduleSlots} onChange={setScheduleSlots} hasLecture={scheduleClass.lectureUnits > 0} hasLaboratory={scheduleClass.laboratoryUnits > 0} key={scheduleClass.id} />}
+        <View style={styles.subjectFormActions}>
+          <Button label="Save schedule" loading={savingSchedule} disabled={loadingSchedule} onPress={() => void saveClassSchedule()} />
+          <Button label="Cancel" variant="secondary" disabled={savingSchedule} onPress={() => setScheduleClass(null)} />
         </View>
       </View> : null}
     </Dialog>
@@ -931,18 +984,19 @@ function Classes({ data, refresh, toast, initialTab = 'Department classes' }: Pr
   </>;
 }
 
-function ClassActionsMenu({ classLabel, onManageRoster, onViewGradebook, onManageOptions }: { classLabel: string; onManageRoster: () => void; onViewGradebook: () => void; onManageOptions: () => void }) {
+function ClassActionsMenu({ classLabel, onManageRoster, onViewGradebook, onManageOptions, onManageSchedule }: { classLabel: string; onManageRoster: () => void; onViewGradebook: () => void; onManageOptions: () => void; onManageSchedule: () => void }) {
   const triggerRef = useRef<View>(null);
   const { width: screenWidth, height: screenHeight } = useWindowDimensions();
   const [position, setPosition] = useState({ left: 8, top: 8 });
   const [open, setOpen] = useState(false);
   const showMenu = () => triggerRef.current?.measureInWindow((x, y, width, height) => {
-    setPosition({ left: Math.max(8, Math.min(screenWidth - 248, x + width - 240)), top: Math.max(8, Math.min(screenHeight - 168, y + height + 4)) });
+    setPosition({ left: Math.max(8, Math.min(screenWidth - 248, x + width - 240)), top: Math.max(8, Math.min(screenHeight - 208, y + height + 4)) });
     setOpen(true);
   });
   const actions = [
     { label: 'Manage class roster', icon: 'students' as const, onPress: onManageRoster },
     { label: 'View gradebook', icon: 'grades' as const, onPress: onViewGradebook },
+    { label: 'Manage weekly schedule', icon: 'events' as const, onPress: onManageSchedule },
     { label: 'Manage class options', icon: 'settings' as const, onPress: onManageOptions },
   ];
   return <>
@@ -961,6 +1015,255 @@ function ClassActionsMenu({ classLabel, onManageRoster, onViewGradebook, onManag
       </View>
     </Modal>
   </>;
+}
+
+const scheduleDays = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+const scheduleCellHeight = 26;
+const scheduleTimeWidth = 82;
+function displayScheduleTime(minute: number) {
+  const hour = Math.floor(minute / 60);
+  return `${hour % 12 || 12} ${hour < 12 ? 'AM' : 'PM'}`;
+}
+function ScheduleEditor({ slots, onChange, hasLecture, hasLaboratory }: {
+  slots: ClassScheduleSlot[];
+  onChange: (slots: ClassScheduleSlot[]) => void;
+  hasLecture: boolean;
+  hasLaboratory: boolean;
+}) {
+  const { width: screenWidth } = useWindowDimensions();
+  const scheduleDayWidth = Math.max(82, Math.min(150, (screenWidth - 240) / 7));
+  const [interactionMode, setInteractionMode] = useState<'add' | 'erase'>('add');
+  const eraseMode = interactionMode === 'erase';
+  const [overlapBlocked, setOverlapBlocked] = useState(false);
+  const dragging = useRef(false);
+  const gridRef = useRef<View>(null);
+  const gridOrigin = useRef({ x: 0, y: 0 });
+  const dragAnchor = useRef<{ day: number; row: number } | null>(null);
+  const dragCurrent = useRef<{ day: number; row: number } | null>(null);
+  const dragBaseSlots = useRef<ClassScheduleSlot[]>([]);
+  const gestureVersion = useRef(0);
+  const touchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const touchStartPoint = useRef({ x: 0, y: 0 });
+  const cellAt = (x: number, y: number) => {
+    const day = Math.floor((x - scheduleTimeWidth) / scheduleDayWidth);
+    const row = Math.floor(y / scheduleCellHeight);
+    if (day < 0 || day >= 7 || row < 0 || row >= 48) return null;
+    return { day, row };
+  };
+  const applyRange = (end: { day: number; row: number } | null) => {
+    const start = dragAnchor.current;
+    if (!start || !end) return;
+    const firstDay = Math.min(start.day, end.day);
+    const lastDay = Math.max(start.day, end.day);
+    const firstRow = Math.min(start.row, end.row);
+    const lastRow = Math.max(start.row, end.row);
+    const target = new Set<string>();
+    for (let day = firstDay; day <= lastDay; day += 1) {
+      for (let row = firstRow; row <= lastRow; row += 1) target.add(`${day}:${row * 30}`);
+    }
+    dragCurrent.current = end;
+    const base = dragBaseSlots.current;
+    if (eraseMode) {
+      setOverlapBlocked(false);
+      onChange(base.filter((slot) => !target.has(`${slot.dayOfWeek}:${slot.startMinute}`)));
+      return;
+    }
+    const componentType: ClassScheduleSlot['componentType'] = hasLecture ? 'lecture' : 'laboratory';
+    const otherType = componentType === 'lecture' ? 'laboratory' : 'lecture';
+    const conflict = base.some((slot) => slot.componentType === otherType && target.has(`${slot.dayOfWeek}:${slot.startMinute}`));
+    setOverlapBlocked(conflict);
+    if (conflict) return;
+    const added = [...target].flatMap((key) => {
+      const [day, startMinute] = key.split(':').map(Number);
+      return base.some((slot) => slot.componentType === componentType && slot.dayOfWeek === day && slot.startMinute === startMinute)
+        ? []
+        : [{ componentType, dayOfWeek: day, startMinute }];
+    });
+    onChange([...base, ...added]);
+  };
+  const toggleBlockType = (block: { day: number; startMinute: number; duration: number; componentType: ClassScheduleSlot['componentType'] }) => {
+    const nextType = block.componentType === 'lecture' ? 'laboratory' : 'lecture';
+    const blockEnd = block.startMinute + block.duration;
+    const blockSlots = slots.filter((slot) => slot.dayOfWeek === block.day && slot.componentType === block.componentType && slot.startMinute >= block.startMinute && slot.startMinute < blockEnd);
+    const occupied = new Set(blockSlots.map((slot) => slot.startMinute));
+    const conflict = slots.some((slot) => slot.dayOfWeek === block.day && slot.componentType === nextType && occupied.has(slot.startMinute));
+    setOverlapBlocked(conflict);
+    if (conflict) return;
+    onChange(slots.map((slot) => blockSlots.includes(slot) ? { ...slot, componentType: nextType } : slot));
+  };
+  const deleteBlock = (block: { day: number; startMinute: number; duration: number; componentType: ClassScheduleSlot['componentType'] }) => {
+    const blockEnd = block.startMinute + block.duration;
+    onChange(slots.filter((slot) => slot.dayOfWeek !== block.day || slot.componentType !== block.componentType || slot.startMinute < block.startMinute || slot.startMinute >= blockEnd));
+  };
+  const beginDragAt = (pageX: number, pageY: number) => {
+    const version = gestureVersion.current;
+    gridRef.current?.measureInWindow((x, y) => {
+      if (version !== gestureVersion.current) return;
+      gridOrigin.current = { x, y };
+      const initial = cellAt(pageX - x, pageY - y);
+      if (!initial) return;
+      dragAnchor.current = initial;
+      dragCurrent.current = initial;
+      dragBaseSlots.current = slots;
+      dragging.current = true;
+      applyRange(initial);
+    });
+  };
+  const finishDrag = () => {
+    gestureVersion.current += 1;
+    dragging.current = false;
+    dragAnchor.current = null;
+    dragCurrent.current = null;
+    if (touchTimer.current) clearTimeout(touchTimer.current);
+    touchTimer.current = null;
+  };
+  const webPointerHandlers: any = Platform.OS === 'web' ? {
+    onPointerDown: (event: any) => {
+      if (event.nativeEvent.pointerType === 'mouse' && event.nativeEvent.button !== 0) return;
+      if (event.nativeEvent.pointerType === 'mouse') {
+        event.preventDefault?.();
+        gestureVersion.current += 1;
+        beginDragAt(event.nativeEvent.clientX ?? event.nativeEvent.pageX, event.nativeEvent.clientY ?? event.nativeEvent.pageY);
+      } else {
+        gestureVersion.current += 1;
+        touchStartPoint.current = { x: event.nativeEvent.clientX ?? event.nativeEvent.pageX, y: event.nativeEvent.clientY ?? event.nativeEvent.pageY };
+        if (touchTimer.current) clearTimeout(touchTimer.current);
+        touchTimer.current = setTimeout(() => beginDragAt(touchStartPoint.current.x, touchStartPoint.current.y), 350);
+      }
+    },
+    onPointerMove: (event: any) => {
+      if (event.nativeEvent.pointerType !== 'mouse' && !dragging.current) {
+        const pointerX = event.nativeEvent.clientX ?? event.nativeEvent.pageX;
+        const pointerY = event.nativeEvent.clientY ?? event.nativeEvent.pageY;
+        const dx = Math.abs(pointerX - touchStartPoint.current.x);
+        const dy = Math.abs(pointerY - touchStartPoint.current.y);
+        if (dx + dy > 8 && touchTimer.current) {
+          clearTimeout(touchTimer.current);
+          touchTimer.current = null;
+        }
+      }
+      if (dragging.current) applyRange(cellAt((event.nativeEvent.clientX ?? event.nativeEvent.pageX) - gridOrigin.current.x, (event.nativeEvent.clientY ?? event.nativeEvent.pageY) - gridOrigin.current.y));
+    },
+    onPointerUp: finishDrag,
+    onPointerCancel: finishDrag,
+  } : {};
+  const onTouchStart = (event: any) => {
+    gestureVersion.current += 1;
+    const touch = event.nativeEvent.touches?.[0] ?? event.nativeEvent;
+    touchStartPoint.current = { x: touch.pageX, y: touch.pageY };
+    if (touchTimer.current) clearTimeout(touchTimer.current);
+    touchTimer.current = setTimeout(() => beginDragAt(touchStartPoint.current.x, touchStartPoint.current.y), 350);
+  };
+  const onTouchMove = (event: any) => {
+    if (dragging.current) return;
+    const touch = event.nativeEvent.touches?.[0] ?? event.nativeEvent;
+    if (Math.abs(touch.pageX - touchStartPoint.current.x) + Math.abs(touch.pageY - touchStartPoint.current.y) > 8) {
+      if (touchTimer.current) clearTimeout(touchTimer.current);
+      touchTimer.current = null;
+    }
+  };
+  useEffect(() => () => { if (touchTimer.current) clearTimeout(touchTimer.current); }, []);
+  const blocks = (type: ClassScheduleSlot['componentType']) => {
+    const ordered = slots.filter((slot) => slot.componentType === type)
+      .sort((a, b) => a.dayOfWeek - b.dayOfWeek || a.startMinute - b.startMinute);
+    const result: { day: number; startMinute: number; duration: number; componentType: ClassScheduleSlot['componentType'] }[] = [];
+    for (const slot of ordered) {
+      const previous = result[result.length - 1];
+      if (previous && previous.day === slot.dayOfWeek && previous.startMinute + previous.duration === slot.startMinute) {
+        previous.duration += 30;
+      } else {
+        result.push({ day: slot.dayOfWeek, startMinute: slot.startMinute, duration: 30, componentType: type });
+      }
+    }
+    return result;
+  };
+  if (!hasLecture && !hasLaboratory) return <Text style={styles.help}>This subject has no lecture or laboratory units to schedule.</Text>;
+  const scheduleBlocks = [...blocks('lecture'), ...blocks('laboratory')];
+  return <View style={scheduleStyles.editor}>
+    <View style={scheduleStyles.titleRow}>
+      <View style={styles.flex}><Text style={styles.cardTitle}>Weekly schedule</Text><Text style={styles.help}>Optional · drag to assign half-hour periods</Text></View>
+      <View style={scheduleStyles.legend}><View style={[scheduleStyles.legendDot, scheduleStyles.lectureLegend]} /><Text style={styles.help}>Lecture</Text><View style={[scheduleStyles.legendDot, scheduleStyles.laboratoryLegend]} /><Text style={styles.help}>Lab</Text></View>
+    </View>
+    <View style={scheduleStyles.toolbar}>
+      <Button compact label="Add times" variant={interactionMode === 'add' ? 'primary' : 'secondary'} onPress={() => setInteractionMode('add')} />
+      <Button compact label="Erase times" variant={interactionMode === 'erase' ? 'danger' : 'secondary'} onPress={() => setInteractionMode('erase')} />
+    </View>
+    <Text style={[styles.help, overlapBlocked && scheduleStyles.overlapMessage]}>{overlapBlocked ? 'Lecture and Lab cannot overlap. Adjust the selection to avoid the other component’s times.' : 'Drag across cells to add Lecture times by default. Use the type icon on a merged block to change it to Lab. Right-click the grid to toggle erase mode.'}</Text>
+    <ScrollView horizontal showsHorizontalScrollIndicator>
+      <View>
+        <View style={[scheduleStyles.headerRow, scheduleStyles.dayHeaderRow]}>
+          <View style={[scheduleStyles.timeCell, scheduleStyles.dayHeader]}><Text style={scheduleStyles.dayHeaderText}>Time</Text></View>
+          {scheduleDays.map((day) => <View key={day} style={[scheduleStyles.dayCell, { width: scheduleDayWidth }, scheduleStyles.dayHeader]}><Text style={scheduleStyles.dayHeaderText}>{day}</Text></View>)}
+        </View>
+        <ScrollView style={scheduleStyles.timeScroll} nestedScrollEnabled showsVerticalScrollIndicator>
+          <View
+            ref={gridRef}
+            style={[scheduleStyles.grid, { width: scheduleTimeWidth + 7 * scheduleDayWidth }, Platform.OS === 'web' && scheduleStyles.noTextSelect]}
+            accessibilityRole="grid"
+            accessibilityLabel="Weekly Lecture and Lab schedule"
+            accessibilityHint="Drag across half-hour cells to select a range. New times are Lecture by default; use the type toggle on a merged block to change it to Lab. Right-click to toggle erase mode. On touch screens, press and hold briefly, then drag."
+            onTouchStart={Platform.OS === 'web' ? undefined : onTouchStart}
+            onTouchMove={Platform.OS === 'web' ? undefined : onTouchMove}
+            onTouchEnd={Platform.OS === 'web' ? undefined : finishDrag}
+            onStartShouldSetResponder={() => false}
+            onMoveShouldSetResponder={() => Platform.OS !== 'web' && dragging.current}
+            onResponderGrant={() => undefined}
+            onResponderMove={(event) => {
+              if (dragging.current) applyRange(cellAt(event.nativeEvent.pageX - gridOrigin.current.x, event.nativeEvent.pageY - gridOrigin.current.y));
+            }}
+            onResponderRelease={finishDrag}
+            onResponderTerminate={finishDrag}
+            onResponderTerminationRequest={() => !dragging.current}
+            onContextMenu={Platform.OS === 'web' ? (event: any) => {
+              event.preventDefault?.();
+              setInteractionMode((mode) => mode === 'erase' ? 'add' : 'erase');
+              setOverlapBlocked(false);
+            } : undefined}
+            {...webPointerHandlers}
+          >
+            {Array.from({ length: 48 }, (_, row) => {
+            const minute = row * 30;
+            return <View key={minute} style={scheduleStyles.headerRow}>
+              <View style={[scheduleStyles.timeCell, minute % 60 === 0 && scheduleStyles.hourBoundary]}><Text style={scheduleStyles.timeText}>{minute % 60 === 0 ? displayScheduleTime(minute) : ''}</Text></View>
+              {scheduleDays.map((day) => <View key={day} style={[scheduleStyles.dayCell, { width: scheduleDayWidth }, scheduleStyles.timeSlot]} />)}
+            </View>;
+            })}
+          </View>
+          <View pointerEvents="box-none" style={[scheduleStyles.blockOverlay, { left: scheduleTimeWidth, width: scheduleDayWidth * 7, height: 48 * scheduleCellHeight }]}>
+            {scheduleBlocks.map((block) => <View
+              key={`${block.componentType}-${block.day}-${block.startMinute}`}
+              pointerEvents="box-none"
+              style={[
+                scheduleStyles.scheduleBlock,
+                block.componentType === 'lecture' ? scheduleStyles.lectureBlock : scheduleStyles.laboratoryBlock,
+                {
+                  left: block.day * scheduleDayWidth,
+                  top: (block.startMinute / 30) * scheduleCellHeight,
+                  width: scheduleDayWidth,
+                  height: (block.duration / 30) * scheduleCellHeight,
+                },
+              ]}
+            >
+              <Text pointerEvents="none" style={scheduleStyles.scheduleBlockText}>{block.componentType === 'lecture' ? 'LEC' : 'LAB'}</Text>
+              {hasLecture && hasLaboratory && <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Change ${block.componentType === 'lecture' ? 'lecture' : 'lab'} schedule to ${block.componentType === 'lecture' ? 'lab' : 'lecture'}`}
+                onPress={() => toggleBlockType(block)}
+                style={scheduleStyles.blockTypeToggle}
+              ><AppIcon name="refresh" size={13} color="#263746" /></Pressable>}
+              <Pressable
+                accessibilityRole="button"
+                accessibilityLabel={`Delete ${block.componentType === 'lecture' ? 'lecture' : 'lab'} schedule`}
+                onPress={() => deleteBlock(block)}
+                style={scheduleStyles.blockDelete}
+              ><AppIcon name="delete" size={13} color="#5B2922" /></Pressable>
+            </View>)}
+          </View>
+        </ScrollView>
+      </View>
+    </ScrollView>
+    <Text style={styles.help}>Each row covers 30 minutes. Adjacent cells merge into one labeled block. Lecture and Lab cannot overlap.</Text>
+  </View>;
 }
 
 type RosterImportFile = { name: string; kind: 'csv' | 'excel'; text?: string; data?: ArrayBuffer };
@@ -1049,11 +1352,21 @@ function AcademicAdminClassRosterDialog({ item, programs, toast, onClose, onChan
     } catch (cause) { toast.show(getErrorMessage(cause, 'Could not open the roster file.')); }
   };
   const downloadTemplate = async () => {
-    const templateContent = 'institutional_id,first_name,middle_name,last_name,suffix,email,year_level,section\n2024-0001,Juan,,Dela Cruz,,juan.delacruz@example.edu,3,' + item.section;
+    const templateSection = item.section?.trim() || 'BSIT-3A';
+    const templateContent = `student_id,first_name,middle_name,last_name,suffix,email,year_level,section\n2024-0001,Juan,,Dela Cruz,,juan.delacruz@phinmaed.com,3,${templateSection}\n2024-0002,Maria,,Santos,,maria.santos@phinmaed.com,3,${templateSection}`;
     if (Platform.OS === 'web') {
       const XLSX = await import('xlsx-js-style');
       const workbook = XLSX.utils.book_new();
-      const worksheet = XLSX.utils.aoa_to_sheet([['institutional_id', 'first_name', 'middle_name', 'last_name', 'suffix', 'email', 'year_level', 'section'], ['2024-0001', 'Juan', '', 'Dela Cruz', '', 'juan.delacruz@example.edu', 3, item.section]]);
+      const worksheet = XLSX.utils.aoa_to_sheet([
+        ['student_id', 'first_name', 'middle_name', 'last_name', 'suffix', 'email', 'year_level', 'section'],
+        [52324123456, 'Juan', '', 'Dela Cruz', '', 'juan.delacruz@phinmaed.com', 3, templateSection],
+        [52324123457, 'Maria', '', 'Santos', '', 'maria.santos@phinmaed.com', 3, templateSection],
+      ]);
+      const studentIdFormat = '00-0000-000000';
+      worksheet.A2.z = studentIdFormat;
+      worksheet.A3.z = studentIdFormat;
+      for (let row = 4; row <= 1001; row += 1) worksheet[`A${row}`] = { t: 's', v: '', z: studentIdFormat };
+      worksheet['!ref'] = 'A1:H1001';
       XLSX.utils.book_append_sheet(workbook, worksheet, 'Roster');
       const output = XLSX.write(workbook, { bookType: 'xlsx', type: 'array' });
       const url = URL.createObjectURL(new Blob([output], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }));
@@ -2152,4 +2465,34 @@ const rosterStyles = StyleSheet.create({
   rosterCheckbox: { width: 22, height: 22, borderWidth: 1, borderColor: colors.border, borderRadius: 5, alignItems: 'center', justifyContent: 'center', backgroundColor: colors.surface },
   rosterCheckboxSelected: { borderColor: colors.brand, backgroundColor: colors.brand },
   rosterCheckboxMark: { color: '#FFFFFF', fontSize: 14, lineHeight: 17, fontWeight: '700' },
+});
+
+const scheduleStyles = StyleSheet.create({
+  editor: { gap: 8, padding: 12, borderWidth: 1, borderColor: colors.border, borderRadius: 10, backgroundColor: colors.surface },
+  titleRow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'space-between', gap: 8 },
+  legend: { flexDirection: 'row', alignItems: 'center', gap: 5 },
+  legendDot: { width: 10, height: 10, borderRadius: 5 },
+  lectureLegend: { backgroundColor: '#8BD77F' },
+  laboratoryLegend: { backgroundColor: '#F1AA81' },
+  toolbar: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', gap: 6 },
+  grid: { position: 'relative' },
+  timeScroll: { height: 420, flexGrow: 0 },
+  noTextSelect: { userSelect: 'none', WebkitUserSelect: 'none', touchAction: 'pan-y' } as any,
+  headerRow: { flexDirection: 'row', height: scheduleCellHeight },
+  dayHeaderRow: { height: 34 },
+  timeCell: { width: scheduleTimeWidth, height: scheduleCellHeight, justifyContent: 'center', alignItems: 'flex-end', paddingRight: 10 },
+  dayCell: { height: scheduleCellHeight, borderRightWidth: 1, borderColor: colors.border },
+  dayHeader: { height: 34, justifyContent: 'center', alignItems: 'center', borderBottomWidth: 1, backgroundColor: colors.canvas },
+  dayHeaderText: { color: colors.text, fontSize: 11, fontWeight: '700' },
+  timeText: { color: colors.textMuted, fontSize: 9, textAlign: 'right' },
+  timeSlot: { backgroundColor: colors.surface, borderBottomWidth: 1, borderBottomColor: colors.border },
+  hourBoundary: { borderTopWidth: 1, borderTopColor: '#B5BECC' },
+  blockOverlay: { position: 'absolute', top: 0, zIndex: 2 },
+  scheduleBlock: { position: 'absolute', alignItems: 'center', justifyContent: 'center', paddingHorizontal: 2, borderWidth: 1, borderColor: '#52685A', borderRadius: 2 },
+  blockTypeToggle: { position: 'absolute', top: 2, left: 2, width: 22, height: 22, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFFFFFCC', zIndex: 3 },
+  blockDelete: { position: 'absolute', top: 2, right: 2, width: 22, height: 22, borderRadius: 11, alignItems: 'center', justifyContent: 'center', backgroundColor: '#FFFFFFCC', zIndex: 3 },
+  lectureBlock: { backgroundColor: '#8BD77F' },
+  laboratoryBlock: { backgroundColor: '#F1AA81' },
+  scheduleBlockText: { color: '#20302A', fontSize: 10, fontWeight: '800', letterSpacing: 0.3 },
+  overlapMessage: { color: colors.danger, fontWeight: '700' },
 });

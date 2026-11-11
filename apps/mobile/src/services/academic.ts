@@ -4,6 +4,11 @@ import { DEFAULT_EVALUATION_SYSTEM, removeStandaloneMasteryFactor, validateEvalu
 import { institutionalSectionName, resolveInstitutionalSectionName, type AcademicSectionPattern } from '@/utils/academicSections';
 
 export type AcademicClass = FacultyClass & { workspace: ClassWorkspace; assignedFaculty: DepartmentFacultyMember[] };
+export type ClassScheduleSlot = {
+  componentType: 'lecture' | 'laboratory';
+  dayOfWeek: number;
+  startMinute: number;
+};
 export type SavedEvaluationSystem = { id: string; name: string; description?: string; definition: EvaluationDefinition; version: number; updatedAt: string; updatedBy: string | null };
 export type AcademicWorkspace = {
   department: { id: string; code: string; name: string } | null;
@@ -407,19 +412,52 @@ export async function createAcademicAdminClass(input: {
   section: string;
   facultyUserIds: string[];
   requestId?: string;
+  weeklySchedule?: ClassScheduleSlot[];
 }): Promise<string> {
-  const { data, error } = await client().rpc('academic_admin_create_class', {
+  const { data, error } = await client().rpc('academic_admin_create_class_with_schedule', {
     p_subject_id: input.subjectId,
     p_academic_term_id: input.termId,
     p_section: input.section.trim(),
     p_faculty_user_ids: input.facultyUserIds,
     p_request_id: input.requestId ?? null,
+    p_weekly_schedule: (input.weeklySchedule ?? []).map((slot) => ({
+      component_type: slot.componentType,
+      day_of_week: slot.dayOfWeek,
+      start_minute: slot.startMinute,
+    })),
   });
   if (error) {
     if (error.code === '23505') throw new Error('A class for this subject and section already exists in this term.');
     throw error;
   }
   return data as string;
+}
+
+export async function loadAcademicAdminClassSchedule(classRecordId: string): Promise<ClassScheduleSlot[]> {
+  const { data, error } = await client()
+    .from('class_schedule_slots')
+    .select('component_type,day_of_week,start_minute')
+    .eq('class_record_id', classRecordId)
+    .order('day_of_week')
+    .order('start_minute');
+  if (error) throw error;
+  return (data ?? []).map((row) => ({
+    componentType: row.component_type as ClassScheduleSlot['componentType'],
+    dayOfWeek: Number(row.day_of_week),
+    startMinute: Number(row.start_minute),
+  }));
+}
+
+export async function saveAcademicAdminClassSchedule(classRecordId: string, weeklySchedule: ClassScheduleSlot[]): Promise<void> {
+  const { error } = await client().rpc('academic_admin_save_class_schedule', {
+    p_class_record_id: classRecordId,
+    p_weekly_schedule: weeklySchedule.map((slot) => ({
+      component_type: slot.componentType,
+      day_of_week: slot.dayOfWeek,
+      start_minute: slot.startMinute,
+    })),
+  });
+  if (error) throw error;
 }
 
 export async function updateAcademicAdminClassFaculty(classRecordId: string, facultyUserIds: string[]): Promise<void> {

@@ -61,6 +61,7 @@ async function fetchRecentForIds<T>(ids: string[], fetchRecent: (ids: string[]) 
 
 export type FacultyClass = {
   id: string;
+  departmentId?: string;
   subjectId: string;
   code: string;
   title: string;
@@ -95,7 +96,7 @@ export type FacultyEvaluationCriteriaSummary = {
 export type FacultyReferenceData = {
   subjects: { id: string; code: string; title: string; lecture_units: number; laboratory_units: number }[];
   terms: { id: string; label: string; status: 'active' | 'planned' }[];
-  programs: { id: string; code: string; name: string }[];
+  programs: { id: string; departmentId: string; code: string; name: string }[];
   institutionCode: string;
   sections: { programId: string; programCode: string; yearLevel: number; sectionNumber: number; value: string }[];
 };
@@ -144,7 +145,14 @@ export type FacultyCriteria = {
   gradingSystemDefinition?: GradingDefinition;
 };
 
-export type FacultyAttendanceSession = { id: string; date: string; label: string };
+export type FacultyAttendanceSession = {
+  id: string;
+  date: string;
+  label: string;
+  scheduleComponent?: 'lecture' | 'laboratory' | null;
+  scheduleStartMinute?: number | null;
+};
+export type FacultyClassScheduleSlot = { componentType: 'lecture' | 'laboratory'; dayOfWeek: number; startMinute: number };
 export type EvaluationRow = {
   enrollmentId: string;
   currentStanding: number | null;
@@ -179,6 +187,9 @@ export type ClassWorkspace = {
   criteria: FacultyCriteria | null;
   defaultGradingSystem?: GradingDefinition;
   semesterEndsOn?: string | null;
+  semesterStartsOn?: string | null;
+  academicTermLabel?: string | null;
+  classScheduleSlots: FacultyClassScheduleSlot[];
   evaluationSystem?: EvaluationDefinition;
   hasPrivateEvaluationSystem?: boolean;
   hasPersonalClassEvaluationSystem?: boolean;
@@ -288,7 +299,7 @@ async function loadFacultyClassesRequest(includeStudentCounts: boolean, requeste
   if (!classIds.length) return [];
   const buildQuery = () => client
     .from('class_records')
-    .select(`id,subject_id,section,subjects(code,title,lecture_units,laboratory_units),academic_terms(academic_year,semester)${includeStudentCounts ? ',enrollments(count)' : ''}`)
+    .select(`id,department_id,subject_id,section,subjects(code,title,lecture_units,laboratory_units),academic_terms(academic_year,semester)${includeStudentCounts ? ',enrollments(count)' : ''}`)
     .in('id', classIds)
     .eq('status', 'active')
     .order('created_at', { ascending: false });
@@ -310,6 +321,7 @@ async function loadFacultyClassesRequest(includeStudentCounts: boolean, requeste
   });
   return (data ?? []).map((row: any) => ({
     id: row.id,
+    departmentId: row.department_id,
     subjectId: row.subject_id,
     code: row.subjects?.code ?? '—',
     title: row.subjects?.title ?? 'Untitled subject',
@@ -362,7 +374,7 @@ async function loadFacultyReferenceDataRequest(): Promise<FacultyReferenceData> 
   // No client-side department filter is needed or trusted.
   const subjectQuery = () => client.from('subjects').select('id,code,title,lecture_units,laboratory_units').order('code');
   const termsQuery = () => client.from('academic_terms').select('id,academic_year,semester,status').in('status', ['active', 'planned']).order('starts_on', { ascending: false });
-  const programsQuery = () => client.from('programs').select('id,code,name').eq('status', 'active').order('code');
+  const programsQuery = () => client.from('programs').select('id,department_id,code,name').eq('status', 'active').order('code');
   const sectionsQuery = () => client.from('program_sections').select('program_id,year_level,section_number').order('year_level').order('section_number');
   const institutionQuery = () => client.from('system_settings').select('value').eq('key', 'academic.institution_code').maybeSingle();
   const [subjects, terms, programs, sections, institution] = await Promise.all([subjectQuery(), termsQuery(), programsQuery(), sectionsQuery(), institutionQuery()]);
@@ -376,7 +388,7 @@ async function loadFacultyReferenceDataRequest(): Promise<FacultyReferenceData> 
       label: `${row.academic_year} · ${row.semester}`,
       status: row.status as 'active' | 'planned',
     })),
-    programs: programs.data ?? [],
+    programs: (programs.data ?? []).map((row: any) => ({ id: row.id, departmentId: row.department_id, code: row.code, name: row.name })),
     institutionCode,
     sections: (sections.data ?? []).flatMap((row: any) => {
       const program = (programs.data ?? []).find((item: any) => item.id === row.program_id);
@@ -730,17 +742,18 @@ async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSy
   const includeAttendance = options.includeAttendance ?? true;
   const includeFeedback = options.includeFeedback ?? true;
   const includeEvaluations = options.includeEvaluations ?? true;
-  const [enrollments, assessments, criteriaSets, sessions, defaultSystemSetting, classMetaResult] = await Promise.all([
+  const [enrollments, assessments, criteriaSets, sessions, defaultSystemSetting, classMetaResult, scheduleSlotsResult] = await Promise.all([
     fetchAllPages((from, to) => client.from('enrollments').select('id,student_id,students(program_id,institutional_id,email,first_name,middle_name,last_name,suffix,year_level,section,programs(id,code))').eq('class_record_id', classId).eq('status', 'active').order('created_at').order('id').range(from, to)),
     fetchAllPages((from, to) => client.from('assessments').select('id,title,type,component_key,module_number,maximum_score,assessment_date,grading_period,source,grading_type_id,grading_group_id,grading_period_id,grading_instance_weight,optional').eq('class_record_id', classId).neq('status', 'archived').order('assessment_date').order('id').range(from, to)),
     client.from('criteria_sets').select('id,name,version,passing_threshold,grading_system_id,grading_system_definition,criteria_nodes(id,label,weight)').eq('class_record_id', classId).eq('status', 'active').order('version', { ascending: false }).limit(1),
     includeAttendance
-      ? fetchAllPages((from, to) => client.from('attendance_sessions').select('id,session_date,label').eq('class_record_id', classId).order('session_date', { ascending: false }).order('id').range(from, to))
+      ? fetchAllPages((from, to) => client.from('attendance_sessions').select('id,session_date,label,schedule_component,schedule_start_minute').eq('class_record_id', classId).order('session_date', { ascending: false }).order('id').range(from, to))
       : Promise.resolve({ data: [], error: null }),
     client.from('system_settings').select('value').eq('key', 'grading.default_system_definition').maybeSingle(),
-    client.from('class_records').select('department_id,academic_terms(starts_on,ends_on)').eq('id', classId).single(),
+    client.from('class_records').select('department_id,academic_terms(academic_year,semester,starts_on,ends_on)').eq('id', classId).single(),
+    client.from('class_schedule_slots').select('component_type,day_of_week,start_minute').eq('class_record_id', classId).order('day_of_week').order('start_minute'),
   ]);
-  const firstError = enrollments.error ?? assessments.error ?? criteriaSets.error ?? sessions.error ?? classMetaResult.error;
+  const firstError = enrollments.error ?? assessments.error ?? criteriaSets.error ?? sessions.error ?? classMetaResult.error ?? scheduleSlotsResult.error;
   if (firstError) throw firstError;
   const classMeta = classMetaResult.data as any;
   let evaluationRow: { definition?: unknown } | null = null;
@@ -851,8 +864,13 @@ async function loadClassWorkspaceRequest(classId: string, departmentEvaluationSy
   const evaluationSystem = savedEvaluationSystem && validateEvaluationSystem(savedEvaluationSystem).valid ? removeStandaloneMasteryFactor(savedEvaluationSystem) : DEFAULT_EVALUATION_SYSTEM;
   return {
     students, assessments: assessmentRows, scores: scoreMap, categoricalScores: categoricalScoreMap, attendance: attendanceMap, evaluations: evaluationMap,
-    attendanceSessions: (sessions.data ?? []).map((row) => ({ id: row.id, date: row.session_date, label: row.label })),
+    attendanceSessions: (sessions.data ?? []).map((row: any) => ({ id: row.id, date: row.session_date, label: row.label, scheduleComponent: row.schedule_component, scheduleStartMinute: row.schedule_start_minute == null ? null : Number(row.schedule_start_minute) })),
+    classScheduleSlots: (scheduleSlotsResult.data ?? []).map((row: any) => ({ componentType: row.component_type, dayOfWeek: Number(row.day_of_week), startMinute: Number(row.start_minute) })),
     defaultGradingSystem,
+    academicTermLabel: classMeta?.academic_terms
+      ? `${classMeta.academic_terms.academic_year ?? ''} · ${classMeta.academic_terms.semester ?? ''}`.trim()
+      : null,
+    semesterStartsOn: classMeta?.academic_terms?.starts_on ?? null,
     semesterEndsOn: classMeta?.academic_terms?.ends_on ?? null,
     evaluationSystem,
     hasPrivateEvaluationSystem,
@@ -1068,6 +1086,387 @@ export async function createAttendanceSession(classId: string, userId: string, d
   const { data, error } = await connected().from('attendance_sessions').insert({ class_record_id: classId, session_date: date, label: label.trim() || 'Class session', created_by: userId }).select('id').single();
   if (error) throw error;
   return data.id;
+}
+
+export type FacultyAttendanceImportContext = {
+  id: string;
+  code: string;
+  title: string;
+  section: string;
+  term: string;
+  students: Pick<RosterStudent, 'enrollmentId' | 'institutionalId' | 'name'>[];
+  sessions: FacultyAttendanceSession[];
+};
+export type FacultyAttendanceImportRow = {
+  rowNumber: number;
+  sheetName: string;
+  classLabel: string;
+  classId: string | null;
+  studentLabel: string;
+  enrollmentId: string | null;
+  date: string;
+  status: 'present' | 'absent' | 'late' | 'excused' | null;
+  sessionId: string | null;
+  errors: string[];
+};
+
+export async function loadFacultyAttendanceImportContexts(classes: FacultyClass[]): Promise<FacultyAttendanceImportContext[]> {
+  const client = connected();
+  const classIds = [...new Set(classes.map((item) => item.id))];
+  if (!classIds.length) return [];
+  const [classMeta, scheduleRows, enrollmentRows] = await Promise.all([
+    client.from('class_records').select('id,academic_terms(starts_on,ends_on)').in('id', classIds),
+    client.from('class_schedule_slots').select('class_record_id').in('class_record_id', classIds),
+    fetchAllPages((from, to) => client.from('enrollments').select('id,class_record_id,students(institutional_id,first_name,middle_name,last_name,suffix)').in('class_record_id', classIds).eq('status', 'active').order('class_record_id').order('id').range(from, to)),
+  ]);
+  if (classMeta.error) throw classMeta.error;
+  if (scheduleRows.error) throw scheduleRows.error;
+  if (enrollmentRows.error) throw enrollmentRows.error;
+  const scheduledClassIds = new Set((scheduleRows.data ?? []).map((row: any) => row.class_record_id));
+  const termsByClass = new Map((classMeta.data ?? []).map((row: any) => [row.id, row.academic_terms]));
+  await Promise.all(classIds.filter((id) => {
+    const term: any = termsByClass.get(id);
+    return scheduledClassIds.has(id) && term?.starts_on && term?.ends_on;
+  }).map((id) => ensureClassScheduleAttendanceSessions(id)));
+  const [sessionRows] = await Promise.all([
+    fetchAllPages((from, to) => client.from('attendance_sessions').select('id,class_record_id,session_date,label,schedule_component,schedule_start_minute').in('class_record_id', classIds).order('session_date').order('id').range(from, to)),
+  ]);
+  if (sessionRows.error) throw sessionRows.error;
+  const studentsByClass = new Map<string, Pick<RosterStudent, 'enrollmentId' | 'institutionalId' | 'name'>[]>();
+  for (const row of enrollmentRows.data ?? []) {
+    const student: any = row.students;
+    const list = studentsByClass.get(row.class_record_id) ?? [];
+    list.push({ enrollmentId: row.id, institutionalId: student?.institutional_id ?? '', name: formatStudentName({ firstName: student?.first_name, middleName: student?.middle_name, lastName: student?.last_name, suffix: student?.suffix }) });
+    studentsByClass.set(row.class_record_id, list);
+  }
+  const sessionsByClass = new Map<string, FacultyAttendanceSession[]>();
+  for (const row of sessionRows.data ?? []) {
+    const list = sessionsByClass.get(row.class_record_id) ?? [];
+    list.push({ id: row.id, date: row.session_date, label: row.label, scheduleComponent: row.schedule_component, scheduleStartMinute: row.schedule_start_minute == null ? null : Number(row.schedule_start_minute) });
+    sessionsByClass.set(row.class_record_id, list);
+  }
+  return classes.map((item) => ({ ...item, students: studentsByClass.get(item.id) ?? [], sessions: sessionsByClass.get(item.id) ?? [] }));
+}
+
+type AttendanceImportSheet = { name: string; rows: Record<string, string>[]; rowNumbers?: number[] };
+const attendanceIdHeaders = ['student id', 'institutional id', 'student number', 'student no', 'id', 'id number', 'student id number'];
+const attendanceNameHeaders = ['student name', 'name', 'full name', 'student full name', 'full student name', 'name of student', 'student', 'learner'];
+const attendanceStatusHeaders = ['status', 'attendance', 'attendance status'];
+const attendanceDateHeaders = ['date', 'session date', 'attendance date', 'class date'];
+const attendanceComponentHeaders = ['component', 'class type', 'session type', 'lecture lab', 'lecture/lab'];
+const attendanceTimeHeaders = ['time', 'start time', 'class time', 'session time'];
+const attendanceClassHeaders = ['class', 'class name', 'class code', 'course', 'course code', 'subject', 'subject code'];
+const attendanceSectionHeaders = ['section', 'class section'];
+const attendanceTermHeaders = ['term', 'academic term', 'semester', 'academic year'];
+const normalizeAttendanceHeader = (value: string) => value.trim().toLocaleLowerCase().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ');
+const isAttendanceDateHeader = (header: string) => attendanceDateHeaders.includes(header)
+  || /^(?:attendance|session|class|meeting)\s+(?:class\s+)?date\b/.test(header)
+  || /^date\s+(?:of\s+)?(?:attendance|session|class|meeting)\b/.test(header);
+const attendanceNameTokens = (value: string) => value.toLocaleLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9\s]/g, ' ').split(/\s+/).filter((token) => token && !['jr', 'sr', 'ii', 'iii', 'iv', 'v'].includes(token)).sort().join(' ');
+
+function attendanceDateFromText(value: string, academicTerm = ''): string | null {
+  const source = value.trim();
+  const formatDate = (year: number, month: number, day: number) => {
+    const date = new Date(Date.UTC(year, month - 1, day));
+    if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) return null;
+    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  };
+  let match = source.match(/\b(\d{4})-(\d{1,2})-(\d{1,2})\b/);
+  if (match) return formatDate(Number(match[1]), Number(match[2]), Number(match[3]));
+  match = source.match(/\b(20\d{2})[/.](\d{1,2})[/.](\d{1,2})\b/);
+  if (match) return formatDate(Number(match[1]), Number(match[2]), Number(match[3]));
+  match = source.match(/\b(\d{1,2})[/.\-](\d{1,2})[/.\-](\d{2,4})\b/);
+  if (match) {
+    const first = Number(match[1]); const second = Number(match[2]);
+    const year = Number(match[3]) < 100 ? 2000 + Number(match[3]) : Number(match[3]);
+    const month = first;
+    const day = second;
+    return formatDate(year, month, day);
+  }
+  const academicYears = [...academicTerm.matchAll(/\b(20\d{2})\s*[-/–]\s*(20\d{2})\b/g)][0];
+  const academicYear = academicYears ? Number(academicYears[1]) : Number(academicTerm.match(/\b(20\d{2})\b/)?.[1] ?? 0);
+  const yearForMonth = (month: number) => academicYears && month <= 6 ? Number(academicYears[2]) : academicYear;
+  const monthNames = 'jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?';
+  match = source.match(new RegExp(`\\b(${monthNames})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?[,]?\\s+(20\\d{2})\\b`, 'i'))
+    ?? source.match(new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(${monthNames})\\.?[,]?\\s+(20\\d{2})\\b`, 'i'));
+  if (match) {
+    const monthToken = match[1].match(/^[a-z]+$/i) ? match[1].slice(0, 3).toLocaleLowerCase() : match[2].slice(0, 3).toLocaleLowerCase();
+    const day = Number(match[1].match(/^\d/) ? match[1] : match[2]);
+    const year = Number(match[3]);
+    const month = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(monthToken) + 1;
+    return month > 0 && day >= 1 && day <= 31 ? `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}` : null;
+  }
+  if (academicYear) {
+    const yearlessMonthFirst = source.match(new RegExp(`\\b(${monthNames})\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?\\b`, 'i'));
+    const yearlessDayFirst = source.match(new RegExp(`\\b(\\d{1,2})(?:st|nd|rd|th)?\\s+(${monthNames})\\.?\\b`, 'i'));
+    const partial = yearlessMonthFirst ?? yearlessDayFirst;
+    if (partial) {
+      const monthToken = partial[1].match(/^[a-z]+$/i) ? partial[1].slice(0, 3).toLocaleLowerCase() : partial[2].slice(0, 3).toLocaleLowerCase();
+      const day = Number(partial[1].match(/^\d/) ? partial[1] : partial[2]);
+      const month = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'].indexOf(monthToken) + 1;
+      const year = yearForMonth(month);
+      return month > 0 && day >= 1 && day <= 31 ? `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}` : null;
+    }
+    const yearlessNumeric = source.match(/\b(\d{1,2})[/.\-](\d{1,2})\b/);
+    if (yearlessNumeric) {
+      const first = Number(yearlessNumeric[1]); const second = Number(yearlessNumeric[2]);
+      const month = first;
+      const day = second;
+      if (month >= 1 && month <= 12 && day >= 1 && day <= 31) return `${yearForMonth(month)}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+    }
+  }
+  const excelSerial = source.match(/\b([3-5]\d{4})\b/);
+  if (excelSerial) {
+    const date = new Date(Date.UTC(1899, 11, 30) + Number(excelSerial[1]) * 86_400_000);
+    return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}-${String(date.getUTCDate()).padStart(2, '0')}`;
+  }
+  return null;
+}
+
+function isAttendanceDateHeading(value: string) {
+  return Boolean(attendanceDateFromText(value))
+    || /\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+\d{1,2}(?:st|nd|rd|th)?\b|\b\d{1,2}(?:st|nd|rd|th)?\s+(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\b|\b\d{1,2}[/.\-]\d{1,2}\b/i.test(value);
+}
+
+function attendanceComponentFromText(value: string): 'lecture' | 'laboratory' | null {
+  const lab = /\b(lab|laboratory)\b/i.test(value);
+  const lecture = /\b(lec|lecture)\b/i.test(value);
+  if (lab === lecture) return null;
+  if (lab) return 'laboratory';
+  if (lecture) return 'lecture';
+  return null;
+}
+
+function attendanceMinuteFromText(value: string): number | null {
+  const match = value.match(/\b(\d{1,2})(?::(\d{2}))?\s*(AM|PM)\b/i);
+  const militaryMatch = value.match(/\b([01]?\d|2[0-3]):([0-5]\d)\b/);
+  if (!match && !militaryMatch) return null;
+  if (!match && militaryMatch) return Number(militaryMatch[1]) * 60 + Number(militaryMatch[2]);
+  if (!match) return null;
+  let hour = Number(match[1]);
+  const minute = Number(match[2] ?? 0);
+  const period = match[3]?.toLocaleUpperCase();
+  if (hour > 23 || minute > 59) return null;
+  if (period) {
+    if (hour < 1 || hour > 12) return null;
+    hour = hour % 12 + (period === 'PM' ? 12 : 0);
+  }
+  return hour * 60 + minute;
+}
+
+function attendanceStatusFromText(value: string): FacultyAttendanceImportRow['status'] {
+  const normalized = value.trim().toLocaleLowerCase().replace(/[.!]/g, '');
+  const aliases: Record<string, NonNullable<FacultyAttendanceImportRow['status']>> = {
+    present: 'present', p: 'present', yes: 'present', y: 'present', '1': 'present', here: 'present', '✓': 'present', '✔': 'present', checked: 'present',
+    absent: 'absent', a: 'absent', no: 'absent', n: 'absent', '0': 'absent', x: 'absent', '✗': 'absent', '✘': 'absent',
+    late: 'late', l: 'late', excused: 'excused', e: 'excused',
+  };
+  if (/\bnot\s+present\b/.test(normalized)) return 'absent';
+  const named = normalized.match(/\b(present|absent|late|excused)\b/);
+  return aliases[normalized] ?? (named ? aliases[named[1]] : null) ?? null;
+}
+
+function attendanceClassMatch(contexts: FacultyAttendanceImportContext[], classText: string, sectionText: string, termText: string, sheetName: string, fallbackClassId: string, allowFallback: boolean) {
+  const compact = (value: string) => value.toLocaleLowerCase().replace(/[^a-z0-9]/g, '');
+  let candidates = contexts;
+  if (classText) {
+    const target = compact(classText);
+    candidates = candidates.filter((item) => {
+      const values = [item.id, item.code, item.title, item.section, `${item.code} ${item.section}`, `${item.code} ${item.section} ${item.term}`];
+      return values.some((value) => {
+        const candidate = compact(value);
+        return candidate === target || (candidate.length >= 4 && (candidate.includes(target) || target.includes(candidate)));
+      });
+    });
+  } else {
+    const target = compact(sheetName);
+    const matched = contexts.filter((item) => {
+      const code = compact(item.code); const section = compact(item.section); const title = compact(item.title);
+      return (code && (target === code || (target.includes(code) && (!section || target.includes(section)))))
+        || (title && target === title)
+        || (section && (target === section || (section.length >= 4 && target.includes(section))));
+    });
+    if (matched.length) candidates = matched;
+  }
+  if (sectionText) {
+    const target = compact(sectionText);
+    candidates = candidates.filter((item) => compact(item.section) === target || compact(item.section).endsWith(target) || target.endsWith(compact(item.section)));
+  }
+  if (termText) {
+    const target = compact(termText);
+    candidates = candidates.filter((item) => compact(item.term).includes(target) || target.includes(compact(item.term)));
+  }
+  if (candidates.length === 1) return { context: candidates[0], ambiguous: false };
+  if (allowFallback && !classText && !sectionText && !termText) {
+    const fallback = candidates.find((item) => item.id === fallbackClassId);
+    if (fallback) return { context: fallback, ambiguous: false };
+  }
+  return { context: null, ambiguous: candidates.length > 1 };
+}
+
+function attendanceStudentMatch(context: FacultyAttendanceImportContext, values: Record<string, string>) {
+  const get = (aliases: string[]) => aliases.map((alias) => values[alias]).find(Boolean) ?? '';
+  const sourceId = get(attendanceIdHeaders);
+  const firstName = get(['first name', 'given name', 'firstname']);
+  const middleName = get(['middle name', 'middle initial']);
+  const lastName = get(['last name', 'surname', 'family name', 'lastname']);
+  const combinedName = Object.keys(values).find((header) => header.includes('name') && header.includes('first') && header.includes('last'));
+  const sourceName = get(attendanceNameHeaders) || (combinedName ? values[combinedName] : '') || [firstName, middleName, lastName].filter(Boolean).join(' ');
+  let matches = sourceId
+    ? context.students.filter((student) => normalizeStudentId(student.institutionalId) === normalizeStudentId(formatImportedStudentId(sourceId)))
+    : [];
+  // Prefer a valid student number, but still use a supplied name if the number
+  // column is present but blank, formatted differently, or contains an export ID.
+  if (!matches.length && sourceName) {
+    const exactKey = attendanceNameTokens(sourceName);
+    matches = context.students.filter((student) => attendanceNameTokens(student.name) === exactKey);
+    if (!matches.length && exactKey.split(' ').length >= 2) {
+      const supplied = new Set(exactKey.split(' '));
+      matches = context.students.filter((student) => [...supplied].every((token) => attendanceNameTokens(student.name).split(' ').includes(token)));
+    }
+  }
+  return { student: matches.length === 1 ? matches[0] : null, count: matches.length, sourceId, sourceName };
+}
+
+function attendanceImportRecords(sheets: AttendanceImportSheet[], contexts: FacultyAttendanceImportContext[], fallbackClassId: string, fallbackSessionId: string): FacultyAttendanceImportRow[] {
+  const records: FacultyAttendanceImportRow[] = [];
+  const seen = new Set<string>();
+  const fallbackSession = contexts.flatMap((context) => context.sessions).find((session) => session.id === fallbackSessionId);
+  const allowFallback = sheets.length === 1 || contexts.length === 1;
+  for (const sheet of sheets) {
+    if (!sheet.rows.length) continue;
+    const sourceHeaders = Object.keys(sheet.rows[0]);
+    const headers = sourceHeaders.map(normalizeAttendanceHeader);
+    const dateColumns = sourceHeaders.flatMap((header) => {
+      const date = attendanceDateFromText(header);
+      const monthDayText = isAttendanceDateHeading(header);
+      return date || monthDayText ? [{ header, date, component: attendanceComponentFromText(header), startMinute: attendanceMinuteFromText(header) }] : [];
+    });
+    const hasStudentColumn = headers.some((header) => [...attendanceIdHeaders, ...attendanceNameHeaders, 'first name', 'given name', 'last name', 'surname'].includes(header) || (header.includes('name') && header.includes('first') && header.includes('last')));
+    const hasLongDate = headers.some(isAttendanceDateHeader);
+    const hasStatus = headers.some((header) => attendanceStatusHeaders.includes(header));
+    if (!hasStudentColumn) {
+      records.push({ rowNumber: 1, sheetName: sheet.name, classLabel: '—', classId: null, studentLabel: '—', enrollmentId: null, date: '—', status: null, sessionId: null, errors: ['No student ID or name columns were found.'] });
+      continue;
+    }
+    if (!dateColumns.length && !hasLongDate && !hasStatus) {
+      records.push({ rowNumber: 1, sheetName: sheet.name, classLabel: '—', classId: null, studentLabel: '—', enrollmentId: null, date: '—', status: null, sessionId: null, errors: ['No date columns or Status column were found.'] });
+      continue;
+    }
+    sheet.rows.forEach((raw, rowIndex) => {
+      const values = Object.fromEntries(Object.entries(raw).map(([key, value]) => [normalizeAttendanceHeader(key), String(value ?? '').trim()]));
+      const get = (aliases: string[]) => aliases.map((alias) => values[alias]).find(Boolean) ?? '';
+      const selected = attendanceClassMatch(contexts, get(attendanceClassHeaders), get(attendanceSectionHeaders), get(attendanceTermHeaders), sheet.name, fallbackClassId, allowFallback);
+      const sourceComponent = attendanceComponentFromText(get(attendanceComponentHeaders));
+      const studentMatch = selected.context ? attendanceStudentMatch(selected.context, values) : null;
+      const rowLocationErrors = selected.context ? [] : [selected.ambiguous ? 'Class or worksheet matches multiple assigned classes; include a class code, section, and term.' : 'Could not match this worksheet or row to an assigned class.'];
+      const studentErrors = !selected.context ? [] : !studentMatch?.sourceId && !studentMatch?.sourceName
+        ? ['Student ID or student name is required.']
+        : !studentMatch?.count
+          ? [`Student “${studentMatch?.sourceName || studentMatch?.sourceId}” was not found in this class.`]
+          : studentMatch.count > 1 ? ['Student name matches more than one student; include a student ID.'] : [];
+      const meetings: { date: string | null; statusText: string; component: 'lecture' | 'laboratory' | null; startMinute: number | null }[] = [];
+      if (dateColumns.length) {
+        for (const dateColumn of dateColumns) {
+          const statusText = raw[dateColumn.header]?.trim() ?? '';
+          if (statusText) meetings.push({ date: dateColumn.date ?? attendanceDateFromText(dateColumn.header, selected.context?.term), statusText, component: dateColumn.component ?? sourceComponent, startMinute: dateColumn.startMinute });
+        }
+      } else {
+        const dateHeader = headers.find(isAttendanceDateHeader);
+        const sourceDate = dateHeader ? values[dateHeader] ?? '' : '';
+        const date = attendanceDateFromText(sourceDate, selected.context?.term);
+        const statusText = get(attendanceStatusHeaders);
+        const startMinute = attendanceMinuteFromText(sourceDate) ?? attendanceMinuteFromText(get(attendanceTimeHeaders));
+        if (sourceDate && !date) {
+          records.push({ rowNumber: sheet.rowNumbers?.[rowIndex] ?? rowIndex + 2, sheetName: sheet.name, classLabel: selected.context ? `${selected.context.code} · ${selected.context.section} · ${selected.context.term}` : '—', classId: selected.context?.id ?? null, studentLabel: studentMatch?.student?.name ?? studentMatch?.sourceName ?? studentMatch?.sourceId ?? '—', enrollmentId: studentMatch?.student?.enrollmentId ?? null, date: sourceDate, status: null, sessionId: null, errors: [...rowLocationErrors, ...studentErrors, `Could not read date “${sourceDate}”.`] });
+          return;
+        }
+        if (statusText) meetings.push({ date: date ?? '', statusText, component: sourceComponent, startMinute });
+      }
+      if (!meetings.length) return;
+      for (const meeting of meetings) {
+        const status = attendanceStatusFromText(meeting.statusText);
+        const sessionDate = meeting.date || fallbackSession?.date || '';
+        const fallbackComponent = !meeting.date ? fallbackSession?.scheduleComponent ?? null : null;
+        const fallbackStartMinute = !meeting.date ? fallbackSession?.scheduleStartMinute ?? null : null;
+        const sameDate = selected.context?.sessions.filter((session) => session.date === sessionDate) ?? [];
+        const component = meeting.component ?? fallbackComponent;
+        const startMinute = meeting.startMinute ?? fallbackStartMinute;
+        let sessionMatches = sameDate.filter((session) => (!component || session.scheduleComponent === component)
+          && (startMinute == null || session.scheduleStartMinute === startMinute));
+        if (sessionMatches.length > 1 && fallbackSessionId) {
+          const fallback = sessionMatches.find((session) => session.id === fallbackSessionId);
+          if (fallback) sessionMatches = [fallback];
+        }
+        const errors = [...rowLocationErrors, ...studentErrors];
+        if (!status) errors.push(`“${meeting.statusText}” is not a supported attendance status.`);
+        if (!sessionDate) errors.push('A date is required.');
+        else if (!sessionMatches.length) errors.push(`No attendance session exists for ${sessionDate} in this class.`);
+        else if (sessionMatches.length > 1) errors.push(`More than one session matches ${sessionDate}; include Lecture/Lab or a time in the date heading.`);
+        const session = sessionMatches.length === 1 ? sessionMatches[0] : null;
+        if (session && studentMatch?.student) {
+          const key = `${session.id}:${studentMatch.student.enrollmentId}`;
+          if (seen.has(key)) errors.push('This student and session appear more than once in the file.');
+          seen.add(key);
+        }
+        records.push({
+          rowNumber: sheet.rowNumbers?.[rowIndex] ?? rowIndex + 2,
+          sheetName: sheet.name,
+          classLabel: selected.context ? `${selected.context.code} · ${selected.context.section} · ${selected.context.term}` : '—',
+          classId: selected.context?.id ?? null,
+          studentLabel: studentMatch?.student?.name ?? studentMatch?.sourceName ?? studentMatch?.sourceId ?? '—',
+          enrollmentId: studentMatch?.student?.enrollmentId ?? null,
+          date: sessionDate || '—',
+          status,
+          sessionId: session?.id ?? null,
+          errors,
+        });
+      }
+    });
+  }
+  if (!records.length) throw new Error('No attendance values were found in the selected worksheets.');
+  return records;
+}
+
+export function previewAttendanceCsv(csvText: string, contexts: FacultyAttendanceImportContext[], fallbackClassId: string, fallbackSessionId: string) {
+  const rows = parseCsv(csvText);
+  if (!rows.length) throw new Error('The CSV does not contain any attendance rows.');
+  return attendanceImportRecords([{ name: 'CSV', rows }], contexts, fallbackClassId, fallbackSessionId);
+}
+
+export function previewAttendanceExcel(fileData: ArrayBuffer, contexts: FacultyAttendanceImportContext[], fallbackClassId: string, fallbackSessionId: string) {
+  const workbook = XLSX.read(fileData, { type: 'array', cellDates: false });
+  const sheets = workbook.SheetNames.flatMap((name) => {
+    const sheet = workbook.Sheets[name];
+    if (!sheet) return [];
+    const matrix = XLSX.utils.sheet_to_json<unknown[]>(sheet, { header: 1, raw: false, defval: '' });
+    const headerIndex = matrix.slice(0, 10).findIndex((cells) => {
+      const sourceHeaders = cells.map((value) => String(value ?? ''));
+      const headers = sourceHeaders.map(normalizeAttendanceHeader);
+      const hasStudent = headers.some((header) => [...attendanceIdHeaders, ...attendanceNameHeaders, 'first name', 'given name', 'last name', 'surname'].includes(header) || (header.includes('name') && header.includes('first') && header.includes('last')));
+      const hasAttendance = headers.some((header) => attendanceStatusHeaders.includes(header) || isAttendanceDateHeader(header)) || sourceHeaders.some(isAttendanceDateHeading);
+      return hasStudent && hasAttendance;
+    });
+    if (headerIndex < 0) {
+      const rows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' }).filter((row) => Object.values(row).some((value) => String(value ?? '').trim().length > 0))
+        .map((row) => Object.fromEntries(Object.entries(row).map(([key, value]) => [key, String(value ?? '').trim()])));
+      return rows.length ? [{ name, rows }] : [];
+    }
+    const headers = matrix[headerIndex].map((value, index) => String(value ?? '').trim() || `column ${index + 1}`);
+    const dataRows = matrix.slice(headerIndex + 1).flatMap((cells, index) => {
+      if (!cells.some((value) => String(value ?? '').trim())) return [];
+      return [{ row: Object.fromEntries(headers.map((header, cellIndex) => [header, String(cells[cellIndex] ?? '').trim()])), rowNumber: headerIndex + index + 2 }];
+    });
+    return dataRows.length ? [{ name, rows: dataRows.map((entry) => entry.row), rowNumbers: dataRows.map((entry) => entry.rowNumber) }] : [];
+  });
+  if (!sheets.length) throw new Error('The Excel workbook contains no attendance rows.');
+  return attendanceImportRecords(sheets, contexts, fallbackClassId, fallbackSessionId);
+}
+
+export async function ensureClassScheduleAttendanceSessions(classId: string) {
+  const { data, error } = await connected().rpc('ensure_class_schedule_attendance_sessions', { p_class_record_id: classId });
+  if (error) throw error;
+  return Number(data ?? 0);
 }
 
 export async function saveAttendance(userId: string, sessionId: string, rows: { enrollmentId: string; status: 'present' | 'absent' | 'late' | 'excused' }[]) {

@@ -24,12 +24,12 @@ import { styles } from '@/screens/FacultyLivePortalContent.styles';
 import { storedAssessmentValue, valueMappingForType } from '@/components/gradebook/shared';
 import { adaptAssessmentForecastOverlay, assessmentComponentPath, assessmentGroupLabel, assessmentPeriodLabel, componentLabel, gradingComponentPath, groupHierarchyName } from '@/components/gradebook/model';
 import {
-  addStudentToClass, applyFacultyEvaluationSystemToClasses, createAssessment, createAttendanceSession, deleteFacultyClassEvaluationSystem, encodePredictionInput, exportClassCsv, invalidateFacultyClassWorkspaceCache, invalidateFacultyClassesCache, loadAssessmentScoreHistory, loadGradebookScoreHistory, nameGradebookScoreVersion, restoreAssessmentInstanceVersion, restoreAssessmentScoreVersion, restoreGradebookToVersion,
+  addStudentToClass, applyFacultyEvaluationSystemToClasses, createAssessment, createAttendanceSession, ensureClassScheduleAttendanceSessions, deleteFacultyClassEvaluationSystem, encodePredictionInput, exportClassCsv, invalidateFacultyClassWorkspaceCache, invalidateFacultyClassesCache, loadAssessmentScoreHistory, loadGradebookScoreHistory, nameGradebookScoreVersion, restoreAssessmentInstanceVersion, restoreAssessmentScoreVersion, restoreGradebookToVersion,
   importRosterCsv, importRosterExcel, loadClassWorkspace, loadFacultyClasses, loadFacultyEvaluationCriteriaLibrary, loadFacultyReferenceData, loadMyClassRequests, loadMySubjectRequests, removeStudentsFromClass,
-  previewRosterCsv, previewRosterExcel, generateFacultyFeedbackDraft, runAiPredictions, saveAttendance, saveFacultyFeedback, sendFacultyFeedbackEmail, saveScores, saveScoreBatch,
+  previewRosterCsv, previewRosterExcel, previewAttendanceCsv, previewAttendanceExcel, loadFacultyAttendanceImportContexts, generateFacultyFeedbackDraft, runAiPredictions, saveAttendance, saveFacultyFeedback, sendFacultyFeedbackEmail, saveScores, saveScoreBatch,
   submitFacultyClassRequest, submitSubjectRequest, calculateEnrollmentGrade, summarizeEnrollmentStanding, updateAssessment,
   updateStudentDetails, type ClassWorkspace, type FacultyAssessment, type FacultyClass, type FacultyReferenceData, type RosterStudent,
-  type FacultyClassRequest, type SubjectRequest, type PredictionInput,
+  type FacultyClassRequest, type FacultyAttendanceImportRow, type SubjectRequest, type PredictionInput,
 } from '@/services/faculty';
 import { EvaluationSystemBuilderForm } from '@/components/EvaluationSystemBuilderForm';
 import { colors, shadow } from '@/theme/tokens';
@@ -38,7 +38,7 @@ import { buildUnscoredAssessmentForecastOverlays, calculateGradingSystem, calcul
 const LazyGradebook = lazy(() => import('@/components/gradebook/Gradebook').then((module) => ({ default: module.Gradebook })));
 const LazyVisualizationPanel = lazy(() => import('@/components/charts/VisualizationPanel').then((module) => ({ default: module.VisualizationPanel })));
 
-const emptyWorkspace: ClassWorkspace = { students: [], assessments: [], scores: {}, categoricalScores: {}, criteria: null, attendanceSessions: [], attendance: {}, evaluations: {}, feedback: {} };
+const emptyWorkspace: ClassWorkspace = { students: [], assessments: [], scores: {}, categoricalScores: {}, criteria: null, attendanceSessions: [], classScheduleSlots: [], attendance: {}, evaluations: {}, feedback: {} };
 type StudentFormState = { institutionalId: string; email: string; firstName: string; middleName: string; lastName: string; suffix: string; yearLevel: string };
 const emptyStudentForm: StudentFormState = { institutionalId: '', email: '', firstName: '', middleName: '', lastName: '', suffix: '', yearLevel: '1' };
 export type AssessmentFormState = { title: string; component: SwunextAssessmentComponent; gradingTypeId: string; gradingGroupId: string; gradingPeriodId: string; instanceWeight: string; maximumScore: string; moduleNumber: string; date: string; gradingPeriod: string; source: 'manual' | 'csv' };
@@ -310,7 +310,7 @@ function useFacultyWorkspace(screen: string) {
       timer = setTimeout(refresh, 300);
     };
     const channel = client.channel(`faculty-workspace-${user.id}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`);
-    for (const table of ['class_records', 'enrollments', 'assessments', 'assessment_results', 'criteria_sets', 'attendance_records', 'attendance_sessions', 'performance_evaluations', 'performance_predictions', 'faculty_class_evaluation_systems', 'class_evaluation_criteria', 'evaluation_criteria_systems', 'evaluation_systems']) {
+    for (const table of ['class_records', 'class_schedule_slots', 'enrollments', 'assessments', 'assessment_results', 'criteria_sets', 'attendance_records', 'attendance_sessions', 'performance_evaluations', 'performance_predictions', 'faculty_class_evaluation_systems', 'class_evaluation_criteria', 'evaluation_criteria_systems', 'evaluation_systems']) {
       channel.on('postgres_changes', { event: '*', schema: 'public', table }, scheduleRefresh);
     }
     channel.subscribe();
@@ -1236,16 +1236,21 @@ function Classes(props: StateProps) {
 function Students(props: StateProps) {
   const validateStudentId = useStudentIdValidation();
   const { enabled: tablePaginationEnabled } = useTablePaginationPreference();
+  const selectedClass = props.classes.find((item) => item.id === props.selectedClassId);
+  const rosterPrograms = useMemo(
+    () => props.references.programs.filter((item) => item.departmentId === selectedClass?.departmentId),
+    [props.references.programs, selectedClass?.departmentId],
+  );
   const [query, setQuery] = useState('');
   const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc');
   const [open, setOpen] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
   const [csvOpen, setCsvOpen] = useState(false);
   const [saving, setSaving] = useState(false);
-  const [programId, setProgramId] = useState(props.references.programs[0]?.id ?? '');
+  const [programId, setProgramId] = useState(rosterPrograms[0]?.id ?? '');
+  const rosterProgramIsValid = rosterPrograms.some((item) => item.id === programId);
   const yearLevels = useYearLevels(programId);
   const [form, setForm] = useState<StudentFormState>(emptyStudentForm);
-  const selectedClass = props.classes.find((item) => item.id === props.selectedClassId);
   const studentIdError = validateStudentId && form.institutionalId.trim() && !isValidStudentId(form.institutionalId) ? 'Use a 12-digit number or 05-XXXX-XXXXXX.' : undefined;
   const [editingStudent, setEditingStudent] = useState<RosterStudent | null>(null);
   const [selectedEnrollmentIds, setSelectedEnrollmentIds] = useState<string[]>([]);
@@ -1260,6 +1265,10 @@ function Students(props: StateProps) {
     try { return rosterFile.kind === 'excel' ? previewRosterExcel(rosterFile.data!, importSectionOptions) : previewRosterCsv(rosterFile.text ?? '', importSectionOptions); }
     catch (cause) { return [{ rowNumber: 0, raw: {}, errors: [getErrorMessage(cause, 'Unable to read this file.')], duplicate: false, value: undefined }]; }
   }, [rosterFile, importSectionOptions]);
+
+  useEffect(() => {
+    setProgramId((current) => rosterPrograms.some((item) => item.id === current) ? current : rosterPrograms[0]?.id ?? '');
+  }, [rosterPrograms]);
 
   const filtered = useMemo(() => {
     const normalizedQuery = query.toLowerCase();
@@ -1284,7 +1293,7 @@ function Students(props: StateProps) {
 
   const resetForm = () => {
     setForm(emptyStudentForm);
-    setProgramId(props.references.programs[0]?.id ?? '');
+    setProgramId(rosterPrograms[0]?.id ?? '');
     setEditingStudent(null);
   };
   const openAdd = () => {
@@ -1293,7 +1302,7 @@ function Students(props: StateProps) {
   };
   const openEdit = (student: RosterStudent) => {
     setEditingStudent(student);
-    setProgramId(student.programId);
+    setProgramId(rosterPrograms.some((item) => item.id === student.programId) ? student.programId : '');
     setForm({
       institutionalId: student.institutionalId,
       email: student.email,
@@ -1308,6 +1317,7 @@ function Students(props: StateProps) {
 
   const add = async () => {
     if (!props.selectedClassId) return props.toast.show('Create or select a class first.');
+    if (!rosterProgramIsValid) return props.toast.show('Choose a program in the selected class department.');
     if (validateStudentId && !isValidStudentId(form.institutionalId)) return;
     setSaving(true);
     try {
@@ -1325,6 +1335,7 @@ function Students(props: StateProps) {
 
   const saveEdit = async () => {
     if (!editingStudent) return;
+    if (!rosterProgramIsValid) return props.toast.show('Choose a program in the selected class department.');
     if (validateStudentId && !isValidStudentId(form.institutionalId)) return;
     setSaving(true);
     try {
@@ -1364,14 +1375,15 @@ function Students(props: StateProps) {
   };
 
   const downloadRosterTemplate = async () => {
-    const templateContent = 'institutional_id,first_name,middle_name,last_name,suffix,email,year_level,section\n2024-0001,Juan,,Dela Cruz,,juan.delacruz@phinmaed.com,3,BSIT-3A\n2024-0002,Maria,,Santos,,maria.santos@phinmaed.com,3,BSIT-3A';
+    const templateSection = selectedClass?.section?.trim() || 'BSIT-3A';
+    const templateContent = `student_id,first_name,middle_name,last_name,suffix,email,year_level,section\n05-2324-123456,Juan,,Dela Cruz,,juan.delacruz@phinmaed.com,3,${templateSection}\n05-2324-123457,Maria,,Santos,,maria.santos@phinmaed.com,3,${templateSection}`;
     if (Platform.OS === 'web') {
       const XLSX = await import('xlsx-js-style');
       const workbook = XLSX.utils.book_new();
       const worksheet = XLSX.utils.aoa_to_sheet([
-        ['institutional_id', 'first_name', 'middle_name', 'last_name', 'suffix', 'email', 'year_level', 'section'],
-        [52324123456, 'Juan', '', 'Dela Cruz', '', 'juan.delacruz@phinmaed.com', 3, 'BSIT-3A'],
-        [52324123457, 'Maria', '', 'Santos', '', 'maria.santos@phinmaed.com', 3, 'BSIT-3A'],
+        ['student_id', 'first_name', 'middle_name', 'last_name', 'suffix', 'email', 'year_level', 'section'],
+        [52324123456, 'Juan', '', 'Dela Cruz', '', 'juan.delacruz@phinmaed.com', 3, templateSection],
+        [52324123457, 'Maria', '', 'Santos', '', 'maria.santos@phinmaed.com', 3, templateSection],
       ]);
       const institutionalIdFormat = '00-0000-000000';
       worksheet.A2.z = institutionalIdFormat;
@@ -1409,6 +1421,7 @@ function Students(props: StateProps) {
 
   const importRoster = async () => {
     if (!rosterFile || !props.selectedClassId) return;
+    if (!rosterProgramIsValid) return props.toast.show('Choose a program in the selected class department.');
     setSaving(true);
     try {
       const result = rosterFile.kind === 'excel'
@@ -1518,7 +1531,7 @@ Requirements:
           <PageState kind="empty" title="No students in this class" message="Use Add student or Import roster to populate the selected class roster." />
         )}
       <Dialog visible={open} title="Add student to class" onClose={() => { setOpen(false); resetForm(); }}>
-        <SelectField label="Program" value={programId} options={props.references.programs.map((item) => ({ label: `${item.code} · ${item.name}`, value: item.id }))} onChange={setProgramId} />
+        <SelectField label="Program" value={programId} options={rosterPrograms.map((item) => ({ label: `${item.code} · ${item.name}`, value: item.id }))} onChange={setProgramId} placeholder={rosterPrograms.length ? 'Select a program' : 'No programs in this class department'} />
         <View style={styles.formGrid}>
           <View style={{ width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
             <Field label="First name" value={form.firstName} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={(value) => setForm({ ...form, firstName: value })} />
@@ -1532,10 +1545,11 @@ Requirements:
           </View>
           <SelectField label="Year level" value={form.yearLevel} options={yearLevels.map((item) => ({ label: item.label, value: String(item.level) }))} onChange={(value) => setForm({ ...form, yearLevel: value })} />
         </View>
-        <Button label="Add to roster" loading={saving} disabled={Boolean(studentIdError)} onPress={() => void add()} />
+        <Button label="Add to roster" loading={saving} disabled={!rosterProgramIsValid || Boolean(studentIdError)} onPress={() => void add()} />
       </Dialog>
       <Dialog visible={editOpen} title="Edit student details" onClose={() => { setEditOpen(false); resetForm(); }}>
-        <SelectField label="Program" value={programId} options={props.references.programs.map((item) => ({ label: `${item.code} · ${item.name}`, value: item.id }))} onChange={setProgramId} />
+        <SelectField label="Program" value={programId} options={rosterPrograms.map((item) => ({ label: `${item.code} · ${item.name}`, value: item.id }))} onChange={setProgramId} placeholder={rosterPrograms.length ? 'Select a program' : 'No programs in this class department'} />
+        {editingStudent && !rosterPrograms.some((item) => item.id === editingStudent.programId) ? <Text style={styles.help}>The student’s current program is outside this class’s department. Choose the correct program before saving.</Text> : null}
         <View style={styles.formGrid}>
           <View style={{ width: '100%', flexDirection: 'row', flexWrap: 'wrap', gap: 12 }}>
             <Field label="First name" value={form.firstName} containerStyle={{ flex: 1, flexBasis: 120, minWidth: 100 }} onChangeText={(value) => setForm({ ...form, firstName: value })} />
@@ -1549,10 +1563,10 @@ Requirements:
           </View>
           <SelectField label="Year level" value={form.yearLevel} options={yearLevels.map((item) => ({ label: item.label, value: String(item.level) }))} onChange={(value) => setForm({ ...form, yearLevel: value })} />
         </View>
-        <Button label="Save student details" loading={saving} disabled={Boolean(studentIdError)} onPress={() => void saveEdit()} />
+        <Button label="Save student details" loading={saving} disabled={!rosterProgramIsValid || Boolean(studentIdError)} onPress={() => void saveEdit()} />
       </Dialog>
-      <Dialog visible={csvOpen} title="Import roster" onClose={() => setCsvOpen(false)} footer={<View style={styles.dialogFooter}><Button label="Confirm import" loading={saving} disabled={!preview.some((row) => !row.errors.length)} onPress={() => void importRoster()} /></View>}>
-        <SelectField label="Program for imported rows" value={programId} options={props.references.programs.map((item) => ({ label: `${item.code} · ${item.name}`, value: item.id }))} onChange={setProgramId} />
+      <Dialog visible={csvOpen} title="Import roster" onClose={() => setCsvOpen(false)} footer={<View style={styles.dialogFooter}><Button label="Confirm import" loading={saving} disabled={!rosterProgramIsValid || !preview.some((row) => !row.errors.length)} onPress={() => void importRoster()} /></View>}>
+        <SelectField label="Program for imported rows" value={programId} options={rosterPrograms.map((item) => ({ label: `${item.code} · ${item.name}`, value: item.id }))} onChange={setProgramId} placeholder={rosterPrograms.length ? 'Select a program' : 'No programs in this class department'} />
         <Text style={styles.help}>Smart formatting recognizes common headers such as Student Number, Name, Email, Year, and Section. Section names are checked against the selected program and recognized short or institution-wide names are converted to the program format. An official student number is still required; APMS will not invent one.</Text>
         <View style={styles.actions}>
           <Button label="Choose Excel or CSV" variant="secondary" onPress={() => void chooseRosterFile()} />
@@ -1666,8 +1680,73 @@ export function AssessmentDialog({ visible, title, form, saving, onChange, onClo
   </Dialog>;
 }
 
+function attendanceLocalDate(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+}
+function attendanceDateFromString(value: string) {
+  const [year, month, day] = value.split('-').map(Number);
+  return new Date(year, month - 1, day);
+}
+function attendanceWeekStart(date: Date) {
+  const monday = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  monday.setDate(monday.getDate() - (monday.getDay() + 6) % 7);
+  return monday;
+}
+function attendanceTime(minute: number) {
+  const normalized = minute % (24 * 60);
+  const hour = Math.floor(normalized / 60);
+  return `${hour % 12 || 12}:${String(normalized % 60).padStart(2, '0')} ${hour < 12 ? 'AM' : 'PM'}`;
+}
 function Attendance(props: StateProps) {
-  const { user } = useAuth(); const [sessionId, setSessionId] = useState(props.workspace.attendanceSessions[0]?.id ?? ''); const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc'); const [studentQuery, setStudentQuery] = useState(''); const [selectedAttendanceIds, setSelectedAttendanceIds] = useState<string[]>([]); const [statuses, setStatuses] = useState<Record<string, 'present' | 'absent' | 'late' | 'excused'>>({}); const [open, setOpen] = useState(false); const [date, setDate] = useState(new Date().toISOString().slice(0, 10)); const [label, setLabel] = useState('Class session'); const [saving, setSaving] = useState(false); const [page, setPage] = useState(1); const [pageSize, setPageSize] = useState(10);
+  const { user } = useAuth(); const [sessionId, setSessionId] = useState(props.workspace.attendanceSessions[0]?.id ?? ''); const [sortOrder, setSortOrder] = useState<'asc' | 'desc'>('asc'); const [studentQuery, setStudentQuery] = useState(''); const [selectedAttendanceIds, setSelectedAttendanceIds] = useState<string[]>([]); const [statuses, setStatuses] = useState<Record<string, 'present' | 'absent' | 'late' | 'excused'>>({}); const [open, setOpen] = useState(false); const [date, setDate] = useState(attendanceLocalDate(new Date())); const [label, setLabel] = useState('Class session'); const [saving, setSaving] = useState(false); const [page, setPage] = useState(1); const [pageSize, setPageSize] = useState(10);
+  const [attendanceImportOpen, setAttendanceImportOpen] = useState(false);
+  const [attendanceImportFile, setAttendanceImportFile] = useState<string | null>(null);
+  const [attendanceImportPreview, setAttendanceImportPreview] = useState<FacultyAttendanceImportRow[]>([]);
+  const [attendanceImportLoading, setAttendanceImportLoading] = useState(false);
+  const [attendanceImportSaving, setAttendanceImportSaving] = useState(false);
+  const [calendarExpanded, setCalendarExpanded] = useState(false);
+  const [weekStart, setWeekStart] = useState(() => attendanceWeekStart(new Date()));
+  const generatedFor = useRef('');
+  const weekDates = useMemo(() => Array.from({ length: 7 }, (_, index) => {
+    const day = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() + index);
+    return { date: attendanceLocalDate(day), day, weekday: day.getDay() };
+  }), [weekStart]);
+  const scheduledBlocks = useMemo(() => {
+    const ordered = [...props.workspace.classScheduleSlots].sort((a, b) => a.dayOfWeek - b.dayOfWeek || a.componentType.localeCompare(b.componentType) || a.startMinute - b.startMinute);
+    const blocks: { dayOfWeek: number; componentType: 'lecture' | 'laboratory'; startMinute: number; duration: number }[] = [];
+    for (const slot of ordered) {
+      const previous = blocks[blocks.length - 1];
+      if (previous && previous.dayOfWeek === slot.dayOfWeek && previous.componentType === slot.componentType && previous.startMinute + previous.duration === slot.startMinute) previous.duration += 30;
+      else blocks.push({ dayOfWeek: slot.dayOfWeek, componentType: slot.componentType, startMinute: slot.startMinute, duration: 30 });
+    }
+    return blocks;
+  }, [props.workspace.classScheduleSlots]);
+  useEffect(() => {
+    const classId = props.selectedClassId;
+    const termStart = props.workspace.semesterStartsOn;
+    const termEnd = props.workspace.semesterEndsOn;
+    if (!classId || props.workspaceClassId !== classId || props.workspaceLoading || !termStart || !termEnd || !props.workspace.classScheduleSlots.length) return;
+    const scheduleKey = props.workspace.classScheduleSlots.map((slot) => `${slot.dayOfWeek}-${slot.startMinute}-${slot.componentType}`).join(',');
+    const key = `${classId}:${termStart}:${termEnd}:${scheduleKey}`;
+    if (generatedFor.current === key) return;
+    generatedFor.current = key;
+    void ensureClassScheduleAttendanceSessions(classId).then((createdCount) => {
+      if (createdCount) props.refresh();
+    }).catch((cause) => {
+      generatedFor.current = '';
+      props.toast.show(getErrorMessage(cause, 'Could not prepare attendance sessions from the class schedule.'));
+    });
+  }, [props.selectedClassId, props.workspaceClassId, props.workspaceLoading, props.workspace.semesterStartsOn, props.workspace.semesterEndsOn, props.workspace.classScheduleSlots, props.refresh, props.toast]);
+  useEffect(() => {
+    if (!props.workspace.semesterStartsOn || !props.workspace.semesterEndsOn) return;
+    const start = attendanceDateFromString(props.workspace.semesterStartsOn);
+    const end = attendanceDateFromString(props.workspace.semesterEndsOn);
+    const currentWeekEnd = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() + 6);
+    if (currentWeekEnd < start || weekStart > end) setWeekStart(attendanceWeekStart(start));
+  }, [props.workspace.semesterStartsOn, props.workspace.semesterEndsOn, weekStart]);
   useEffect(() => { if (!props.workspace.attendanceSessions.some((item) => item.id === sessionId)) setSessionId(props.workspace.attendanceSessions[0]?.id ?? ''); }, [props.workspace.attendanceSessions, sessionId]);
   const sortedStudents = useMemo(() => {
     const direction = sortOrder === 'asc' ? 1 : -1;
@@ -1691,10 +1770,89 @@ function Attendance(props: StateProps) {
   useEffect(() => { setPage(1); setSelectedAttendanceIds([]); }, [sessionId, sortOrder, props.selectedClassId, props.workspace.students.length]);
   useEffect(() => { setPage(1); }, [studentQuery]);
   const pageIsSelected = pageStudents.length > 0 && pageStudents.every((student) => selectedAttendanceIds.includes(student.enrollmentId));
+  const termStart = props.workspace.semesterStartsOn;
+  const termEnd = props.workspace.semesterEndsOn;
+  const previousWeekStart = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() - 7);
+  const nextWeekStart = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() + 7);
+  const previousWeekEnd = new Date(previousWeekStart.getFullYear(), previousWeekStart.getMonth(), previousWeekStart.getDate() + 6);
+  const canGoPrevious = !termStart || attendanceLocalDate(previousWeekEnd) >= termStart;
+  const canGoNext = !termEnd || attendanceLocalDate(nextWeekStart) <= termEnd;
+  const weekLabel = `${weekDates[0].day.toLocaleDateString('en-PH', { month: 'short', day: 'numeric' })} – ${weekDates[6].day.toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' })}`;
   const toggleAttendancePage = () => setSelectedAttendanceIds((current) => pageIsSelected
     ? current.filter((id) => !pageStudents.some((student) => student.enrollmentId === id))
     : [...new Set([...current, ...pageStudents.map((student) => student.enrollmentId)])]);
   const toggleAttendanceStudent = (id: string) => setSelectedAttendanceIds((current) => current.includes(id) ? current.filter((item) => item !== id) : [...current, id]);
+  const chooseAttendanceImportFile = async () => {
+    setAttendanceImportLoading(true);
+    try {
+      const result = await DocumentPicker.getDocumentAsync({
+        type: ['text/csv', 'text/comma-separated-values', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/vnd.ms-excel'],
+        copyToCacheDirectory: true,
+      });
+      if (result.canceled) return;
+      const asset = result.assets[0];
+      const response = await fetch(asset.uri);
+      const isExcel = /\.(xlsx|xls)$/i.test(asset.name);
+      if (!isExcel && !/\.csv$/i.test(asset.name)) throw new Error('Choose an XLSX or CSV file.');
+      const contexts = await loadFacultyAttendanceImportContexts(props.classes);
+      const preview = isExcel
+        ? previewAttendanceExcel(await response.arrayBuffer(), contexts, props.selectedClassId, sessionId)
+        : previewAttendanceCsv(await response.text(), contexts, props.selectedClassId, sessionId);
+      setAttendanceImportFile(asset.name);
+      setAttendanceImportPreview(preview);
+    } catch (cause) {
+      props.toast.show(getErrorMessage(cause, 'The attendance file could not be read.'));
+    } finally {
+      setAttendanceImportLoading(false);
+    }
+  };
+  const downloadAttendanceTemplate = async () => {
+    const quote = (value: string) => `"${value.replaceAll('"', '""')}"`;
+    const csv = [
+      'student_id,student_name,status',
+      ...props.workspace.students.map((student) => `${quote(formatStudentId(student.institutionalId))},${quote(student.name)},`),
+    ].join('\r\n');
+    if (Platform.OS === 'web') {
+      const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = 'apms-attendance-template.csv';
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } else {
+      await Share.share({ message: csv });
+    }
+    props.toast.show('Attendance CSV template downloaded.');
+  };
+  const importAttendanceFile = async () => {
+    if (!user) return;
+    const validRows = attendanceImportPreview.filter((row) => row.classId && row.sessionId && row.enrollmentId && row.status && !row.errors.length);
+    if (!validRows.length) return;
+    setAttendanceImportSaving(true);
+    let importedCount = 0;
+    try {
+      const rowsBySession = new Map<string, typeof validRows>();
+      for (const row of validRows) rowsBySession.set(row.sessionId!, [...(rowsBySession.get(row.sessionId!) ?? []), row]);
+      for (const [targetSessionId, rows] of rowsBySession) {
+        await saveAttendance(user.id, targetSessionId, rows.map((row) => ({ enrollmentId: row.enrollmentId!, status: row.status! })));
+        importedCount += rows.length;
+      }
+      const rejected = attendanceImportPreview.length - validRows.length;
+      props.toast.show(`Imported ${validRows.length} attendance record${validRows.length === 1 ? '' : 's'}${rejected ? `; ${rejected} row${rejected === 1 ? '' : 's'} skipped` : ''}.`);
+      for (const classId of new Set(validRows.map((row) => row.classId).filter((id): id is string => Boolean(id)))) invalidateFacultyClassWorkspaceCache(user.id, classId);
+      setAttendanceImportOpen(false);
+      setAttendanceImportFile(null);
+      setAttendanceImportPreview([]);
+      setStatuses({});
+      props.refresh();
+    } catch (cause) {
+      props.toast.show(importedCount
+        ? `Imported ${importedCount} records before the next session failed: ${getErrorMessage(cause, 'Could not import attendance.')}`
+        : getErrorMessage(cause, 'Could not import attendance.'));
+    } finally {
+      setAttendanceImportSaving(false);
+    }
+  };
   const markAll = (status: 'present' | 'absent') => {
     const targetIds = selectedAttendanceIds.length ? selectedAttendanceIds : sortedStudents.map((student) => student.enrollmentId);
     setStatuses((current) => ({ ...current, ...Object.fromEntries(targetIds.map((id) => [id, status])) }));
@@ -1702,7 +1860,62 @@ function Attendance(props: StateProps) {
   const create = async () => { if (!user || !props.selectedClassId) return; setSaving(true); try { const id = await createAttendanceSession(props.selectedClassId, user.id, date, label); setSessionId(id); setOpen(false); props.toast.show('Attendance session created.'); props.refresh(); } catch (cause) { props.toast.show(getErrorMessage(cause, 'Session creation failed.')); } finally { setSaving(false); } };
   const save = async () => { if (!user || !sessionId) return; const rows = sortedStudents.map((student) => ({ enrollmentId: student.enrollmentId, status: statuses[student.enrollmentId] ?? props.workspace.attendance[`${sessionId}:${student.enrollmentId}`] ?? 'present' as const })); setSaving(true); try { await saveAttendance(user.id, sessionId, rows); props.toast.show('Attendance saved.'); props.refresh(); } catch (cause) { props.toast.show(getErrorMessage(cause, 'Could not save attendance. Try again.')); } finally { setSaving(false); } };
   return <>
-    <Heading title="Attendance" subtitle="Create a dated session, batch mark the roster, and save authorized attendance records." action={<Button label="Create session" onPress={() => setOpen(true)} />} /><View style={styles.filterRow}><SelectField label="Class" value={props.selectedClassId} options={props.classes.map((item) => ({ label: `${item.code} · ${item.section}`, value: item.id }))} onChange={props.setSelectedClassId} containerStyle={{ flex: 1.1, minWidth: 180, maxWidth: 460 }} /><SelectField label="Attendance session" value={sessionId} options={props.workspace.attendanceSessions.map((item) => ({ label: `${item.date} · ${item.label}`, value: item.id }))} onChange={(value) => { setSessionId(value); setStatuses({}); }} searchable containerStyle={{ flex: 1, minWidth: 180 }} /><SelectField label="Sort by last name" value={sortOrder} options={[{ label: 'A to Z', value: 'asc' }, { label: 'Z to A', value: 'desc' }]} onChange={(value) => setSortOrder(value as 'asc' | 'desc')} containerStyle={{ flex: 0.8, minWidth: 160 }} /></View>
+    <Heading title="Attendance" subtitle="View this week’s class sessions, open a roll call, then record and save attendance." action={<View style={styles.actions}><Button label="Import attendance" variant="secondary" disabled={!props.selectedClassId} onPress={() => setAttendanceImportOpen(true)} /><Button label="Create session" onPress={() => setOpen(true)} /></View>} />
+    <Card style={styles.attendanceCalendarCard}>
+      <Pressable
+        accessibilityRole="button"
+        accessibilityState={{ expanded: calendarExpanded }}
+        accessibilityLabel={`${calendarExpanded ? 'Collapse' : 'Expand'} weekly class calendar`}
+        onPress={() => setCalendarExpanded((expanded) => !expanded)}
+        style={styles.attendanceCalendarHeader}
+      >
+        <View style={styles.attendanceCalendarCopy}>
+          <Text style={styles.cardTitle}>Weekly class calendar</Text>
+          <Text style={styles.attendanceTermName}>{props.workspace.academicTermLabel || 'Academic term unavailable'}</Text>
+          <Text style={styles.help}>{termStart && termEnd ? `${attendanceDateFromString(termStart).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' })} – ${attendanceDateFromString(termEnd).toLocaleDateString('en-PH', { month: 'short', day: 'numeric', year: 'numeric' })}` : 'Term dates unavailable'}</Text>
+        </View>
+        <AppIcon name="chevronDown" size={18} color={colors.textMuted} style={calendarExpanded ? styles.attendanceCalendarChevronExpanded : undefined} />
+      </Pressable>
+      {calendarExpanded && <>
+        <View style={styles.attendanceWeekControls}>
+          <Button compact label="Previous week" variant="secondary" disabled={!canGoPrevious} onPress={() => setWeekStart(previousWeekStart)} />
+          <Text style={styles.attendanceWeekLabel}>{weekLabel}</Text>
+          <Button compact label="Next week" variant="secondary" disabled={!canGoNext} onPress={() => setWeekStart(nextWeekStart)} />
+        </View>
+      {scheduledBlocks.length ? <ScrollView horizontal showsHorizontalScrollIndicator>
+        <View style={styles.attendanceWeekGrid}>
+          {weekDates.map(({ date: sessionDate, day, weekday }) => {
+            const scheduleDayOfWeek = (weekday + 6) % 7;
+            const inTerm = (!termStart || sessionDate >= termStart) && (!termEnd || sessionDate <= termEnd);
+            const dayBlocks = scheduledBlocks.filter((block) => block.dayOfWeek === scheduleDayOfWeek).sort((a, b) => a.startMinute - b.startMinute);
+            return <View key={sessionDate} style={[styles.attendanceWeekDay, { width: 142 }, !inTerm && styles.attendanceOutsideTerm]}>
+              <Text style={styles.attendanceWeekDayName}>{day.toLocaleDateString('en-PH', { weekday: 'short' })}</Text>
+              <Text style={styles.attendanceWeekDayDate}>{day.toLocaleDateString('en-PH', { month: 'short', day: 'numeric' })}</Text>
+              {inTerm ? dayBlocks.map((block) => {
+                const session = props.workspace.attendanceSessions.find((item) => item.date === sessionDate && item.scheduleStartMinute === block.startMinute && item.scheduleComponent === block.componentType);
+                const isSelected = session?.id === sessionId;
+                const endMinute = block.startMinute + block.duration;
+                return <Pressable
+                  key={`${block.componentType}-${block.startMinute}`}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${block.componentType === 'lecture' ? 'Lecture' : 'Lab'} at ${attendanceTime(block.startMinute)} on ${sessionDate}${session ? '' : ', attendance session is being prepared'}`}
+                  disabled={!session}
+                  onPress={() => { if (session) { setSessionId(session.id); setStatuses({}); } }}
+                  style={[styles.attendanceCalendarEvent, block.componentType === 'lecture' ? styles.attendanceLectureEvent : styles.attendanceLabEvent, isSelected && styles.attendanceEventSelected, !session && styles.attendanceEventPending]}
+                >
+                  <Text style={styles.attendanceEventType}>{block.componentType === 'lecture' ? 'LECTURE' : 'LAB'}</Text>
+                  <Text style={styles.attendanceEventTime}>{attendanceTime(block.startMinute)} – {attendanceTime(endMinute)}</Text>
+                  <Text style={styles.attendanceEventSession}>{session ? isSelected ? 'Selected roll call' : 'Open roll call' : 'Preparing session…'}</Text>
+                </Pressable>;
+              }) : <Text style={styles.attendanceOutsideLabel}>Outside term</Text>}
+              {inTerm && !dayBlocks.length ? <Text style={styles.attendanceNoSchedule}>No class scheduled</Text> : null}
+            </View>;
+          })}
+        </View>
+      </ScrollView> : <Text style={styles.help}>This class has no weekly schedule yet. Add one in class management to generate attendance sessions automatically.</Text>}
+      </>}
+    </Card>
+    <View style={styles.filterRow}><SelectField label="Class" value={props.selectedClassId} options={props.classes.map((item) => ({ label: `${item.code} · ${item.section}`, value: item.id }))} onChange={props.setSelectedClassId} containerStyle={{ flex: 1.1, minWidth: 180, maxWidth: 460 }} /><SelectField label="Attendance session" value={sessionId} options={props.workspace.attendanceSessions.map((item) => ({ label: `${item.date} · ${item.label}`, value: item.id }))} onChange={(value) => { setSessionId(value); setStatuses({}); }} searchable containerStyle={{ flex: 1, minWidth: 180 }} /><SelectField label="Sort by last name" value={sortOrder} options={[{ label: 'A to Z', value: 'asc' }, { label: 'Z to A', value: 'desc' }]} onChange={(value) => setSortOrder(value as 'asc' | 'desc')} containerStyle={{ flex: 0.8, minWidth: 160 }} /></View>
     <Card>{sessionId ? <>
       <View style={styles.attendanceToolbar}>
         <View style={styles.flex}><Text style={styles.cardTitle}>Mark attendance</Text><Text style={styles.help}>Everyone defaults to Present. Mark exceptions, then save once.</Text></View>
@@ -1729,6 +1942,28 @@ function Attendance(props: StateProps) {
       <View style={{ marginTop: 12 }}><Button label="Save attendance" loading={saving} onPress={() => void save()} /></View>
     </> : <PageState kind="empty" title="No attendance session" message="Create a session to begin roll call." />}</Card>
     <Dialog visible={open} title="Create attendance session" onClose={() => setOpen(false)}><Field label="Date" value={date} onChangeText={setDate} placeholder="YYYY-MM-DD" /><Field label="Session label" value={label} onChangeText={setLabel} /><Button label="Create session" loading={saving} onPress={() => void create()} /></Dialog>
+    <Dialog
+      visible={attendanceImportOpen}
+      title="Import attendance"
+      onClose={() => { setAttendanceImportOpen(false); setAttendanceImportFile(null); setAttendanceImportPreview([]); }}
+      footer={<View style={styles.dialogFooter}><Button label="Import valid rows" loading={attendanceImportSaving} disabled={!attendanceImportPreview.some((row) => row.sessionId && row.enrollmentId && row.status && !row.errors.length)} onPress={() => void importAttendanceFile()} /></View>}
+    >
+      <Text style={styles.help}>Supports ID or name matching, first/last-name columns in either order, date columns or Date/Status rows, and class/section/term fields. Worksheets can map to different assigned classes. Date headings may include Lecture/Lab and extra text; numeric dates like MM-DD-YYYY use month-day-year order, and YYYY-MM-DD dates are also supported. Ambiguous class, student, or session matches are flagged for review. A file without dates uses the selected session. Matching attendance records are updated.</Text>
+      <View style={styles.actions}>
+        <Button label="Choose XLSX or CSV" variant="secondary" loading={attendanceImportLoading} onPress={() => void chooseAttendanceImportFile()} />
+        <View style={{ display: 'none' }}>
+          <Button label="Download CSV template" variant="ghost" onPress={() => void downloadAttendanceTemplate()} />
+        </View>
+      </View>
+      {attendanceImportFile ? <>
+        <Text style={styles.cardTitle}>{attendanceImportFile}</Text>
+        <Text style={styles.help}>{attendanceImportPreview.length} records found · {attendanceImportPreview.filter((row) => row.sessionId && row.enrollmentId && row.status && !row.errors.length).length} valid · {attendanceImportPreview.filter((row) => row.errors.length).length} invalid</Text>
+        <DataTable
+          columns={['Row', 'Worksheet · Class', 'Date', 'Student', 'Status', 'Validation']}
+          rows={attendanceImportPreview.map((row) => [String(row.rowNumber), `${row.sheetName} · ${row.classLabel}`, row.date, row.studentLabel, row.status ? row.status[0].toUpperCase() + row.status.slice(1) : '—', row.errors.join('; ') || 'Valid'])}
+        />
+      </> : null}
+    </Dialog>
   </>;
 }
 
@@ -2672,8 +2907,10 @@ function Analytics(props: StateProps) {
       categoricalScores: { ...combined.categoricalScores, ...item.workspace.categoricalScores },
       criteria: combined.criteria ?? item.workspace.criteria,
       defaultGradingSystem: combined.defaultGradingSystem ?? item.workspace.defaultGradingSystem,
+      semesterStartsOn: combined.semesterStartsOn ?? item.workspace.semesterStartsOn,
       semesterEndsOn: combined.semesterEndsOn ?? item.workspace.semesterEndsOn,
       evaluationSystem: combined.evaluationSystem ?? item.workspace.evaluationSystem,
+      classScheduleSlots: [...combined.classScheduleSlots, ...item.workspace.classScheduleSlots],
       attendanceSessions: [...combined.attendanceSessions, ...item.workspace.attendanceSessions],
       attendance: { ...combined.attendance, ...item.workspace.attendance },
       evaluations: { ...combined.evaluations, ...item.workspace.evaluations },
