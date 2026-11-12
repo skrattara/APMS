@@ -312,7 +312,7 @@ type GradebookRowFilter = { operator: string; value: string };
 type GradebookFilterTarget = { key: string; label: string; kind: 'text' | 'number' | 'category'; options?: { label: string; value: string }[] };
 type SavedGradebookView = {
   id: string; name: string; studentQuery: string; studentFilter: string; studentSort: string; columnHeaderQuery: string;
-  hideComponentGrades: boolean; hideAssessmentInstanceColumns: boolean; hideNonFinalCalculatedGrades: boolean; hideFinalGradeColumns: boolean;
+  hideComponentGrades: boolean; hideNonPeriodComponentGrades?: boolean; hideAssessmentInstanceColumns: boolean; hideNonFinalCalculatedGrades: boolean; hideFinalGradeColumns: boolean;
   showHierarchyLabels: boolean; hideSingleChildComponentGrades: boolean; calculatedCellDisplay: 'grade' | 'contribution';
   hiddenHeaderLevels: string[]; sectionStates: Record<string, { mode: 'collapsed' | 'hidden'; columnIds: string[]; keepColumnIds: string[] }>;
   rowFilters: Record<string, GradebookRowFilter>; headerSort: { key: string; label: string; direction: 'asc' | 'desc' } | null;
@@ -550,6 +550,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
   const [sectionStates, setSectionStates] = useState<Record<string, { mode: 'collapsed' | 'hidden'; columnIds: string[]; keepColumnIds: string[] }>>({});
   const [hideSingleChildComponentGrades, setHideSingleChildComponentGrades] = useState(false);
   const [hideComponentGrades, setHideComponentGrades] = useState(false);
+  const [hideNonPeriodComponentGrades, setHideNonPeriodComponentGrades] = useState(false);
   const [hideAssessmentInstanceColumns, setHideAssessmentInstanceColumns] = useState(false);
   const [showHierarchyLabels, setShowHierarchyLabels] = useState(false);
   const [hideNonFinalCalculatedGrades, setHideNonFinalCalculatedGrades] = useState(false);
@@ -988,6 +989,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
     }
     if (hideAssessmentInstanceColumns && column.kind === 'assessment') return false;
     if (hideComponentGrades && column.kind === 'component') return false;
+    if (hideNonPeriodComponentGrades && column.kind === 'component' && (column.groupId != null || !column.periodId)) return false;
     if (hideNonFinalCalculatedGrades && ['component', 'group', 'period', 'non_period'].includes(column.kind)) return false;
     if (hideFinalGradeColumns && ['final', 'final_equivalent', 'final_status'].includes(column.kind)) return false;
     return !Object.values(sectionStates).some((section) => section.columnIds.includes(column.id) && (section.mode === 'hidden' || !section.keepColumnIds.includes(column.id)));
@@ -998,7 +1000,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
     const visibleIds = new Set(visible.map((column) => column.id));
     for (const overlay of historyPreviewOverlays) visibleIds.add(overlay.columnId);
     return columns.filter((column) => visibleIds.has(column.id));
-  }, [columns, sectionStates, hideComponentGrades, hideAssessmentInstanceColumns, hideNonFinalCalculatedGrades, hideFinalGradeColumns, normalizedHeaderQuery, historyPreviewOverlays]);
+  }, [columns, sectionStates, hideComponentGrades, hideNonPeriodComponentGrades, hideAssessmentInstanceColumns, hideNonFinalCalculatedGrades, hideFinalGradeColumns, normalizedHeaderQuery, historyPreviewOverlays]);
   useEffect(() => {
     if (Platform.OS !== 'web' || typeof document === 'undefined') return;
     let style = document.getElementById('gradebook-hover-styles') as HTMLStyleElement | null;
@@ -1350,7 +1352,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
     const view: SavedGradebookView = {
       id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`, name,
       studentQuery: props.studentQuery, studentFilter: props.studentFilter, studentSort: props.studentSort, columnHeaderQuery,
-      hideComponentGrades, hideAssessmentInstanceColumns, hideNonFinalCalculatedGrades, hideFinalGradeColumns,
+      hideComponentGrades, hideNonPeriodComponentGrades, hideAssessmentInstanceColumns, hideNonFinalCalculatedGrades, hideFinalGradeColumns,
       showHierarchyLabels, hideSingleChildComponentGrades, calculatedCellDisplay,
       hiddenHeaderLevels: [...hiddenHeaderLevels], sectionStates, rowFilters, headerSort,
     };
@@ -1366,6 +1368,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
     props.onStudentSort(view.studentSort);
     setColumnHeaderQuery(view.columnHeaderQuery);
     setHideComponentGrades(view.hideComponentGrades);
+    setHideNonPeriodComponentGrades(Boolean(view.hideNonPeriodComponentGrades));
     setHideAssessmentInstanceColumns(view.hideAssessmentInstanceColumns);
     setHideNonFinalCalculatedGrades(view.hideNonFinalCalculatedGrades);
     setHideFinalGradeColumns(view.hideFinalGradeColumns);
@@ -2464,6 +2467,7 @@ export function FullAssessmentView(props: FullAssessmentViewProps) {
               <Text style={styles.fullGradeToggleLabel}>Hide a component grade when it is the only subcomponent under its parent</Text>
             </Pressable>
             {renderViewToggle('Hide component grades', hideComponentGrades, () => setHideComponentGrades((current) => !current))}
+            {renderViewToggle('Hide non-period component grades', hideNonPeriodComponentGrades, () => setHideNonPeriodComponentGrades((current) => !current))}
             {renderViewToggle('Hide all calculated grades except final percentage and point grade', hideNonFinalCalculatedGrades, () => setHideNonFinalCalculatedGrades((current) => !current))}
             {renderViewToggle('Hide final percentage and point grade', hideFinalGradeColumns, () => setHideFinalGradeColumns((current) => !current))}
             <Text style={styles.viewOptionsTitle}>Calculated cells</Text>
