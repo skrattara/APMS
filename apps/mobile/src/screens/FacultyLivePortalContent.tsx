@@ -1882,7 +1882,7 @@ function Attendance(props: StateProps) {
           <Text style={styles.attendanceWeekLabel}>{weekLabel}</Text>
           <Button compact label="Next week" variant="secondary" disabled={!canGoNext} onPress={() => setWeekStart(nextWeekStart)} />
         </View>
-      {scheduledBlocks.length ? <ScrollView horizontal showsHorizontalScrollIndicator>
+      {scheduledBlocks.length ? <ScrollView horizontal showsHorizontalScrollIndicator contentContainerStyle={styles.attendanceWeekScrollContent}>
         <View style={styles.attendanceWeekGrid}>
           {weekDates.map(({ date: sessionDate, day, weekday }) => {
             const scheduleDayOfWeek = (weekday + 6) % 7;
